@@ -1,0 +1,32 @@
+# Settings for Voice Dictation for Linux: hold numpad Del, speak, release, and the text is typed.
+# Language, "Type while speaking" and sounds are switched from the microphone icon in the top bar.
+# Apply changes to this file with:  systemctl --user restart dictate   (or log out and in)
+# Every setting is optional; deleting a line restores its default.
+
+# Speech models in ~/.local/share/dictate/models/: `model` runs on an NVIDIA GPU, `fallback_model`
+# on the CPU when no GPU can be used.
+model = "large-v3-turbo"
+fallback_model = "small"
+beam_size = 5                 # 1 = fastest, 5 = most accurate
+
+# Words Whisper should spell exactly like this (names, jargon). Keep the list short.
+vocabulary = ["Claude", "Claude Code", "GNOME", "Wayland", "Python", "Git", "GitHub", "Linux"]
+
+remove_fillers = true         # drop "um", "uh", "erm" (and "ehm", "eee" in Slovak)
+trailing_space = true         # end each dictation with a space so the next one doesn't stick to it
+restore_clipboard = true      # put back whatever you had copied after the text is typed
+paste_chunk_chars = 750       # paste long text in parts so Claude Code shows it inline (0 = off)
+sound_volume = 0.5            # 0.0 - 1.0 (sounds themselves are switched on/off in the menu)
+
+tail_ms = 200                 # keep recording this long after you let go, so the last word isn't cut off
+max_seconds = 300             # safety limit for a single dictation
+
+# "auto" picks "wayland" (GNOME, KDE: global-shortcut portal + /dev/uinput) or "x11" (Cinnamon,
+# XFCE, MATE: X11 key grab + XTEST) from the session type.
+backend = "auto"
+
+# The key. On Wayland it is registered through the desktop's global-shortcut portal: to use a
+# different key change `trigger` (a key name such as "KP_Insert" or "F13") AND give `shortcut_id`
+# a new value (e.g. "push-to-talk-2") so the desktop asks you to approve the new key.
+trigger = "KP_Delete"
+shortcut_id = "push-to-talk"

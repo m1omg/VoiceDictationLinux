@@ -1,0 +1,11 @@
+# Python packages for dictate, installed into ./venv by install.sh.
+faster-whisper==1.2.1
+# Wheel built against CUDA 12.8 without cuDNN; only needs libcublas.so.12 (below).
+ctranslate2==4.8.2
+nvidia-cublas-cu12>=12.8,<13
+# PyAV 19 breaks faster-whisper 1.2.1's file decoding (dictate passes arrays, but stay safe).
+av<19
+jeepney>=0.9,<1
+python-xlib>=0.33,<1
+huggingface-hub>=0.30
+numpy>=2

@@ -1,0 +1,1679 @@
+#!/usr/bin/env python3
+"""dictate: hold numpad Del to talk; your words are typed into the focused app.
+
+Push-to-talk dictation for GNOME on Wayland:
+  hotkey  xdg-desktop-portal GlobalShortcuts (GNOME swallows the key and reports press/release)
+  audio   pw-record (PipeWire); the microphone is open only while the key is held
+  speech  faster-whisper large-v3-turbo kept loaded on the GPU; English, Slovak or auto-detect
+  live    optionally types words while you speak, once two consecutive passes agree on them
+  output  X11 CLIPBOARD + PRIMARY via XWayland, then Shift+Insert from a uinput keyboard
+  menu    a top-bar icon (AppIndicator extension) to switch language, live typing and sounds
+
+Settings: ~/.config/dictate/config.toml. Menu choices: ~/.local/state/dictate/state.json.
+Run with --help for the test modes.
+"""
+from __future__ import annotations
+
+import argparse
+import ctypes
+import fcntl
+import functools
+import glob
+import inspect
+import itertools
+import json
+import logging
+import os
+import queue
+import re
+import secrets
+import select
+import shutil
+import signal
+import struct
+import subprocess
+import sys
+import sysconfig
+import threading
+import time
+import tomllib
+import wave
+from collections import deque
+from dataclasses import dataclass, field
+from pathlib import Path
+from types import SimpleNamespace
+
+import numpy as np
+
+APP_ID = "io.github.m1omg.VoiceDictationLinux"  # replaced by the app_id setting at start-up
+APP_DIR = Path.home() / ".local/share/dictate"
+MODELS_DIR = APP_DIR / "models"
+CONFIG_PATH = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config") / "dictate/config.toml"
+STATE_PATH = Path(os.environ.get("XDG_STATE_HOME") or Path.home() / ".local/state") / "dictate/state.json"
+RUNTIME_DIR = Path(os.environ.get("XDG_RUNTIME_DIR") or f"/run/user/{os.getuid()}")
+RATE = 16000
+STALE_SECONDS = 15
+C_LOCALE = {**os.environ, "LC_ALL": "C"}  # pw-cat parses numbers with the locale (sk uses ",")
+LANGUAGES = {"en": "English", "sk": "Slovenčina", "auto": "Auto-detect (English / Slovak)"}
+AUTO_LANGUAGES = ("en", "sk")
+
+# Keep caches inside APP_DIR even when run by hand (the systemd unit sets these as well).
+os.environ.setdefault("HF_HOME", str(APP_DIR / "cache/hf"))
+os.environ.setdefault("HF_HUB_OFFLINE", "1")
+os.environ.setdefault("CUDA_CACHE_PATH", str(APP_DIR / "cache/nv"))
+os.environ["XDG_CACHE_HOME"] = str(APP_DIR / "cache")  # onnxruntime (VAD) keeps a device id there
+
+log = logging.getLogger("dictate")
+
+DEFAULTS = {
+    "app_id": APP_ID,  # GNOME/KDE remember the approved shortcut under this id (needs <app_id>.desktop)
+    "backend": "auto",  # "auto", "wayland" (GNOME/KDE: portal + uinput) or "x11" (e.g. Cinnamon)
+    "trigger": "KP_Delete",
+    "shortcut_id": "push-to-talk",
+    "model": "large-v3-turbo",
+    "fallback_model": "small",  # used on the CPU when there is no usable GPU (multilingual)
+    "language": "en",  # starting values for the menu choices
+    "live_typing": True,
+    "sounds": True,
+    "beam_size": 5,
+    "vocabulary": ["Claude", "Claude Code", "GNOME", "Wayland", "Python", "Git", "GitHub", "Linux"],
+    "trailing_space": True,
+    "remove_fillers": True,
+    "sound_volume": 0.5,
+    "restore_clipboard": True,
+    "paste_chunk_chars": 750,
+    "tail_ms": 200,
+    "max_seconds": 300,
+}
+
+
+def load_config() -> SimpleNamespace:
+    cfg = dict(DEFAULTS)
+    try:
+        with open(CONFIG_PATH, "rb") as f:
+            user = tomllib.load(f)
+    except FileNotFoundError:
+        user = {}
+    except tomllib.TOMLDecodeError as e:
+        log.error("config: %s is not valid TOML (%s); using defaults", CONFIG_PATH, e)
+        notify("Dictation settings could not be read", f"{CONFIG_PATH}: {e}")
+        user = {}
+    for key, value in user.items():
+        default = DEFAULTS.get(key)
+        if key not in DEFAULTS:
+            log.warning("config: unknown setting %r ignored", key)
+        elif type(value) is not type(default) and not (type(default) is float and type(value) is int):
+            log.warning("config: %r should be a %s; using %r", key, type(default).__name__, default)
+        else:
+            cfg[key] = value
+    return SimpleNamespace(**cfg)
+
+
+class UiState:
+    """Choices made from the top-bar menu (language, live typing, sounds), kept across restarts."""
+
+    def __init__(self, cfg):
+        values = {"language": cfg.language if cfg.language in LANGUAGES else "en",
+                  "live": cfg.live_typing, "sounds": cfg.sounds}
+        try:
+            saved = json.loads(STATE_PATH.read_text())
+        except FileNotFoundError:
+            saved = {}
+        except (OSError, ValueError) as e:
+            log.warning("state: %s is unreadable (%s); using defaults", STATE_PATH, e)
+            saved = {}
+        for key, value in saved.items():
+            if key in values and type(value) is type(values[key]) and (key != "language" or value in LANGUAGES):
+                values[key] = value
+        self._values = values
+        self._lock = threading.Lock()
+        self.listeners: list = []
+
+    @property
+    def language(self) -> str:
+        return self._values["language"]
+
+    @property
+    def live(self) -> bool:
+        return self._values["live"]
+
+    @property
+    def sounds(self) -> bool:
+        return self._values["sounds"]
+
+    def set(self, **changes) -> None:
+        with self._lock:
+            self._values.update(changes)
+            data = json.dumps(self._values, indent=1) + "\n"
+        try:
+            STATE_PATH.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+            tmp = STATE_PATH.with_suffix(".tmp")
+            tmp.write_text(data)
+            tmp.replace(STATE_PATH)
+        except OSError as e:
+            log.warning("state: cannot save %s: %s", STATE_PATH, e)
+        log.info("menu: %s", ", ".join(f"{k}={v}" for k, v in changes.items()))
+        for listener in self.listeners:
+            listener()
+
+
+def notify(summary: str, body: str = "") -> None:
+    """Desktop notification, used only for problems the user should act on."""
+    try:
+        subprocess.Popen(["notify-send", "--app-name=Dictate", "--icon=audio-input-microphone",
+                          f"--hint=string:desktop-entry:{APP_ID}", summary, body],
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except OSError:
+        pass
+
+
+def sleep_offset() -> float:
+    """Grows when the machine suspends (CLOCK_BOOTTIME keeps counting, CLOCK_MONOTONIC stops)."""
+    return time.clock_gettime(time.CLOCK_BOOTTIME) - time.monotonic()
+
+
+def keyboard_repeat() -> tuple[bool, float, float]:
+    """GNOME's key-repeat settings: (enabled, delay s, interval s)."""
+    def get(key):
+        out = subprocess.run(["gsettings", "get", "org.gnome.desktop.peripherals.keyboard", key],
+                             capture_output=True, text=True, timeout=3).stdout.split()
+        return out[-1]
+    try:
+        return get("repeat") == "true", int(get("delay")) / 1000, int(get("repeat-interval")) / 1000
+    except Exception:
+        return True, 0.5, 0.03
+
+
+def single_instance() -> int:
+    fd = os.open(RUNTIME_DIR / "dictate.lock", os.O_RDWR | os.O_CREAT | os.O_CLOEXEC, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        sys.exit("dictate is already running (stop it with: systemctl --user stop dictate)")
+    return fd
+
+
+def dbus_call(conn, msg, timeout=30):
+    from jeepney import HeaderFields, MessageType
+    reply = conn.send_and_get_reply(msg, timeout=timeout)
+    if reply.header.message_type == MessageType.error:
+        raise RuntimeError(f"{reply.header.fields.get(HeaderFields.error_name)}: {reply.body}")
+    return reply.body
+
+
+def screen_locked() -> bool:
+    from jeepney import DBusAddress, new_method_call
+    from jeepney.io.blocking import open_dbus_connection
+    try:
+        with open_dbus_connection("SESSION") as conn:
+            for name in ("org.gnome.ScreenSaver", "org.cinnamon.ScreenSaver", "org.freedesktop.ScreenSaver"):
+                path = "/" + name.replace(".", "/")
+                try:
+                    if dbus_call(conn, new_method_call(DBusAddress(path, name, name), "GetActive"), timeout=2)[0]:
+                        return True
+                except Exception:
+                    continue
+    except Exception as e:
+        log.debug("screensaver query failed: %s", e)
+    return False
+
+
+class Cues:
+    """Short generated tones, played with pw-play without blocking."""
+    TONES = {"start": [(880, 0.07)], "stop": [(587, 0.07)],
+             "error": [(220, 0.09), (0, 0.06), (220, 0.09)]}
+
+    def __init__(self, enabled, volume: float):
+        self.enabled = enabled  # a callable: sounds can be switched from the menu
+        self.dir = RUNTIME_DIR / "dictate-sounds"
+        self.dir.mkdir(mode=0o700, exist_ok=True)
+        for name, parts in self.TONES.items():
+            self._write(self.dir / f"{name}.wav", parts, 0.35 * min(max(volume, 0.0), 1.0))
+
+    @staticmethod
+    def _write(path: Path, parts, amplitude: float, rate=48000):
+        pieces = []
+        for freq, seconds in parts:
+            t = np.arange(int(rate * seconds)) / rate
+            fade = np.minimum(1.0, np.minimum(t, seconds - t) / 0.008)  # 8 ms ramps avoid clicks
+            pieces.append(np.sin(2 * np.pi * freq * t) * fade if freq else np.zeros_like(t))
+        pcm = (np.concatenate(pieces) * amplitude * 32767).astype("<i2")
+        with wave.open(str(path), "wb") as w:
+            w.setnchannels(1)
+            w.setsampwidth(2)
+            w.setframerate(rate)
+            w.writeframes(pcm.tobytes())
+
+    def play(self, name: str) -> None:
+        if self.enabled():
+            try:
+                subprocess.Popen(["pw-play", str(self.dir / f"{name}.wav")], env=C_LOCALE,
+                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            except OSError:
+                pass
+
+
+class VirtualKeyboard:
+    """A uinput keyboard used only to press Shift+Insert (keycodes, so the layout doesn't matter)."""
+    UI_SET_EVBIT, UI_SET_KEYBIT, UI_DEV_SETUP = 0x40045564, 0x40045565, 0x405C5503
+    UI_DEV_CREATE, UI_DEV_DESTROY = 0x5501, 0x5502
+    EV_SYN, EV_KEY, KEY_LEFTSHIFT, KEY_INSERT = 0, 1, 42, 110
+
+    def __init__(self):
+        self.fd = os.open("/dev/uinput", os.O_WRONLY | os.O_NONBLOCK | os.O_CLOEXEC)
+        fcntl.ioctl(self.fd, self.UI_SET_EVBIT, self.EV_KEY)
+        for code in range(1, 120):  # ESC..D are what udev needs to call it a keyboard
+            if code != 116:  # skip KEY_POWER so logind never treats this device as a power button
+                fcntl.ioctl(self.fd, self.UI_SET_KEYBIT, code)
+        setup = struct.pack("HHHH80sI", 0x06, 0x1209, 0xD1C7, 1, b"dictate virtual keyboard", 0)
+        fcntl.ioctl(self.fd, self.UI_DEV_SETUP, setup)
+        fcntl.ioctl(self.fd, self.UI_DEV_CREATE)
+        self.created = time.monotonic()
+        self.lock = threading.Lock()
+
+    def shift_insert(self) -> None:
+        """Press and release Shift+Insert in one write, so no real key event can land in between
+        (a physical key released while our Shift is down would reach GNOME as Shift+key)."""
+        with self.lock:
+            time.sleep(max(0.0, 1.0 - (time.monotonic() - self.created)))  # let mutter adopt the device
+            events = [(self.KEY_LEFTSHIFT, 1), (self.KEY_INSERT, 1), (self.KEY_INSERT, 0), (self.KEY_LEFTSHIFT, 0)]
+            os.write(self.fd, b"".join(struct.pack("llHHi", 0, 0, self.EV_KEY, code, value)
+                                       + struct.pack("llHHi", 0, 0, self.EV_SYN, 0, 0) for code, value in events))
+
+    def close(self) -> None:
+        try:
+            fcntl.ioctl(self.fd, self.UI_DEV_DESTROY)
+            os.close(self.fd)
+        except OSError:
+            pass
+
+
+class XTestKeyboard:
+    """Presses Shift+Insert through the XTEST extension (X11 desktops; no /dev/uinput needed)."""
+
+    def __init__(self):
+        from Xlib import X, XK, display
+        from Xlib.ext import xtest
+        self.X, self.xtest = X, xtest
+        self.d = display.Display()
+        if not self.d.has_extension("XTEST"):
+            raise OSError("the X server has no XTEST extension")
+        self.shift = self.d.keysym_to_keycode(XK.string_to_keysym("Shift_L"))
+        self.insert = self.d.keysym_to_keycode(XK.string_to_keysym("Insert"))
+        self.lock = threading.Lock()
+
+    def shift_insert(self) -> None:
+        X = self.X
+        with self.lock:
+            for kind, code in ((X.KeyPress, self.shift), (X.KeyPress, self.insert),
+                               (X.KeyRelease, self.insert), (X.KeyRelease, self.shift)):
+                self.xtest.fake_input(self.d, kind, code)
+            self.d.sync()
+
+    def close(self) -> None:
+        self.d.close()
+
+
+class SelectionOwner(threading.Thread):
+    """Owns the X11 CLIPBOARD and PRIMARY selections on XWayland.
+
+    mutter bridges X11 selections to Wayland apps without any focus requirement; it's the
+    only focus-free way to set the clipboard on GNOME. Every Xlib call runs on this thread;
+    other threads submit work through call(). Only UTF8_STRING is offered, because offering
+    STRING as well makes mutter mangle accented characters (mutter #5057).
+    """
+
+    def __init__(self, bridged: bool = True):
+        super().__init__(name="x11", daemon=True)
+        self.bridged = bridged  # XWayland: wait until the compositor has picked up our offer
+        self.jobs: queue.Queue = queue.Queue()
+        self.wake_r, self.wake_w = os.pipe()
+        self.connected = threading.Event()
+
+    # --- called from other threads ---------------------------------------------------
+    def call(self, fn, *args, timeout=3.0):
+        if not self.connected.wait(timeout):
+            log.warning("x11: not connected")
+            return None
+        done, box = threading.Event(), {}
+
+        def job():
+            try:
+                box["value"] = fn(*args)
+            except Exception as e:
+                log.warning("x11: %s failed: %r", fn.__name__, e)
+            finally:
+                done.set()
+        self.jobs.put(job)
+        os.write(self.wake_w, b"x")
+        done.wait(timeout)
+        return box.get("value")
+
+    def publish(self, text: str) -> bool:
+        """Put text on CLIPBOARD and PRIMARY; True once mutter has taken over both offers."""
+        return bool(self.call(self._publish, text.encode()))
+
+    def counts(self):
+        return self.call(lambda: (self.data_requests[self.CLIPBOARD], self.data_requests[self.PRIMARY]))
+
+    def wait_served(self, base, timeout: float) -> bool:
+        """Wait for an app to fetch the text after the paste keystroke."""
+        return bool(self.call(self._wait_served, base, timeout, timeout=timeout + 2))
+
+    def read_clipboard(self):
+        return self.call(self._read_clipboard, timeout=5.0)
+
+    def restore_clipboard(self, data: bytes) -> bool:
+        return bool(self.call(self._restore_clipboard, data))
+
+    # --- X thread ----------------------------------------------------------------------
+    def run(self):
+        delay = 1.0
+        while True:
+            try:
+                self._connect()
+                self.connected.set()
+                delay = 1.0
+                while True:
+                    self._pump(lambda: False)  # returns when a job is queued
+                    while True:
+                        try:
+                            job = self.jobs.get_nowait()
+                        except queue.Empty:
+                            break
+                        job()
+            except Exception as e:
+                self.connected.clear()
+                log.warning("x11: %r; reconnecting in %.0f s", e, delay)
+                time.sleep(delay)
+                delay = min(delay * 2, 30)
+
+    def _connect(self):
+        from Xlib import X, Xatom, display
+        self.X, self.Xatom = X, Xatom
+        self.d = display.Display()
+        self.d.set_error_handler(lambda err, *_: log.debug("x11 error: %s", err))
+        atom = self.d.intern_atom
+        self.CLIPBOARD, self.PRIMARY = atom("CLIPBOARD"), Xatom.PRIMARY
+        self.TARGETS, self.UTF8 = atom("TARGETS"), atom("UTF8_STRING")
+        self.TIMESTAMP, self.INCR = atom("TIMESTAMP"), atom("INCR")
+        self.PROP, self.CLOCK = atom("DICTATE_SELECTION"), atom("DICTATE_CLOCK")  # transfer / timestamp
+        self.win = self.d.screen().root.create_window(-10, -10, 1, 1, 0, X.CopyFromParent,
+                                                      event_mask=X.PropertyChangeMask)  # never mapped
+        self.data = {self.CLIPBOARD: b"", self.PRIMARY: b""}
+        self.data_requests = {self.CLIPBOARD: 0, self.PRIMARY: 0}
+        self.owned: dict[int, int] = {}  # selection -> timestamp we took it with
+        self.targets_pending: set[int] = set()
+        self.prop_time = None
+        self.prop_new = False
+        self.notify_event = None
+        self.d.flush()
+
+    def _pump(self, until, deadline=None) -> bool:
+        """Dispatch X events until until() holds. Without a deadline, also return on a new job."""
+        while not until():
+            while self.d.pending_events():
+                self._dispatch(self.d.next_event())
+                if until():
+                    return True
+            timeout = None if deadline is None else deadline - time.monotonic()
+            if timeout is not None and timeout <= 0:
+                return False
+            fds = [self.d.fileno()] + ([self.wake_r] if deadline is None else [])
+            ready, _, _ = select.select(fds, [], [], timeout)
+            if self.wake_r in ready:
+                os.read(self.wake_r, 512)
+                return False
+        return True
+
+    def _dispatch(self, e):
+        X = self.X
+        if e.type == X.SelectionRequest:
+            self._answer(e)
+        elif e.type == X.SelectionClear and e.window.id == self.win.id:
+            self.owned.pop(e.atom, None)
+            self.targets_pending.discard(e.atom)
+        elif e.type == X.PropertyNotify and e.window.id == self.win.id:
+            if e.atom == self.CLOCK:
+                self.prop_time = e.time
+            elif e.atom == self.PROP:
+                self.prop_new = self.prop_new or e.state == X.PropertyNewValue
+        elif e.type == X.SelectionNotify and e.requestor.id == self.win.id:
+            self.notify_event = e
+
+    def _answer(self, e):
+        from Xlib.protocol import event
+        prop, ok = e.property or e.target, False  # obsolete requestors pass no property
+        if e.selection in self.owned:
+            if e.target == self.TARGETS:
+                e.requestor.change_property(prop, self.Xatom.ATOM, 32, [self.TARGETS, self.UTF8, self.TIMESTAMP])
+                self.targets_pending.discard(e.selection)
+                ok = True
+            elif e.target == self.UTF8:
+                e.requestor.change_property(prop, self.UTF8, 8, self.data[e.selection])
+                self.data_requests[e.selection] += 1
+                ok = True
+            elif e.target == self.TIMESTAMP:
+                e.requestor.change_property(prop, self.Xatom.INTEGER, 32, [self.owned[e.selection]])
+                ok = True
+        e.requestor.send_event(event.SelectionNotify(time=e.time, requestor=e.requestor, selection=e.selection,
+                                                     target=e.target, property=prop if ok else self.X.NONE))
+        self.d.flush()
+
+    def _server_time(self) -> int:
+        """A real server timestamp (ICCCM forbids CurrentTime for taking selections)."""
+        self.prop_time = None
+        self.win.change_property(self.CLOCK, self.Xatom.STRING, 8, b"", self.X.PropModeAppend)
+        self.d.flush()
+        self._pump(lambda: self.prop_time is not None, time.monotonic() + 0.3)
+        return self.prop_time or self.X.CurrentTime
+
+    def _own(self, selection: int, data: bytes, when: int):
+        self.data[selection] = data
+        self.data_requests[selection] = 0
+        self.win.set_selection_owner(selection, when)
+        self.owned[selection] = when
+
+    def _publish(self, data: bytes) -> bool:
+        when = self._server_time()
+        selections = (self.CLIPBOARD, self.PRIMARY)
+        for selection in selections:
+            self._own(selection, data, when)
+        self.d.flush()
+        mine = {s for s in selections if getattr(self.d.get_selection_owner(s), "id", 0) == self.win.id}
+        if len(mine) != len(selections):
+            return False
+        if not self.bridged:  # plain X11: apps ask us directly when they paste
+            return True
+        # mutter fetches TARGETS from a new owner before Wayland apps see the new offer.
+        self.targets_pending = set(selections)
+        if not self._pump(lambda: not self.targets_pending, time.monotonic() + 0.4):
+            return False
+        # mutter's clipboard manager copies new CLIPBOARD text right away; let that request
+        # pass so it isn't mistaken for the paste.
+        self._pump(lambda: self.data_requests[self.CLIPBOARD] > 0, time.monotonic() + 0.15)
+        return True
+
+    def _wait_served(self, base, timeout: float) -> bool:
+        current = lambda: (self.data_requests[self.CLIPBOARD], self.data_requests[self.PRIMARY])
+        return self._pump(lambda: current() != base, time.monotonic() + timeout)
+
+    def _read_clipboard(self, timeout=0.3):
+        """The current CLIPBOARD text as bytes, or None (empty, not text, or owner not answering)."""
+        if self.CLIPBOARD in self.owned:
+            return self.data[self.CLIPBOARD]
+        when = self._server_time()
+        self.win.delete_property(self.PROP)
+        self.notify_event = None
+        self.win.convert_selection(self.CLIPBOARD, self.UTF8, self.PROP, when)
+        self.d.flush()
+        answered = lambda: self.notify_event is not None and self.notify_event.selection == self.CLIPBOARD
+        if not self._pump(answered, time.monotonic() + timeout) or self.notify_event.property == self.X.NONE:
+            return None
+        prop = self.win.get_full_property(self.PROP, self.X.AnyPropertyType)
+        if prop is None:
+            return None
+        if prop.property_type != self.INCR:
+            self.win.delete_property(self.PROP)
+            self.d.flush()
+            return bytes(prop.value)
+        # Large contents arrive incrementally (ICCCM INCR): delete, wait for a chunk, repeat.
+        data, deadline = bytearray(), time.monotonic() + 3.0
+        while True:
+            self.prop_new = False
+            self.win.delete_property(self.PROP)
+            self.d.flush()
+            if not self._pump(lambda: self.prop_new, deadline):
+                return None
+            chunk = self.win.get_full_property(self.PROP, self.X.AnyPropertyType)
+            if chunk is None or not len(chunk.value):
+                self.win.delete_property(self.PROP)
+                self.d.flush()
+                return bytes(data)
+            data += bytes(chunk.value)
+
+    def _restore_clipboard(self, data: bytes) -> bool:
+        if self.CLIPBOARD not in self.owned:  # the user copied something meanwhile; keep it
+            return False
+        self._own(self.CLIPBOARD, data, self._server_time())
+        self.d.flush()
+        return True
+
+
+class NotApproved(Exception):
+    pass
+
+
+class PortalShortcut(threading.Thread):
+    """The push-to-talk key, via the xdg-desktop-portal GlobalShortcuts interface.
+
+    GNOME grabs the key (apps never see it) and reports press and release. The first bind of
+    a new shortcut id shows GNOME's "Add Keyboard Shortcuts" dialog; later binds are silent.
+    """
+
+    def __init__(self, cfg, emit):
+        super().__init__(name="portal", daemon=True)
+        self.cfg, self.emit = cfg, emit
+
+    def run(self):
+        delay = 1.0
+        while True:
+            started = time.monotonic()
+            try:
+                self._session()
+            except NotApproved as e:
+                self.emit("not_approved", str(e))
+                return
+            except Exception as e:
+                log.warning("portal: %s", e)
+            self.emit("key_lost")
+            delay = 1.0 if time.monotonic() - started > 60 else min(delay * 2, 30)
+            time.sleep(delay)
+
+    def _session(self):
+        from jeepney import DBusAddress, HeaderFields, MatchRule, new_method_call
+        from jeepney.bus_messages import message_bus
+        from jeepney.io.blocking import open_dbus_connection
+
+        desktop = DBusAddress("/org/freedesktop/portal/desktop", bus_name="org.freedesktop.portal.Desktop")
+        shortcuts = desktop.with_interface("org.freedesktop.portal.GlobalShortcuts")
+        field_of = lambda msg, name: msg.header.fields.get(getattr(HeaderFields, name))
+        restarted = lambda msg: field_of(msg, "member") == "NameOwnerChanged" and msg.body[1] != ""
+
+        with open_dbus_connection("SESSION") as conn:
+            def subscribe(q, arg0=None, **match):
+                rule = MatchRule(type="signal", **match)
+                if arg0 is not None:
+                    rule.add_arg_condition(0, arg0)
+                conn.filter(rule, queue=q)
+                dbus_call(conn, message_bus.AddMatch(rule))
+
+            # Must be the first portal call on this connection: it gives us an app id.
+            registry = desktop.with_interface("org.freedesktop.host.portal.Registry")
+            dbus_call(conn, new_method_call(registry, "Register", "sa{sv}", (APP_ID, {})))
+
+            sender = conn.unique_name.lstrip(":").replace(".", "_")
+            responses, signals = deque(), deque(maxlen=1000)
+            subscribe(responses, interface="org.freedesktop.portal.Request", member="Response",
+                      path_namespace=f"/org/freedesktop/portal/desktop/request/{sender}")
+            for member in ("Activated", "Deactivated"):
+                subscribe(signals, interface="org.freedesktop.portal.GlobalShortcuts", member=member,
+                          path=desktop.object_path)
+            for name in ("org.freedesktop.portal.Desktop", "org.freedesktop.impl.portal.desktop.gnome"):
+                subscribe(signals, arg0=name, sender="org.freedesktop.DBus", interface="org.freedesktop.DBus",
+                          member="NameOwnerChanged", path="/org/freedesktop/DBus")
+
+            def request(method, signature, args, options=None):
+                opts = dict(options or {}, handle_token=("s", "dictate_" + secrets.token_hex(6)))
+                (handle,) = dbus_call(conn, new_method_call(shortcuts, method, signature, (*args, opts)))
+                while True:  # may wait for a while if GNOME shows its dialog
+                    try:
+                        msg = conn.recv_until_filtered(responses, timeout=1.0)
+                    except TimeoutError:
+                        if any(restarted(m) for m in signals):
+                            raise RuntimeError("the portal restarted")
+                        continue
+                    if field_of(msg, "path") == handle:
+                        return msg.body
+
+            code, results = request("CreateSession", "a{sv}", (),
+                                    {"session_handle_token": ("s", "dictate_" + secrets.token_hex(6))})
+            if code != 0:
+                raise RuntimeError(f"CreateSession failed (response {code})")
+            session = results["session_handle"][1]
+            subscribe(signals, interface="org.freedesktop.portal.Session", member="Closed", path=session)
+
+            asked = time.monotonic()
+            wanted = {"description": ("s", "Hold to dictate"), "preferred_trigger": ("s", self.cfg.trigger)}
+            code, results = request("BindShortcuts", "oa(sa{sv})sa{sv}",
+                                    (session, [(self.cfg.shortcut_id, wanted)], ""))
+            if code != 0:
+                if time.monotonic() - asked > 1.5:  # a person answered the dialog
+                    raise NotApproved("the keyboard shortcut was not approved")
+                raise RuntimeError(f"BindShortcuts failed (response {code})")
+            bound = dict(results.get("shortcuts", ("", []))[1])
+            trigger = bound.get(self.cfg.shortcut_id, {}).get("trigger_description", ("s", "?"))[1]
+            log.info("push-to-talk key bound: %s", trigger)
+            self.emit("key_ready", trigger)
+
+            while True:
+                msg = conn.recv_until_filtered(signals)
+                member = field_of(msg, "member")
+                if member in ("Activated", "Deactivated"):
+                    if msg.body[0] == session and msg.body[1] == self.cfg.shortcut_id:
+                        self.emit("press" if member == "Activated" else "release", time.monotonic())
+                elif member == "Closed":
+                    raise RuntimeError("the portal closed our session")
+                elif restarted(msg):
+                    raise RuntimeError(f"{msg.body[0]} restarted")
+
+
+class X11Hotkey(threading.Thread):
+    """The push-to-talk key on an X11 desktop (e.g. Cinnamon on LMDE).
+
+    A passive grab on the root window catches the press and keeps it from apps. X11 then gives
+    us the whole keyboard until the key is released, which would swallow our own Shift+Insert,
+    so the grab is handed back at once and the release is found by polling the key state.
+    Auto-repeat is switched off for this one key so it can't leak into apps while held.
+    """
+
+    def __init__(self, cfg, emit):
+        super().__init__(name="x11-key", daemon=True)
+        self.cfg, self.emit = cfg, emit
+
+    def run(self):
+        from Xlib import X, XK, display, error
+        try:
+            d = display.Display()
+            root = d.screen().root
+            code = d.keysym_to_keycode(XK.string_to_keysym(self.cfg.trigger))
+            if not code:
+                raise RuntimeError(f"no key on this keyboard produces {self.cfg.trigger}")
+            catch = error.CatchError(error.BadAccess)
+            for mods in (0, X.Mod2Mask, X.LockMask, X.Mod2Mask | X.LockMask):  # NumLock / CapsLock on or off
+                root.grab_key(code, mods, True, X.GrabModeAsync, X.GrabModeAsync, onerror=catch)
+            d.change_keyboard_control(key=code, auto_repeat_mode=X.AutoRepeatModeOff)
+            d.sync()
+            if catch.get_error():
+                raise RuntimeError(f"another program already uses {self.cfg.trigger}")
+        except Exception as e:
+            self.emit("fatal", f"The dictation key could not be set up: {e}")
+            return
+        log.info("push-to-talk key grabbed: %s (X11)", self.cfg.trigger)
+        self.emit("key_ready", self.cfg.trigger)
+        while True:
+            e = d.next_event()
+            if e.type != X.KeyPress or e.detail != code:
+                continue
+            d.ungrab_keyboard(X.CurrentTime)  # let our Shift+Insert reach the app while the key is held
+            d.flush()
+            self.emit("press", time.monotonic())
+            while d.query_keymap()[code // 8] & (1 << (code % 8)):
+                time.sleep(0.02)
+            self.emit("release", time.monotonic())
+
+
+class Recorder:
+    """16 kHz mono float32 from the default PipeWire source, via pw-record. One per key press."""
+
+    def __init__(self, emit):
+        self.emit = emit
+        self.proc = None
+        self.reader = None
+        self.buf = bytearray()
+        self.t_first = None
+
+    def start(self) -> None:
+        self.buf, self.t_first = bytearray(), None
+        if shutil.which("pw-record"):
+            command = ["pw-record", "--raw", "--rate=16000", "--channels=1", "--format=f32", "--latency=20ms",
+                       "-P", '{ application.name = "Dictate", node.description = "Dictation" }', "-"]
+        else:  # PulseAudio systems
+            command = ["parecord", "--raw", "--format=float32le", "--rate=16000", "--channels=1",
+                       "--latency-msec=20", "--client-name=Dictate"]
+        self.proc = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, env=C_LOCALE)
+        self.reader = threading.Thread(target=self._read, args=(self.proc, self.buf), name="audio", daemon=True)
+        self.reader.start()
+
+    def _read(self, proc, buf: bytearray) -> None:
+        while chunk := proc.stdout.read1(65536):
+            if self.t_first is None:
+                self.t_first = time.monotonic()
+                self.emit("first_audio", self.t_first)
+            buf += chunk
+
+    def seconds(self) -> float:
+        return len(self.buf) / 4 / RATE
+
+    def snapshot(self) -> np.ndarray:
+        """Everything recorded so far (the recording keeps going)."""
+        data = bytes(self.buf)
+        return np.frombuffer(data[: len(data) // 4 * 4], dtype="<f4").copy()
+
+    def stop(self) -> np.ndarray:
+        proc, self.proc = self.proc, None
+        if proc is None:
+            return np.zeros(0, np.float32)
+        proc.send_signal(signal.SIGINT)
+        try:
+            proc.wait(timeout=1)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait()
+        self.reader.join(timeout=1)
+        return self.snapshot()
+
+
+def preload_cublas() -> list[str]:
+    """Load the pip-installed cuBLAS so ctranslate2 finds it without LD_LIBRARY_PATH."""
+    site = sysconfig.get_paths()["purelib"]
+    loaded = []
+    for lib in ("libcublasLt.so.12", "libcublas.so.12"):  # Lt first: libcublas depends on it
+        hits = glob.glob(f"{site}/nvidia/**/{lib}", recursive=True)
+        if hits:
+            ctypes.CDLL(hits[0], mode=ctypes.RTLD_GLOBAL)
+            loaded.append(hits[0])
+    return loaded
+
+
+class Transcriber:
+    def __init__(self, cfg):
+        self.cfg = cfg
+        self.model = self.batched = None
+        self.desc = "not loaded"
+        self.ready = threading.Event()
+        # hotwords are added to every 30 s window (initial_prompt only reaches the first one)
+        self.hotwords = ", ".join(cfg.vocabulary) + "." if cfg.vocabulary else None
+
+    def load(self) -> None:
+        self.ready.clear()
+        preload_cublas()
+        from faster_whisper import BatchedInferencePipeline, WhisperModel
+        ladder = [("cuda", "float16", self.cfg.model), ("cuda", "int8_float16", self.cfg.model),
+                  ("cpu", "int8", self.cfg.fallback_model)]
+        for device, compute_type, name in ladder:
+            path = MODELS_DIR / name
+            if not (path / "model.bin").exists():
+                log.warning("model %s is missing", path)
+                continue
+            started = time.monotonic()
+            try:
+                model = WhisperModel(str(path), device=device, compute_type=compute_type,
+                                     cpu_threads=6 if device == "cpu" else 0)
+                warmup = np.random.default_rng(0).standard_normal(RATE).astype(np.float32) * 0.01
+                list(model.transcribe(warmup, language="en", beam_size=1, max_new_tokens=8,
+                                      without_timestamps=True)[0])
+            except Exception as e:
+                log.warning("loading %s on %s/%s failed: %s", name, device, compute_type, e)
+                continue
+            self.model, self.batched = model, BatchedInferencePipeline(model)
+            self.desc = f"{name} on {device}/{compute_type}"
+            log.info("model ready: %s (%.1f s)", self.desc, time.monotonic() - started)
+            if device == "cpu":
+                notify("Dictation is running on the CPU",
+                       "The GPU could not be used, so a smaller, less accurate model is active.")
+            self.ready.set()
+            return
+        raise RuntimeError("no Whisper model could be loaded")
+
+    def run(self, audio: np.ndarray, language: str, *, words=False, prompt=None, beam_size=None,
+            hotwords=True) -> list:
+        """One model pass; returns the segments (with word timings if words=True). Vocabulary
+        hints are left out for very short audio, where whisper tends to just echo them."""
+        peak = float(np.abs(audio).max()) if audio.size else 0.0
+        if 1e-4 <= peak < 0.3:
+            audio = audio * min(0.9 / peak, 10.0)  # lift quiet input
+        batched = len(audio) > 30 * RATE and not words
+        fn = self.batched.transcribe if batched else self.model.transcribe
+        opts = dict(language=language, beam_size=beam_size or self.cfg.beam_size, vad_filter=True,
+                    condition_on_previous_text=False, without_timestamps=not words, word_timestamps=words,
+                    hotwords=self.hotwords if hotwords else None, initial_prompt=prompt)
+        if batched:
+            opts["batch_size"] = 8
+        accepted = inspect.signature(fn).parameters
+        segments, _info = fn(audio, **{k: v for k, v in opts.items() if k in accepted})
+        return list(segments)
+
+    def detect(self, audio: np.ndarray, allowed=AUTO_LANGUAGES) -> tuple[str, float]:
+        """The most likely of the allowed languages (whisper alone might say Czech or Polish) and
+        its share of their combined probability."""
+        try:
+            probs = dict(self.model.detect_language(audio, vad_filter=True)[2])
+        except Exception as e:
+            log.debug("language detection failed: %s", e)
+            return allowed[0], 0.0
+        best = max(allowed, key=lambda lang: probs.get(lang, 0.0))
+        return best, probs.get(best, 0.0) / (sum(probs.get(lang, 0.0) for lang in allowed) or 1.0)
+
+
+_FILLERS = {"en": r"(?:u+h+m*|u+m+|e+r+m+)",  # um, umm, uh, uhh, uhm, erm (not "uh-oh", "umbrella")
+            "sk": r"(?:e+h*m+|e{3,}|h+m+)"}  # ehm, eee, hmm
+
+
+@functools.lru_cache(maxsize=None)
+def _filler_regexes(language: str):
+    word = _FILLERS.get(language, _FILLERS["en"])
+    f = word + r"(?![\w'’-])"
+    return (re.compile(rf"(^|[.!?…]\s+)(?:{f},?\s*)+", re.IGNORECASE),  # "Um, uh, so" at a sentence start
+            re.compile(rf",\s+{f},(?=\s)", re.IGNORECASE),  # "I, um, think"
+            re.compile(rf"\s*(?<![\w'’-]){f},?", re.IGNORECASE),  # "I think um maybe"
+            re.compile(rf"{word}[,.!?…]*", re.IGNORECASE))  # a whole word (live typing)
+
+
+def _drop_fillers(text: str, language: str = "en") -> str:
+    start, middle, anywhere, _ = _filler_regexes(language)
+    cleaned = start.sub(lambda m: m.group(1) + "\0", text)  # \0 marks "capitalize next"
+    cleaned = anywhere.sub("", middle.sub("", cleaned))
+    cleaned = re.sub(r"\0\s*(\w)", lambda m: m.group(1).upper(), cleaned).replace("\0", "")
+    if cleaned == text:
+        return text
+    cleaned = re.sub(r"\s+([,.!?…;:])", r"\1", cleaned)  # no space before punctuation
+    cleaned = re.sub(r",(?=[.!?…])", "", cleaned)  # ",." -> "."
+    cleaned = re.sub(r"^[\s,.;:]+", "", cleaned)
+    return " ".join(cleaned.split())
+
+
+def clean_text(text: str, cfg, language: str = "en") -> str:
+    """One tidy line: no control characters (no Enter or ESC reaches a terminal), no um/uh."""
+    text = " ".join("".join(ch if ch.isprintable() else " " for ch in text).split())
+    if cfg.remove_fillers:
+        text = _drop_fillers(text, language)
+    if text and cfg.trailing_space:
+        text += " "
+    return text
+
+
+class LiveText:
+    """The text typed live for one dictation, built word by word: one line, no fillers."""
+
+    def __init__(self, cfg):
+        self.cfg = cfg
+        self.typed = ""
+        self.capitalize = False
+
+    def add(self, words, language: str, final=False) -> str:
+        filler = _filler_regexes(language)[3]
+        piece = ""
+        for _start, _end, word in words:
+            word = "".join(ch for ch in word if ch.isprintable()).strip()
+            if not word:
+                continue
+            so_far = (self.typed + piece).rstrip()
+            if self.cfg.remove_fillers and filler.fullmatch(word):
+                self.capitalize = self.capitalize or not so_far or so_far[-1] in ".!?…"
+                continue
+            if self.capitalize or not so_far or so_far[-1] in ".!?…":  # sentence start
+                word, self.capitalize = word[0].upper() + word[1:], False
+            piece += (" " if so_far else "") + word
+        if final and self.cfg.trailing_space and (self.typed + piece):
+            piece += " "
+        self.typed += piece
+        return piece
+
+
+def split_chunks(text: str, limit: int) -> list[str]:
+    """Split at sentence ends so each paste stays below Claude Code's 800-character collapse."""
+    if limit <= 0 or len(text) <= limit:
+        return [text]
+    chunks, current = [], ""
+    for sentence in re.findall(r"[^.!?…]*[.!?…]+\s*|[^.!?…]+\s*$", text):
+        while len(sentence) > limit:  # one huge sentence: cut after a space
+            cut = sentence.rfind(" ", 0, limit) + 1 or limit
+            if current:
+                chunks.append(current)
+                current = ""
+            chunks.append(sentence[:cut])
+            sentence = sentence[cut:]
+        if len(current) + len(sentence) > limit:
+            chunks.append(current)
+            current = ""
+        current += sentence
+    chunks.append(current)
+    return [c for c in chunks if c]
+
+
+def speech_seconds(audio: np.ndarray) -> float:
+    """How long ago speech started in this audio (Silero VAD)."""
+    from faster_whisper.vad import VadOptions, get_speech_timestamps
+    stamps = get_speech_timestamps(audio, VadOptions())
+    return (len(audio) - stamps[0]["start"]) / RATE if stamps else 0.0
+
+
+def _norm(word: str) -> str:
+    return re.sub(r"[^\w]", "", word.lower())
+
+
+class Streamer:
+    """Decides which words of a growing recording are settled enough to type (LocalAgreement).
+
+    Each pass re-transcribes the current window: the audio since the last committed sentence, so
+    whisper hears the whole sentence it is working on. A word is committed once two consecutive
+    passes agree on it and on the word after it, so its punctuation is settled too. Committed
+    text that has left the window is fed back as the prompt, for continuity.
+    """
+    TRIM_AFTER = 15.0  # once the window is this long, drop it up to the last committed sentence
+    FORCE_AFTER = 10.0  # nothing settled for this long: commit everything but the last 3 s
+
+    def __init__(self):
+        self.committed: list[tuple[float, float, str]] = []
+        self.pending: list[tuple[float, float, str]] = []
+        self.window_start = 0.0
+
+    @property
+    def commit_time(self) -> float:
+        return self.committed[-1][1] if self.committed else 0.0
+
+    def prompt(self) -> str | None:
+        return "".join(w[2] for w in self.committed if w[1] <= self.window_start).strip()[-200:] or None
+
+    @property
+    def preview(self) -> str:
+        return "".join(w[2] for w in self.committed + self.pending).strip()
+
+    def words_after_commit(self, segments, offset: float) -> list[tuple[float, float, str]]:
+        words = [(offset + w.start, offset + w.end, w.word) for s in segments for w in (s.words or [])]
+        words = [w for w in words if w[0] > self.commit_time - 0.1]
+        if words and self.committed and abs(words[0][0] - self.commit_time) < 1.0:
+            tail = [_norm(w[2]) for w in self.committed[-5:]]
+            for k in range(min(len(tail), len(words)), 0, -1):  # words heard again at the boundary
+                if tail[-k:] == [_norm(w[2]) for w in words[:k]]:
+                    return words[k:]
+        return words
+
+    def step(self, words, audio_seconds: float) -> list[tuple[float, float, str]]:
+        """Feed one pass's words; returns the words that just became settled."""
+        agree = 0
+        while agree < min(len(words), len(self.pending)) and _norm(words[agree][2]) == _norm(self.pending[agree][2]):
+            agree += 1
+        n = max(agree - 1, 0)  # the last agreed word waits until the word after it agrees too
+        if audio_seconds - self.commit_time > self.FORCE_AFTER:
+            n = max(n, sum(1 for w in words if w[1] < audio_seconds - 3.0))
+        new, self.pending = words[:n], words[n:]
+        self.committed += new
+        if audio_seconds - self.window_start > self.TRIM_AFTER:
+            ends = [w[1] for w in self.committed if w[1] > self.window_start and w[2].rstrip().endswith((".", "?", "!", "…"))]
+            if ends:
+                self.window_start = ends[-1]
+            elif audio_seconds - self.window_start > self.TRIM_AFTER + 10 and self.committed:
+                self.window_start = max(self.window_start, self.commit_time)  # no sentence end in sight
+        return new
+
+
+@dataclass
+class Session:
+    """One press of the key: its recording and everything decided while transcribing it."""
+    id: int
+    rec: Recorder | None
+    mode: str  # "en", "sk" or "auto", as chosen when the key went down
+    live: bool
+    sleep_offset: float
+    t_press: float = 0.0
+    language: str | None = None  # None until auto-detect has decided
+    text: LiveText | None = None
+    streamer: Streamer = field(default_factory=Streamer)
+    passed_at: float = 0.0  # seconds of audio at the last live pass
+    live_ok: bool = True  # switched off for this session if a live pass fails
+    dropped: bool = False
+    audio: np.ndarray | None = None
+    t_release: float = 0.0
+
+
+@dataclass
+class PasteItem:
+    text: str
+    session: Session
+    final: bool
+
+
+class Worker(threading.Thread):
+    """Runs every model pass: live passes while the key is held, the final pass after release."""
+    STEP = 0.4  # seconds of new audio between live passes
+
+    def __init__(self, cfg, transcriber: Transcriber, paster, cues: Cues, topbar):
+        super().__init__(name="transcribe", daemon=True)
+        self.cfg, self.transcriber, self.paster, self.cues, self.topbar = cfg, transcriber, paster, cues, topbar
+        self.cond = threading.Condition()
+        self.active: Session | None = None
+        self.finished: deque = deque()
+
+    def begin(self, session: Session) -> None:
+        with self.cond:
+            self.active = session
+            self.cond.notify()
+
+    def end(self, session: Session, audio: np.ndarray, t_release: float) -> None:
+        session.audio, session.t_release = audio, t_release
+        self.topbar.busy(+1)
+        with self.cond:
+            if self.active is session:
+                self.active = None
+            self.finished.append(session)
+            self.cond.notify()
+
+    def drop(self, session: Session) -> None:
+        with self.cond:
+            if self.active is session:
+                self.active = None
+            session.dropped = True
+            typed = bool(session.text and session.text.typed)
+        if typed:  # live words already went out: let the paster finish the session (clipboard)
+            self.paster.put(PasteItem("", session, final=True))
+
+    def run(self):
+        while True:
+            with self.cond:
+                while not self.finished and not self._live_due():
+                    self.cond.wait(0.1)
+                session, final = (self.finished.popleft(), True) if self.finished else (self.active, False)
+            if final:
+                self.transcriber.ready.wait()
+                try:
+                    self._final(session)
+                finally:
+                    self.topbar.busy(-1)
+            else:
+                try:
+                    self._live(session)
+                except Exception as e:
+                    log.warning("live pass failed: %s", e)
+                    session.live_ok = False
+
+    def _live_due(self) -> bool:
+        s = self.active
+        return (s is not None and s.live_ok and self.transcriber.ready.is_set()
+                and s.rec.seconds() - s.passed_at >= self.STEP)
+
+    def _live(self, s: Session) -> None:
+        audio = s.rec.snapshot()
+        seconds = len(audio) / RATE
+        s.passed_at = seconds
+        if s.language is None:  # auto-detect: Slovak needs ~1.5 s of speech to be told from English
+            speech = speech_seconds(audio)
+            if speech < 1.5:
+                return
+            language, share = self.transcriber.detect(audio)
+            if share < 0.9 and speech < 2.5:
+                return
+            s.language = language
+            log.info("detected language: %s (%.0f%% sure after %.1f s of speech)", language, share * 100, speech)
+            self.topbar.update(detected=language)
+        st = s.streamer
+        start = st.window_start
+        window = audio[int(start * RATE):]
+        if len(window) < RATE:
+            return
+        segments = self.transcriber.run(window, s.language, words=True, prompt=st.prompt(),
+                                        beam_size=None if s.live else 1, hotwords=len(window) >= 2 * RATE)
+        new = st.step(st.words_after_commit(segments, start), seconds)
+        self.topbar.update(preview=st.preview)
+        if s.live and new:
+            with self.cond:
+                if s.dropped:
+                    return
+                piece = s.text.add(new, s.language)
+                if piece:
+                    self.paster.put(PasteItem(piece, s, final=False))
+
+    def _final(self, s: Session) -> None:
+        started = time.monotonic()
+        typed_live = s.live and bool(s.text.typed)
+        try:
+            piece, problem = self._final_text(s, typed_live)
+        except Exception:
+            log.exception("transcription failed")
+            piece, problem = "", "transcription error"
+        seconds = len(s.audio) / RATE
+        if problem:
+            log.info("%s in %.1f s of audio", problem, seconds)
+            self.cues.play("error")
+            if problem == "muted":
+                notify("Microphone is muted", "Only silence was recorded. Check the headset's mute switch.")
+        else:
+            log.info("transcribed %.1f s of %s audio in %.2f s (%d chars%s)", seconds, s.language,
+                     time.monotonic() - started, len(s.text.typed) if typed_live else len(piece),
+                     ", typed live" if typed_live else "")
+            log.debug("text: %r", s.text.typed if typed_live else piece)
+        if piece or typed_live:
+            self.paster.put(PasteItem(piece, s, final=True))
+
+    def _final_text(self, s: Session, typed_live: bool) -> tuple[str, str | None]:
+        audio = s.audio
+        if not typed_live and (not audio.size or float(np.abs(audio).max()) < 1e-4):
+            return "", "muted"
+        if s.language is None:
+            s.language = self.transcriber.detect(audio)[0] if s.mode == "auto" else s.mode
+        if typed_live:  # only the part after the last typed word is left
+            st = s.streamer
+            start = st.window_start
+            window = audio[int(start * RATE):]
+            words = []
+            if len(window) >= RATE // 4:
+                words = st.words_after_commit(self._run(window, s.language, words=True, prompt=st.prompt()), start)
+            return s.text.add(words, s.language, final=True), None
+        segments = self._run(audio, s.language)
+        text = clean_text(" ".join(seg.text.strip() for seg in segments), self.cfg, s.language)
+        return (text, None) if text else ("", "no speech")
+
+    def _run(self, audio, language, **kw):
+        """A model pass that survives a dead CUDA context (e.g. after suspend) by reloading once."""
+        try:
+            return self.transcriber.run(audio, language, **kw)
+        except Exception as e:
+            log.warning("transcription failed (%s); reloading the model", e)
+            self.transcriber.load()
+            return self.transcriber.run(audio, language, **kw)
+
+
+class Paster(threading.Thread):
+    """Types text into the focused app (clipboard + Shift+Insert) and restores the clipboard."""
+
+    def __init__(self, cfg, selection: SelectionOwner, keyboard: VirtualKeyboard | None):
+        super().__init__(name="paste", daemon=True)
+        self.cfg, self.sel, self.kbd = cfg, selection, keyboard
+        self.jobs: queue.Queue = queue.Queue()
+        self.on_inject = lambda: None  # set by the controller (our keystrokes stop the key's auto-repeat)
+        self.saved: dict[int, bytes | None] = {}  # session id -> clipboard text from before it
+        self.diverted: dict[int, tuple[str, str]] = {}  # session id -> (why not typed, text so far)
+        self.live_started: set[int] = set()
+
+    def put(self, item: PasteItem) -> None:
+        self.jobs.put(item)
+
+    def run(self):
+        while True:
+            item = self.jobs.get()
+            try:
+                self.paste(item)
+            except Exception:
+                log.exception("paste failed")
+
+    def _problem(self, item: PasteItem) -> str | None:
+        s = item.session
+        if self.kbd is None:
+            return "/dev/uinput is not available"
+        if screen_locked():
+            return "the screen is locked"
+        if sleep_offset() - s.sleep_offset > 2:
+            return "the computer was asleep"
+        if item.final and s.t_release and time.monotonic() - s.t_release > STALE_SECONDS:
+            return "transcribing took too long"
+        return None
+
+    def paste(self, item: PasteItem) -> None:
+        s = item.session
+        problem = None if s.id in self.diverted else self._problem(item)
+        if problem:
+            self.diverted[s.id] = (problem, "")
+        if s.id in self.diverted:
+            why, text = self.diverted[s.id]
+            self.diverted[s.id] = (why, text + item.text)
+            if item.final:
+                self._give_up(s, *self.diverted.pop(s.id))
+            return
+        if s.id not in self.saved:
+            self.saved[s.id] = self.sel.read_clipboard() if self.cfg.restore_clipboard else None
+        chunks = split_chunks(item.text, self.cfg.paste_chunk_chars) if item.text else []
+        for i, chunk in enumerate(chunks):
+            if not self.sel.publish(chunk):
+                self.diverted[s.id] = ("the clipboard handoff could not be confirmed", "".join(chunks[i:]))
+                if item.final:
+                    self._give_up(s, *self.diverted.pop(s.id))
+                return
+            base = self.sel.counts()
+            self.kbd.shift_insert()
+            self.on_inject()
+            if not self.sel.wait_served(base, 1.5 if item.final else 0.8):
+                log.info("no app fetched the pasted text")
+            if not item.final and s.id not in self.live_started:
+                self.live_started.add(s.id)
+                log.info("first live words typed %.1f s after the key went down", time.monotonic() - s.t_press)
+            if i + 1 < len(chunks):
+                time.sleep(0.15)
+        if not item.final:
+            return
+        if s.t_release:
+            log.info("typed; release -> done %.2f s", time.monotonic() - s.t_release)
+        old = self.saved.pop(s.id, None)
+        if old:  # nothing to restore if the clipboard was empty or held non-text (e.g. an image)
+            time.sleep(0.3)
+            if self.sel.restore_clipboard(old):
+                log.info("restored the previous clipboard (%d bytes)", len(old))
+            else:
+                log.info("clipboard changed meanwhile; not restoring")
+
+    def _give_up(self, s: Session, why: str, text: str) -> None:
+        self.saved.pop(s.id, None)
+        if not text.strip():
+            return
+        log.info("left %d chars on the clipboard: %s", len(text), why)
+        self.sel.publish(text)
+        notify("Dictation copied to the clipboard", f"It was not typed because {why}. Paste it with Ctrl+V.")
+
+
+class Quiet:
+    """Stands in for the top-bar icon in the test modes."""
+
+    def update(self, **changes):
+        pass
+
+    def busy(self, delta):
+        pass
+
+
+class TopBar:
+    """The top-bar icon: shows ready / recording / working / problem plus the language; its menu
+    switches language, live typing and sounds."""
+    ICONS = {"ready": "audio-input-microphone-symbolic", "recording": "media-record-symbolic",
+             "working": "content-loading-symbolic", "problem": "microphone-disabled-symbolic"}
+
+    def __init__(self, ui: UiState):
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        from tray import MenuItem, TrayIcon
+        self.ui, self.MenuItem = ui, MenuItem
+        self.tray = TrayIcon("dictate", "Dictate", self.menu, self.clicked)
+        self.lock = threading.Lock()
+        self.state = {"loading": True, "recording": False, "busy": 0, "problem": None, "detected": None,
+                      "preview": ""}
+        ui.listeners.append(self.changed)
+
+    def start(self) -> None:
+        self.tray.start()
+        self.push()
+
+    def update(self, **changes) -> None:
+        with self.lock:
+            self.state.update(changes)
+        self.push()
+
+    def busy(self, delta: int) -> None:
+        with self.lock:
+            self.state["busy"] += delta
+        self.push()
+
+    def changed(self) -> None:
+        self.tray.refresh_menu()
+        self.push()
+
+    def menu(self) -> list:
+        M, ui = self.MenuItem, self.ui
+        return [M(1, "Hold numpad Del to dictate", enabled=False), M(2, kind="separator"),
+                M(10, LANGUAGES["en"], "radio", ui.language == "en"),
+                M(11, LANGUAGES["sk"], "radio", ui.language == "sk"),
+                M(12, LANGUAGES["auto"], "radio", ui.language == "auto"),
+                M(3, kind="separator"),
+                M(20, "Type while speaking", "check", ui.live),
+                M(21, "Sounds", "check", ui.sounds),
+                M(4, kind="separator"),
+                M(30, "Open settings file"),
+                M(31, "Stop dictation")]
+
+    def clicked(self, item_id: int) -> None:
+        if item_id in (10, 11, 12):
+            self.ui.set(language=("en", "sk", "auto")[item_id - 10])
+        elif item_id == 20:
+            self.ui.set(live=not self.ui.live)
+        elif item_id == 21:
+            self.ui.set(sounds=not self.ui.sounds)
+        elif item_id == 30:
+            subprocess.Popen(["gio", "open", str(CONFIG_PATH)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        elif item_id == 31:
+            if "INVOCATION_ID" in os.environ:  # running as the systemd service
+                subprocess.Popen(["systemctl", "--user", "stop", "dictate.service"])
+            else:  # started directly (e.g. from an autostart entry)
+                os.kill(os.getpid(), signal.SIGTERM)
+
+    def push(self) -> None:
+        with self.lock:
+            s = dict(self.state)
+        language = self.ui.language
+        if s["problem"]:
+            icon, tip = "problem", s["problem"]
+        elif s["loading"]:
+            icon, tip = "working", "Loading the speech model…"
+        elif s["recording"]:
+            icon, tip = "recording", "Listening…"
+        elif s["busy"]:
+            icon, tip = "working", "Transcribing…"
+        else:
+            icon, tip = "ready", "Hold numpad Del to dictate"
+        code = language.upper()
+        if s["recording"]:
+            if language == "auto" and s["detected"]:
+                code = f"AUTO·{s['detected'].upper()}"
+            label = f"● {code}"
+            preview = s["preview"]  # what it hears right now, before it's settled enough to type
+            if preview:
+                label += f"  {'…' if len(preview) > 30 else ''}{preview[-30:]}"
+        else:
+            label = code
+        self.tray.set(icon=self.ICONS[icon], label=label, tooltip=f"{tip}\nLanguage: {LANGUAGES[language]}")
+
+
+class Controller:
+    """Push-to-talk state machine; runs on the main thread.
+
+    GNOME repeats Activated while the key is held and drops Deactivated if a modifier changes
+    mid-hold, so a missing release is inferred once repeats stop (only after repeats have
+    actually been observed, and not after we typed during the hold, which ends the repeat).
+    """
+
+    def __init__(self, cfg, ui: UiState, cues: Cues, worker: Worker, topbar):
+        self.cfg, self.ui, self.cues, self.worker, self.topbar = cfg, ui, cues, worker, topbar
+        self.events: queue.Queue = queue.Queue()
+        self.repeat_on, self.delay, self.interval = keyboard_repeat()
+        self.gap = max(0.6, 10 * self.interval)  # no repeat for this long: the key is up
+        self.state = "IDLE"  # IDLE, HOLD, TAIL (released, recording the tail), WAIT_RELEASE
+        self.session: Session | None = None
+        self.ids = itertools.count(1)
+        self.t_press = self.last = self.t_release = 0.0
+        self.reps = 0
+        self.repeats_seen = False
+        self.last_injection = 0.0
+
+    def emit(self, kind: str, value=None) -> None:
+        self.events.put((kind, value))
+
+    def mark_injection(self) -> None:
+        self.last_injection = time.monotonic()
+
+    def run(self) -> int:
+        while True:
+            try:
+                kind, value = self.events.get(timeout=None if self.state == "IDLE" else 0.03)
+            except queue.Empty:
+                kind = value = None
+            if kind is not None:
+                code = self.handle(kind, value)
+                if code is not None:
+                    return code
+            self.tick(time.monotonic())
+
+    def handle(self, kind: str, value):
+        if kind == "press":
+            t = value
+            if self.state == "IDLE":
+                self._start(t)
+            elif self.state == "TAIL":
+                if t - self.t_release < 0.12:  # key bounce: keep the same recording
+                    self.state, self.last = "HOLD", t
+                else:
+                    self._finish()
+                    self._start(t)
+            elif self.state == "HOLD":
+                limit = self.gap if self.reps else self.delay + 0.25
+                if self.repeat_on and t - self.last > limit and self.last_injection < self.t_press:
+                    log.info("key release was not reported; stopping")  # this is a new press
+                    self._finish()
+                    self.state = "WAIT_RELEASE"
+                else:
+                    self.reps += 1
+                    self.repeats_seen = True
+                self.last = t
+            elif self.state == "WAIT_RELEASE":
+                self.last = t
+        elif kind == "release":
+            if self.state == "HOLD":
+                self.state, self.t_release = "TAIL", value
+                self.cues.play("stop")
+            elif self.state == "WAIT_RELEASE":
+                self.state = "IDLE"
+        elif kind == "first_audio":
+            if self.state == "HOLD":
+                self.cues.play("start")
+            log.debug("microphone live %.0f ms after the key press", (value - self.t_press) * 1000)
+        elif kind == "key_ready":
+            self.topbar.update(problem=None)
+        elif kind == "key_lost":
+            if self.state in ("HOLD", "TAIL"):
+                self._finish()
+            self.state = "IDLE"
+            self.topbar.update(problem="Waiting for the keyboard shortcut…")
+        elif kind == "not_approved":
+            notify("Dictation shortcut was not approved",
+                   "Run 'systemctl --user restart dictate' to see GNOME's dialog again.")
+            return 3
+        elif kind == "fatal":
+            notify("Dictation stopped", str(value))
+            return 1
+        return None
+
+    def tick(self, now: float) -> None:
+        if self.state in ("HOLD", "TAIL") and sleep_offset() - self.session.sleep_offset > 2:
+            log.info("the computer slept during a recording; discarding it")
+            self._discard()
+            self.state = "IDLE"
+        elif self.state == "TAIL" and now - self.t_release >= self.cfg.tail_ms / 1000:
+            self._finish()
+            self.state = "IDLE"
+        elif self.state == "HOLD":
+            silent = now - self.last
+            typed_during_hold = self.last_injection > self.t_press
+            if self.repeat_on and self.repeats_seen and not typed_during_hold and (
+                    (self.reps and silent > self.gap) or (not self.reps and silent > self.delay + 0.4)):
+                log.info("key release was not reported; stopping")
+                self.t_release = self.last + (self.interval if self.reps else self.delay)
+                self._finish(trim_at=self.t_release + self.cfg.tail_ms / 1000)
+                self.state = "IDLE"
+            elif now - self.t_press > self.cfg.max_seconds:
+                log.info("maximum recording length reached")
+                self.t_release = now
+                self._finish()
+                self.state = "WAIT_RELEASE"
+        elif self.state == "WAIT_RELEASE" and now - self.last > max(self.gap, 1.0):
+            self.state = "IDLE"
+
+    def _start(self, t: float) -> None:
+        rec = Recorder(self.emit)
+        try:
+            rec.start()
+        except OSError as e:
+            log.error("cannot start pw-record: %s", e)
+            self.cues.play("error")
+            return
+        mode = self.ui.language
+        self.session = Session(next(self.ids), rec, mode, self.ui.live, sleep_offset(), t_press=t,
+                               language=None if mode == "auto" else mode, text=LiveText(self.cfg))
+        self.state, self.t_press, self.last, self.reps = "HOLD", t, t, 0
+        self.worker.begin(self.session)
+        self.topbar.update(recording=True, detected=None, preview="")
+
+    def _finish(self, trim_at: float | None = None) -> None:
+        s, self.session = self.session, None
+        if s is None:
+            return
+        t_first = s.rec.t_first
+        audio = s.rec.stop()
+        if trim_at is not None and t_first is not None:
+            audio = audio[: max(0, int((trim_at - t_first) * RATE))]
+        self.topbar.update(recording=False)
+        if len(audio) < 0.3 * RATE:
+            log.info("ignored a %.2f s recording", len(audio) / RATE)
+            self.worker.drop(s)
+            return
+        t_release = self.t_release if self.t_release >= self.t_press else time.monotonic()
+        self.worker.end(s, audio, t_release)
+
+    def _discard(self) -> None:
+        s, self.session = self.session, None
+        if s is not None:
+            s.rec.stop()
+            self.worker.drop(s)
+            self.topbar.update(recording=False)
+
+
+def backend(cfg) -> str:
+    if cfg.backend in ("wayland", "x11"):
+        return cfg.backend
+    return "wayland" if os.environ.get("XDG_SESSION_TYPE") == "wayland" else "x11"
+
+
+def run_daemon(cfg) -> int:
+    lock = single_instance()  # noqa: F841 (held for the life of the process)
+    ui = UiState(cfg)
+    topbar = TopBar(ui)
+    topbar.start()
+    cues = Cues(lambda: ui.sounds, cfg.sound_volume)
+    wayland = backend(cfg) == "wayland"
+    selection = SelectionOwner(bridged=wayland)
+    selection.start()
+    try:
+        keyboard = VirtualKeyboard() if wayland else XTestKeyboard()
+    except OSError as e:
+        keyboard = None
+        log.error("cannot create the virtual keyboard: %s", e)
+        notify("Dictation can't type", f"{e}; text will only be copied.")
+    transcriber = Transcriber(cfg)
+    paster = Paster(cfg, selection, keyboard)
+    paster.start()
+    worker = Worker(cfg, transcriber, paster, cues, topbar)
+    worker.start()
+    ctl = Controller(cfg, ui, cues, worker, topbar)
+    paster.on_inject = ctl.mark_injection
+
+    def load_model():
+        try:
+            transcriber.load()
+            topbar.update(loading=False)
+        except Exception as e:
+            log.exception("model loading failed")
+            ctl.emit("fatal", f"The speech model could not be loaded: {e}")
+    threading.Thread(target=load_model, name="model", daemon=True).start()
+    (PortalShortcut if wayland else X11Hotkey)(cfg, ctl.emit).start()
+    try:
+        return ctl.run()
+    finally:
+        if ctl.session:
+            ctl.session.rec.stop()
+        if keyboard:
+            keyboard.close()
+
+
+def run_check(cfg) -> int:
+    ok = True
+
+    def report(name, good, detail=""):
+        nonlocal ok
+        ok = ok and bool(good)
+        print(f"{'ok  ' if good else 'FAIL'} {name}: {detail}")
+
+    report("python", True, f"{sys.version.split()[0]} ({sys.executable})")
+    report("config", True, f"{CONFIG_PATH} ({'found' if CONFIG_PATH.exists() else 'defaults'})")
+    ui = UiState(cfg)
+    report("menu choices", True, f"language={ui.language}, live typing={ui.live}, sounds={ui.sounds}")
+    libs = preload_cublas()
+    report("cuBLAS", len(libs) == 2, ", ".join(Path(p).name for p in libs) or "nvidia-cublas-cu12 not found")
+    import ctranslate2
+    count = ctranslate2.get_cuda_device_count()
+    report("CUDA devices", count > 0, f"{count} (ctranslate2 {ctranslate2.__version__})")
+    for name in (cfg.model, cfg.fallback_model):
+        path = MODELS_DIR / name
+        report(f"model {name}", (path / "model.bin").exists(), str(path))
+    report("backend", True, f"{backend(cfg)} (session type {os.environ.get('XDG_SESSION_TYPE', '?')})")
+    recorder = shutil.which("pw-record") or shutil.which("parecord")
+    report("recorder", recorder is not None, recorder or "install pipewire-bin or pulseaudio-utils")
+    report("/dev/uinput", os.access("/dev/uinput", os.W_OK), "writable" if os.access("/dev/uinput", os.W_OK) else "not writable")
+    try:
+        from Xlib import display
+        d = display.Display()
+        report("XWayland", True, f"{d.get_display_name()}, vendor {d.display.info.vendor}")
+        d.close()
+    except Exception as e:
+        report("XWayland", False, repr(e))
+    try:
+        from jeepney import DBusAddress, Introspectable
+        from jeepney.bus_messages import message_bus
+        from jeepney.io.blocking import open_dbus_connection
+        with open_dbus_connection("SESSION") as conn:
+            portal = DBusAddress("/org/freedesktop/portal/desktop", bus_name="org.freedesktop.portal.Desktop")
+            xml = dbus_call(conn, Introspectable(portal.object_path, portal.bus_name).Introspect())[0]
+            tray_host = dbus_call(conn, message_bus.NameHasOwner("org.kde.StatusNotifierWatcher"))[0]
+        for iface in ("org.freedesktop.host.portal.Registry", "org.freedesktop.portal.GlobalShortcuts"):
+            report(f"portal {iface.rsplit('.', 1)[1]}", f'"{iface}"' in xml, "present" if f'"{iface}"' in xml else "missing")
+        report("top-bar icon host", tray_host, "AppIndicator extension active" if tray_host
+               else "enable the AppIndicator extension to get the menu")
+    except Exception as e:
+        report("D-Bus", False, repr(e))
+    desktop = Path.home() / f".local/share/applications/{APP_ID}.desktop"
+    report("desktop file", desktop.exists(), str(desktop))
+    repeat_on, delay, interval = keyboard_repeat()
+    report("key repeat", True, f"{'on' if repeat_on else 'off'}, delay {delay * 1000:.0f} ms, interval {interval * 1000:.0f} ms")
+    return 0 if ok else 1
+
+
+def run_selftest(cfg, seconds: float, language: str) -> int:
+    rec = Recorder(lambda kind, value=None: None)
+    print(f"Recording for {seconds:.0f} s: speak now...", flush=True)
+    t_start = time.monotonic()
+    rec.start()
+    time.sleep(seconds)
+    audio = rec.stop()
+    transcriber = Transcriber(cfg)
+    started = time.monotonic()
+    transcriber.load()
+    load_time = time.monotonic() - started
+    started = time.monotonic()
+    if language == "auto":
+        language = transcriber.detect(audio)[0]
+    segments = transcriber.run(audio, language)
+    text = clean_text(" ".join(s.text.strip() for s in segments), cfg, language)
+    asr = time.monotonic() - started
+    live = f"{(rec.t_first - t_start) * 1000:.0f} ms" if rec.t_first else "never"
+    db = lambda x: f"{20 * np.log10(max(x, 1e-9)):.0f} dBFS"
+    peak, rms = (float(np.abs(audio).max()), float(np.sqrt(np.mean(audio ** 2)))) if audio.size else (0.0, 0.0)
+    print(f"model: {transcriber.desc} (loaded in {load_time:.1f} s); language: {language}")
+    print(f"microphone live after {live}; {len(audio) / RATE:.1f} s recorded (peak {db(peak)}, rms {db(rms)}); "
+          f"transcribed in {asr:.2f} s")
+    print(f"text: {text!r}" if text else "problem: no speech heard")
+    return 0 if text else 1
+
+
+def run_paste_test(cfg, text: str) -> int:
+    lock = single_instance()  # noqa: F841
+    selection = SelectionOwner()
+    selection.start()
+    keyboard = VirtualKeyboard()
+    paster = Paster(cfg, selection, keyboard)
+    for i in range(5, 0, -1):
+        print(f"Pasting into the focused window in {i}...", flush=True)
+        time.sleep(1)
+    session = Session(0, None, "en", False, sleep_offset(), language="en", t_release=time.monotonic())
+    paster.paste(PasteItem(clean_text(text, cfg), session, final=True))
+    time.sleep(1.0)  # let mutter copy the restored clipboard before we exit
+    keyboard.close()
+    return 0
+
+
+def run_portal_test(cfg, seconds: float) -> int:
+    lock = single_instance()  # noqa: F841
+    events: queue.Queue = queue.Queue()
+    PortalShortcut(cfg, lambda kind, value=None: events.put((kind, value, time.monotonic()))).start()
+    print(f"Binding {cfg.trigger!r}; click Add if GNOME asks. Then press, hold and release the key "
+          f"(listening for {seconds:.0f} s).", flush=True)
+    end, last = time.monotonic() + seconds, None
+    while time.monotonic() < end:
+        try:
+            kind, value, t = events.get(timeout=0.2)
+        except queue.Empty:
+            continue
+        gap = f"+{(t - last) * 1000:.0f} ms" if last is not None else ""
+        print(f"{kind:13} {gap:>10}  {value if kind in ('key_ready', 'not_approved') else ''}", flush=True)
+        last = t
+        if kind == "not_approved":
+            return 3
+    return 0
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="Hold numpad Del to dictate (push-to-talk speech-to-text).")
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--check", action="store_true", help="check GPU, models, microphone tools, X11, portal")
+    mode.add_argument("--selftest", type=float, metavar="SECONDS", help="record and transcribe, print timings")
+    mode.add_argument("--paste-test", metavar="TEXT", help="paste TEXT into the focused window after 5 s")
+    mode.add_argument("--portal-test", type=float, nargs="?", const=30, metavar="SECONDS",
+                      help="bind the key and print press/release events")
+    parser.add_argument("--language", choices=sorted(LANGUAGES), default="en", help="language for --selftest")
+    parser.add_argument("-v", "--verbose", action="store_true", help="debug logging (includes transcripts)")
+    args = parser.parse_args()
+
+    under_systemd = "INVOCATION_ID" in os.environ
+    logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO,
+                        format="%(levelname)s %(message)s" if under_systemd
+                        else "%(asctime)s.%(msecs)03d %(levelname)s %(message)s", datefmt="%H:%M:%S")
+    logging.getLogger("faster_whisper").setLevel(logging.WARNING)
+    signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
+    cfg = load_config()
+    global APP_ID
+    APP_ID = cfg.app_id
+    if args.check:
+        return run_check(cfg)
+    if args.selftest is not None:
+        return run_selftest(cfg, args.selftest, args.language)
+    if args.paste_test is not None:
+        return run_paste_test(cfg, args.paste_test)
+    if args.portal_test is not None:
+        return run_portal_test(cfg, args.portal_test)
+    return run_daemon(cfg)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

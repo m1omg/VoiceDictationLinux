@@ -1,0 +1,4 @@
+__pycache__/
+*.pyc
+# downloaded by tests/fetch_fleurs.py
+tests/fleurs/

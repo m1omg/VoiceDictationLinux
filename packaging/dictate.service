@@ -1,0 +1,20 @@
+[Unit]
+Description=Push-to-talk dictation (hold numpad Del)
+Documentation=file://%h/.local/share/dictate/README.md
+PartOf=graphical-session.target
+After=graphical-session.target
+StartLimitIntervalSec=120
+StartLimitBurst=5
+
+[Service]
+Type=simple
+ExecStart=%h/.local/share/dictate/venv/bin/python -u %h/.local/share/dictate/dictate.py
+Restart=on-failure
+RestartSec=3
+# Exit status 3 = GNOME's shortcut dialog was cancelled; don't keep re-opening it.
+RestartPreventExitStatus=3
+Environment=XDG_CACHE_HOME=%h/.local/share/dictate/cache HF_HOME=%h/.local/share/dictate/cache/hf HF_HUB_OFFLINE=1 CUDA_CACHE_PATH=%h/.local/share/dictate/cache/nv PYTHONDONTWRITEBYTECODE=1
+NoNewPrivileges=yes
+
+[Install]
+WantedBy=graphical-session.target
