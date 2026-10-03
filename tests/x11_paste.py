@@ -145,6 +145,9 @@ try:
 
     combo = hotkey("Ctrl+Alt+D")
     checks.append(("combination Ctrl+Alt+D grabbed", combo.get(timeout=5) == "key_ready"))
+    d_code = keys.keysym_to_keycode(XK.string_to_keysym("d"))
+    checks.append(("D keeps its auto-repeat for typing",
+                   bool(keys.get_keyboard_control().auto_repeats[d_code // 8] & (1 << (d_code % 8)))))
     app.keys.clear()
     tap("Control_L", "Alt_L", "d", release=False)
     checks.append(("combination press reported", combo.get(timeout=2) == "press"))

@@ -34,6 +34,24 @@ check("lone modifier", (T("Control_R").lone_modifier, T("Ctrl+D").lone_modifier,
       (True, False, False))
 check("bad spellings rejected", [fails(t) for t in ("", "Ctrl+", "Hyper+D", "Ctrl+Shift_R", "Ctrl+Dee", "+")],
       [True] * 6)
+keys.ANY_KEYSYM = True  # Linux: any X11 key name on its own, as older settings files may have
+check("Linux: any X11 key name alone", (str(keys.parse("Caps_Lock")), fails("Ctrl+Caps_Lock"), fails("Caps Lock")),
+      ("Caps_Lock", True, True))
+keys.ANY_KEYSYM = False  # Windows, macOS: only keys they have codes for
+check("elsewhere: only the named keys", fails("Caps_Lock"), True)
+keys.ANY_KEYSYM = sys.platform.startswith("linux")
+check("Windows key codes (AltGr turns Ctrl+Alt+D into đ; numpad keys)",
+      [keys.from_windows_vk(vk) for vk in (0x44, 0x37, 0x7C, 0x6E, 0x60, 0x0D)], ["d", "7", "F13", "KP_Delete", "KP_Insert", None])
+check("Windows: the numpad with NumLock off (Delete, Insert, Enter told apart by the extended flag)",
+      [keys.from_windows_vk(vk, ext) for vk, ext in ((0x2E, False), (0x2E, True), (0x2D, False), (0x0D, True))],
+      ["KP_Delete", None, "KP_Insert", "KP_Enter"])
+keys.ANY_KEYSYM = True
+check("Linux: AltGr and XF86 keys can be captured, characters can't",
+      ([keys.from_tk(k) for k in ("ISO_Level3_Shift", "XF86Launch5", "semicolon", "scaron")],
+       keys.label(T("ISO_Level3_Shift"))), (["ISO_Level3_Shift", "XF86Launch5", None, None], "AltGr"))
+keys.ANY_KEYSYM = sys.platform.startswith("linux")
+check("Mac keycodes (Option turns D into ∂; fn)", [keys.from_mac_keycode(c) for c in (0x02, 0x3D, 0x3F, 0x7F)],
+      ["d", "Alt_R", "Fn", None])
 check("typing keys only with a modifier", [fails(t) for t in ("d", "7", "space", "Return", "Delete", "Ctrl+space",
                                                               "Ctrl+D", "Insert")],
       [True, True, True, True, True, False, False, False])
@@ -55,8 +73,8 @@ check("macOS keycodes", (keys.mac(T("Alt_R")), keys.mac(T("KP_Delete")), keys.ma
 check("macOS: right Option's device bit", keys.MAC_DEVICE_BITS["Alt_R"], 0x40)
 check("macOS flags", keys.mac_flags(T("Ctrl+Alt+D")), 0x40000 | 0x80000)
 check("macOS: every letter and digit", all(c in keys.MAC_LETTERS for c in "abcdefghijklmnopqrstuvwxyz0123456789"), True)
-check("Tk keysyms", [keys.from_tk(k) for k in ("KP_Decimal", "Control_R", "Option_R", "D", "F13", "comma", "ž")],
-      ["KP_Delete", "Control_R", "Alt_R", "d", "F13", None, None])
+check("Tk keysyms", [keys.from_tk(k) for k in ("KP_Decimal", "Control_R", "Option_R", "D", "F13", "comma", "ž", "Meta_L")],
+      ["KP_Delete", "Control_R", "Alt_R", "d", "F13", None, None, "Alt_L"])
 
 for name, good, got, want in checks:
     print(f"{'ok  ' if good else 'FAIL'} {name}" + ("" if good else f": got {got!r}, want {want!r}"))

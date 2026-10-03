@@ -20,6 +20,7 @@ import shutil
 import subprocess
 import sys
 import threading
+import time
 import tkinter as tk
 from pathlib import Path
 
@@ -78,21 +79,20 @@ def font(px: int):
 
 
 def wrap(text: str, f, width: int) -> list[str]:
-    """Split text into lines no wider than width (words longer than a line are cut)."""
+    """Split text into lines no wider than width; a word longer than a line (a web address) is cut."""
     lines, line = [], ""
     for word in text.split():
         candidate = f"{line} {word}".strip()
-        if f.getlength(candidate) <= width or not line:
-            while f.getlength(candidate) > width and len(candidate) > 1:  # one huge word
-                cut = len(candidate)
-                while cut > 1 and f.getlength(candidate[:cut]) > width:
-                    cut -= 1
-                lines.append(candidate[:cut])
-                candidate = candidate[cut:]
-            line = candidate
-        else:
+        if line and f.getlength(candidate) > width:
             lines.append(line)
-            line = word
+            candidate = word
+        while f.getlength(candidate) > width and len(candidate) > 1:  # one huge word
+            cut = len(candidate)
+            while cut > 1 and f.getlength(candidate[:cut]) > width:
+                cut -= 1
+            lines.append(candidate[:cut])
+            candidate = candidate[cut:]
+        line = candidate
     if line:
         lines.append(line)
     return lines
@@ -104,26 +104,72 @@ def photo(image: Image.Image) -> tk.PhotoImage:
     return tk.PhotoImage(data=base64.b64encode(buf.getvalue()))
 
 
-def text_image(lines: list[tuple[str, str]], width: int, px: int, bg: str, pad: int) -> Image.Image:
-    """Lines of (text, colour) drawn left-aligned on a width x (as needed) image."""
+def draw_mark(draw: ImageDraw.ImageDraw, mark: str, x: int, y: int, size: int, colour: str, bg: str) -> None:
+    """A choice's mark as a shape, so it shows in every font (many lack ● ○ ☑ ☐ ▸ ✓): "radio:on" a
+    filled ring, "radio:off" an empty one, "check:on" a ticked box, "check:off" an empty box,
+    "dot" a filled circle, "tick" a tick, "" a pointer (a plain button)."""
+    w = max(2, size // 8)
+    box = (x, y, x + size, y + size)
+    if mark.startswith("radio"):
+        draw.ellipse(box, outline=colour, width=w)
+        if mark.endswith(":on"):
+            inset = size // 4
+            draw.ellipse((x + inset, y + inset, x + size - inset, y + size - inset), fill=colour)
+    elif mark.startswith("check"):
+        draw.rectangle(box, outline=colour, width=w)
+        if mark.endswith(":on"):
+            draw_mark(draw, "tick", x + size // 6, y + size // 6, size * 2 // 3, colour, bg)
+    elif mark == "dot":
+        draw.ellipse(box, fill=colour)
+    elif mark == "tick":
+        draw.line([(x, y + size * 0.55), (x + size * 0.38, y + size * 0.9), (x + size, y + size * 0.1)],
+                  fill=colour, width=max(2, size // 5), joint="curve")
+    else:
+        draw.polygon([(x + size * 0.2, y + size * 0.1), (x + size * 0.9, y + size / 2), (x + size * 0.2, y + size * 0.9)],
+                     fill=colour)
+
+
+def text_image(lines: list[tuple[str, str]], width: int, px: int, bg: str, pad: int,
+               mark: str | None = None) -> Image.Image:
+    """Lines of (text, colour) drawn left-aligned on a width x (as needed) image; with a mark, it is
+    drawn before the first line (and every line is indented past it)."""
     f = font(px)
     step = int(px * 1.3)
     image = Image.new("RGB", (width, pad * 2 + step * max(1, len(lines))), bg)
     draw = ImageDraw.Draw(image)
+    indent = mark_width(px) if mark is not None else 0
     for i, (text, colour) in enumerate(lines):
-        draw.text((pad, pad + i * step), text, font=f, fill=colour)
+        draw.text((pad + indent, pad + i * step), text, font=f, fill=colour)
+    if mark is not None and lines:
+        size = int(px * 0.75)
+        ascent = f.getbbox("Hx")
+        draw_mark(draw, mark, pad, pad + (ascent[1] + ascent[3]) // 2 - size // 2, size, lines[0][1], bg)
     return image
 
 
-_monitor: tuple[int, int, int, int] | None = None
+def framed(image: Image.Image, border: int, colour: str) -> Image.Image:
+    """The image inside a frame border pixels wide."""
+    out = Image.new("RGB", (image.width + 2 * border, image.height + 2 * border), colour)
+    out.paste(image, (border, border))
+    return out
+
+
+def mark_width(px: int) -> int:
+    """The room a mark takes before the text."""
+    return int(px * 1.2)
+
+
+_monitor: tuple[float, tuple[int, int, int, int]] | None = None
 
 
 def primary_monitor(root: tk.Tk) -> tuple[int, int, int, int]:
-    """x, y, width, height of the primary monitor's usable area (above the Windows taskbar)."""
+    """x, y, width, height of the primary monitor's usable area (above the Windows taskbar and the
+    macOS Dock), asked again every few seconds (a monitor can be plugged in or out)."""
     global _monitor
-    if _monitor is None:
-        _monitor = _find_primary_monitor(root)
-    return _monitor
+    now = time.monotonic()
+    if _monitor is None or now - _monitor[0] > 5:
+        _monitor = (now, _find_primary_monitor(root))
+    return _monitor[1]
 
 
 def _find_primary_monitor(root: tk.Tk) -> tuple[int, int, int, int]:
@@ -145,7 +191,16 @@ def _find_primary_monitor(root: tk.Tk) -> tuple[int, int, int, int]:
             return r.left, r.top, r.right - r.left, r.bottom - r.top
         except Exception:
             pass
-    elif not MACOS:
+    elif MACOS:
+        try:
+            from AppKit import NSScreen
+            screen = NSScreen.screens()[0]  # the one with the menu bar
+            full, usable = screen.frame(), screen.visibleFrame()  # (AppKit counts y from the bottom)
+            top = full.size.height - (usable.origin.y + usable.size.height)
+            return int(usable.origin.x), int(top), int(usable.size.width), int(usable.size.height)
+        except Exception:
+            pass
+    else:
         try:
             from Xlib import display
             d = display.Display()
@@ -159,9 +214,25 @@ def _find_primary_monitor(root: tk.Tk) -> tuple[int, int, int, int]:
 
 
 # --- the status panel ------------------------------------------------------------------------
+def panel_image(msg: dict, width: int, px: int) -> Image.Image:
+    """The panel's picture for a message: the title (with its mark), then the last three lines of
+    what was heard, in a frame. width and px (the text height) are in pixels."""
+    fg, bg, accent = SCHEMES.get(msg.get("colors"), SCHEMES["yellow-on-black"])
+    pad = px // 2
+    f = font(px)
+    room = width - 2 * pad - (mark_width(px) if msg.get("mark") else 0)
+    lines = [(line, accent if msg.get("accent") else fg) for line in wrap(msg.get("title", ""), f, room)]
+    words = wrap(msg.get("text", ""), f, room)
+    if len(words) > 3:  # the last three lines: what was just said
+        words = ["…" + words[-3]] + words[-2:]
+    lines += [(line, fg) for line in words]
+    return framed(text_image(lines, width, px, bg, pad, msg.get("mark")), max(2, px // 8), fg)
+
+
 class Panel:
-    """A large always-on-top strip that never takes the keyboard focus. Messages (JSON lines):
-    {"show": true, "title": "Listening — EN", "text": "words heard so far", "accent": true,
+    """A large always-on-top strip that never takes the keyboard focus (Linux and Windows; macOS:
+    MacPanel). Messages, one JSON object per line:
+    {"show": true, "title": "Listening — EN", "mark": "dot", "text": "words heard so far", "accent": true,
      "hide_after": 3, "scale": 2.0, "colors": "yellow-on-black", "position": "bottom"} or {"show": false}."""
 
     def __init__(self):
@@ -170,12 +241,6 @@ class Panel:
         root.withdraw()
         root.overrideredirect(True)
         root.attributes("-topmost", True)
-        if MACOS:  # a floating help window: shown without activating the app
-            try:
-                root.tk.call("::tk::unsupported::MacWindowStyle", "style", root._w, "help", "none")
-            except tk.TclError:
-                pass
-            accessory_app()
         self.label = tk.Label(root, bd=0, highlightthickness=0)
         self.label.pack()
         self.image = None
@@ -183,6 +248,10 @@ class Panel:
         self.hide_job = None
         self.messages: queue.Queue = queue.Queue()
         threading.Thread(target=self._read, daemon=True).start()
+        if WINDOWS:  # mapped once, now and off-screen, then only moved: a Tk window activates when shown
+            root.geometry("1x1+-32000+-32000")
+            windows_no_activate(root)
+            self.mapped = True
         root.after(50, self._poll)
 
     def _read(self):
@@ -200,7 +269,10 @@ class Panel:
                 if msg is None:
                     self.root.destroy()
                     return
-                self.apply(msg)
+                try:
+                    self.apply(msg)
+                except Exception as e:  # one bad message must not stop the panel
+                    print(f"panel: {e!r}", file=sys.stderr)
         except queue.Empty:
             pass
         self.root.after(50, self._poll)
@@ -212,21 +284,9 @@ class Panel:
         if not msg.get("show"):
             self.hide()
             return
-        fg, bg, accent = SCHEMES.get(msg.get("colors"), SCHEMES["yellow-on-black"])
         x0, y0, sw, sh = primary_monitor(self.root)
         px = int(BASE_PX * 1.25 * float(msg.get("scale", 2.0)) * self.root.winfo_fpixels("1i") / 96)
-        width = int(sw * 0.8)
-        pad = px // 2
-        f = font(px)
-        lines = [(line, accent if msg.get("accent") else fg) for line in wrap(msg.get("title", ""), f, width - 2 * pad)]
-        words = wrap(msg.get("text", ""), f, width - 2 * pad)
-        if len(words) > 3:  # the last three lines: what was just said
-            words = ["…" + words[-3]] + words[-2:]
-        lines += [(line, fg) for line in words]
-        image = text_image(lines, width, px, bg, pad)
-        border = max(2, px // 8)
-        framed = Image.new("RGB", (image.width + 2 * border, image.height + 2 * border), fg)
-        framed.paste(image, (border, border))
+        framed = panel_image(msg, int(sw * 0.8), px)
         self.image = photo(framed)
         self.label.configure(image=self.image)
         x = x0 + (sw - framed.width) // 2
@@ -239,41 +299,117 @@ class Panel:
         self.root.geometry(f"{w}x{h}+{x}+{y}")
         if not self.mapped:
             self.mapped = True
-            if WINDOWS:
-                windows_no_activate(self.root)
-            else:
-                self.root.deiconify()  # override-redirect: the window manager never focuses it
-                if not MACOS:
-                    x11_click_through(self.root)
-        self.root.lift()
+            self.root.deiconify()  # override-redirect: the window manager never focuses it
+            x11_click_through(self.root)
+        if not WINDOWS:  # (there it is topmost already; raising it could activate it)
+            self.root.lift()
 
     def hide(self) -> None:
         self.hide_job = None
-        if self.mapped:
-            if WINDOWS:  # moved away, never re-shown with ShowWindow (that could activate it)
-                self.root.geometry("+-32000+-32000")
-            else:
-                self.root.withdraw()
-                self.mapped = False
+        if WINDOWS:  # moved away: it is never shown again, which could activate it
+            self.root.geometry("+-32000+-32000")
+        elif self.mapped:
+            self.root.withdraw()
+            self.mapped = False
 
 
 def windows_no_activate(root: tk.Tk) -> None:
-    """Show the panel without activating it, and make it ignore clicks and stay off the taskbar."""
+    """Map the panel, give the focus back to the window that had it, and make the panel a topmost
+    tool window that never takes the focus and lets clicks through, opaque."""
     import ctypes
     user32 = ctypes.windll.user32
-    previous = user32.GetForegroundWindow()
-    root.attributes("-alpha", 0.97)  # a layered window: needed for click-through
-    root.deiconify()
-    root.update_idletasks()
-    hwnd = int(root.wm_frame(), 16)
+    user32.GetForegroundWindow.restype = ctypes.c_void_p
+    user32.SetForegroundWindow.argtypes = [ctypes.c_void_p]
     user32.GetWindowLongPtrW.restype = ctypes.c_ssize_t
     user32.GetWindowLongPtrW.argtypes = [ctypes.c_void_p, ctypes.c_int]
     user32.SetWindowLongPtrW.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_ssize_t]
+    user32.SetLayeredWindowAttributes.argtypes = [ctypes.c_void_p, ctypes.c_uint32, ctypes.c_ubyte, ctypes.c_uint32]
+    previous = user32.GetForegroundWindow()
+    root.deiconify()
+    root.update()
+    hwnd = int(root.wm_frame(), 16)
     style = user32.GetWindowLongPtrW(hwnd, -20)  # GWL_EXSTYLE
     # WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_TRANSPARENT | WS_EX_LAYERED
     user32.SetWindowLongPtrW(hwnd, -20, style | 0x08000000 | 0x80 | 0x8 | 0x20 | 0x80000)
-    if previous and user32.GetForegroundWindow() == hwnd:
-        user32.SetForegroundWindow(previous)  # the first show took the focus: give it back
+    user32.SetLayeredWindowAttributes(hwnd, 0, 255, 2)  # LWA_ALPHA 255: opaque (layered: clicks go through)
+    if previous and user32.GetForegroundWindow() != previous:
+        user32.SetForegroundWindow(previous)  # mapping it took the focus: give it back
+
+
+class MacPanel:
+    """macOS: the panel as an AppKit panel that never activates. (A Tk window brings its app to the
+    front whenever it is shown, which takes the focus from the app being dictated into.) It is
+    drawn with twice the pixels on a Retina screen, so the text stays sharp."""
+
+    def __init__(self):
+        import AppKit
+        from PyObjCTools import AppHelper
+        self.AppKit, self.AppHelper = AppKit, AppHelper
+        self.app = AppKit.NSApplication.sharedApplication()
+        self.app.setActivationPolicy_(AppKit.NSApplicationActivationPolicyAccessory)  # no Dock icon
+        panel = AppKit.NSPanel.alloc().initWithContentRect_styleMask_backing_defer_(
+            ((0, 0), (10, 10)), AppKit.NSWindowStyleMaskBorderless | AppKit.NSWindowStyleMaskNonactivatingPanel,
+            AppKit.NSBackingStoreBuffered, False)
+        panel.setLevel_(AppKit.NSStatusWindowLevel)  # above other windows and the Dock
+        panel.setIgnoresMouseEvents_(True)
+        panel.setHidesOnDeactivate_(False)
+        panel.setCollectionBehavior_(AppKit.NSWindowCollectionBehaviorCanJoinAllSpaces
+                                     | AppKit.NSWindowCollectionBehaviorStationary
+                                     | AppKit.NSWindowCollectionBehaviorFullScreenAuxiliary)
+        self.view = AppKit.NSImageView.alloc().initWithFrame_(((0, 0), (10, 10)))
+        self.view.setImageScaling_(AppKit.NSImageScaleAxesIndependently)
+        panel.setContentView_(self.view)
+        self.panel = panel
+        self.generation = 0  # which message a delayed hide belongs to
+        threading.Thread(target=self._read, daemon=True).start()
+
+    def run(self) -> None:
+        self.app.run()
+
+    def _read(self):
+        for line in sys.stdin:
+            try:
+                msg = json.loads(line)
+            except ValueError:
+                continue
+            self.AppHelper.callAfter(self._apply, msg)
+        self.AppHelper.callAfter(self.app.terminate_, None)  # dictate has ended
+
+    def _apply(self, msg: dict) -> None:
+        try:
+            self.apply(msg)
+        except Exception as e:  # one bad message must not stop the panel
+            print(f"panel: {e!r}", file=sys.stderr)
+
+    def apply(self, msg: dict) -> None:
+        AppKit = self.AppKit
+        self.generation += 1
+        if not msg.get("show"):
+            self.panel.orderOut_(None)
+            return
+        screen = AppKit.NSScreen.screens()[0]  # the one with the menu bar
+        usable, pixels = screen.visibleFrame(), screen.backingScaleFactor()  # (above the Dock)
+        px = int(BASE_PX * 1.25 * float(msg.get("scale", 2.0)) * pixels)
+        image = panel_image(msg, int(usable.size.width * 0.8 * pixels), px)
+        buf = io.BytesIO()
+        image.save(buf, "PNG", compress_level=1)
+        data = buf.getvalue()
+        picture = AppKit.NSImage.alloc().initWithData_(AppKit.NSData.dataWithBytes_length_(data, len(data)))
+        w, h = image.width / pixels, image.height / pixels
+        picture.setSize_((w, h))
+        self.view.setImage_(picture)
+        x = usable.origin.x + (usable.size.width - w) / 2
+        gap = usable.size.height / 20
+        y = (usable.origin.y + gap if msg.get("position", "bottom") == "bottom"
+             else usable.origin.y + usable.size.height - h - gap)  # (AppKit counts y from the bottom)
+        self.panel.setFrame_display_(((x, y), (w, h)), True)
+        self.panel.orderFrontRegardless()  # shown without activating the app
+        if msg.get("hide_after"):
+            self.AppHelper.callLater(float(msg["hide_after"]), self._hide, self.generation)
+
+    def _hide(self, generation: int) -> None:
+        if generation == self.generation:  # nothing newer was shown meanwhile
+            self.panel.orderOut_(None)
 
 
 def x11_click_through(root: tk.Tk) -> None:
@@ -291,25 +427,26 @@ def x11_click_through(root: tk.Tk) -> None:
         pass
 
 
-def accessory_app() -> None:
-    """macOS: no Dock icon, and the app doesn't come to the front when its window shows."""
-    try:
-        from AppKit import NSApplication, NSApplicationActivationPolicyAccessory
-        NSApplication.sharedApplication().setActivationPolicy_(NSApplicationActivationPolicyAccessory)
-    except Exception:
-        pass
-
-
 # --- the settings window -----------------------------------------------------------------------
-MODIFIER_KEYSYMS = {"Control_L": "ctrl", "Control_R": "ctrl", "Alt_L": "alt", "Alt_R": "alt", "Option_L": "alt",
-                    "Option_R": "alt", "Meta_L": "super", "Meta_R": "super", "Super_L": "super", "Super_R": "super",
-                    "Command_L": "super", "Command_R": "super", "Win_L": "super", "Win_R": "super",
-                    "Shift_L": "shift", "Shift_R": "shift", "ISO_Level3_Shift": "alt"}
+MODIFIER_OF = {"Control_L": "ctrl", "Control_R": "ctrl", "Alt_L": "alt", "Alt_R": "alt", "Shift_L": "shift",
+               "Shift_R": "shift", "Super_L": "super", "Super_R": "super"}
+SOLO_KEYS = {"Fn", "ISO_Level3_Shift"}  # held like modifiers, but they can only be the key on their own
+WINDOWS_EXTENDED = 0x40000  # in a Tk key event's state on Windows: an extended key (numpad Enter, not Enter)
+
+
+def signature(rows: list[tuple]) -> list[tuple]:
+    """What a list of rows shows (without the buttons' actions): rebuilt only when this changes."""
+    return [row[:5] if row[0] == "button" else row for row in rows]
+
+
+def sentence(text: str) -> str:
+    return text if text[-1:] in (".", "…", "!", "?") else text + "."
 
 
 class Settings:
     """Every choice of the tray menu as large buttons, driven fully by the keyboard: Tab or the
-    arrow keys move, Space or Enter choose, Esc closes."""
+    arrow keys move, Space or Enter choose, Esc closes. The buttons are pictures with a thick
+    frame around the focused one, so they look the same on every system."""
 
     def __init__(self):
         sys.path.insert(0, str(HERE))
@@ -324,6 +461,7 @@ class Settings:
         self.message = ""  # at the top (e.g. "Dictation is stopping")
         self.key_message = ""  # in the key section (the capture prompt and its outcome)
         self.focus_id = None  # the button to focus after the next rebuild
+        self.last_focus_id = None  # the button that had the focus last
         dpi_aware()
         self.root = root = tk.Tk()
         root.title("Dictate settings")
@@ -338,8 +476,10 @@ class Settings:
         for sequence in ("<MouseWheel>", "<Button-4>", "<Button-5>"):
             root.bind_all(sequence, self._wheel)
         self.images: list = []
-        self.held: set[str] = set()
-        self.lone: str | None = None
+        self.buttons: list[tk.Label] = []
+        self.shown: list = []  # signature() of the rows on screen
+        self.down: dict[int, str | None] = {}  # during a key capture: the keys held down (code: name)
+        self.lone: str | None = None  # a modifier pressed on its own: the key, if it is released so
         self.focus_target = None
         self.build()
         root.after(1000, self._watch)
@@ -356,10 +496,10 @@ class Settings:
             return 0.0
 
     def status(self) -> dict:
-        """What the running dictation reports (dictate writes status.json), or {} if it isn't running."""
+        """What the running dictation reports (in dictate.STATUS_PATH), or {} if it isn't running."""
         try:
             import psutil
-            status = json.loads((self.d.RUNTIME_DIR / "status.json").read_text(encoding="utf-8"))
+            status = json.loads(self.d.STATUS_PATH.read_text(encoding="utf-8"))
             return status if psutil.pid_exists(status["pid"]) else {}
         except (OSError, ValueError, KeyError, TypeError, ImportError):
             return {}
@@ -370,11 +510,14 @@ class Settings:
         self.build()
 
     def _watch(self):
-        """Choices changed elsewhere (the tray menu): show them."""
-        if self._mtime() != self.state_mtime and not self.capturing:
-            self.state_mtime = self._mtime()
-            self.ui = self.d.UiState(self.cfg)
-            self.build()
+        """Show what changed elsewhere: a choice made in the tray menu, what dictation is doing, a
+        finished download."""
+        if not self.capturing:
+            if self._mtime() != self.state_mtime:
+                self.state_mtime = self._mtime()
+                self.ui = self.d.UiState(self.cfg)
+            if signature(self.rows()) != self.shown:
+                self.build()
         self.root.after(1000, self._watch)
 
     # --- layout ---
@@ -390,8 +533,9 @@ class Settings:
         current = getattr(ui, model_key)
         rows = [("heading", "Dictate settings")]
         if status:
-            state = (status.get("tip") or "").splitlines()[0] if status.get("tip") else ""
-            rows.append(("text", f"Dictation is running. {state}" + (f" Model: {status['model']}." if status.get("model") else "")))
+            tip = (status.get("tip") or "").strip()
+            rows.append(("text", "Dictation is running." + (f" {sentence(tip)}" if tip else "")
+                         + (f" Model: {status['model']}." if status.get("model") else "")))
         else:
             rows.append(("text", "Dictation is not running."))
         if self.message:
@@ -430,8 +574,9 @@ class Settings:
         rows.append(("heading", "Large text"))
         rows.append(("button", "panel", "Big status panel while dictating", f"check:{on(ui.big_panel)}", True,
                      lambda: self.set(big_panel=not ui.big_panel)))
-        rows.append(("button", "click", "Clicking the tray icon opens this window", f"check:{on(ui.big_settings)}", True,
-                     lambda: self.set(big_settings=not ui.big_settings)))
+        if not MACOS:  # (the menu bar item always opens its menu there)
+            rows.append(("button", "click", "Clicking the tray icon opens this window", f"check:{on(ui.big_settings)}",
+                         True, lambda: self.set(big_settings=not ui.big_settings)))
         for where in ("bottom", "top"):
             rows.append(("button", f"pos:{where}", f"Panel at the {where} of the screen",
                          f"radio:{on(ui.panel_position == where)}", True, lambda w=where: self.set(panel_position=w)))
@@ -449,12 +594,12 @@ class Settings:
         return rows
 
     def build(self) -> None:
-        focused = self.root.focus_get()
-        focus_id = self.focus_id or getattr(focused, "row_id", None)
+        focus_id = self.focus_id or self.last_focus_id
         self.focus_id = None
         for child in self.frame.winfo_children():
             child.destroy()
         self.images.clear()
+        self.buttons.clear()
         fg, bg, accent = SCHEMES.get(self.ui.ui_colors, SCHEMES["yellow-on-black"])
         px = int(BASE_PX * self.ui.ui_scale * self.root.winfo_fpixels("1i") / 96)
         _x0, _y0, sw, sh = primary_monitor(self.root)
@@ -463,33 +608,36 @@ class Settings:
         self.root.configure(bg=bg)
         self.canvas.configure(bg=bg)
         self.frame.configure(bg=bg)
-        buttons = []
-        for row in self.rows():
+        rows = self.rows()
+        self.shown = signature(rows)
+        for row in rows:
             if row[0] in ("heading", "text"):
                 kind, text = row
                 size = int(px * 1.2) if kind == "heading" else px
                 lines = [(line, fg) for line in wrap(text, font(size), width - 2 * pad)] or [("", fg)]
                 image = photo(text_image(lines, width, size, bg, pad // 2 if kind == "text" else pad))
                 widget = tk.Label(self.frame, image=image, bd=0, bg=bg, highlightthickness=0)
+                self.images.append(image)
             else:
                 _, row_id, label, mark, enabled, action, *scheme = row
-                cfg_fg, cfg_bg = (SCHEMES[scheme[0]][:2]) if scheme else (fg, bg)
-                symbol = {"radio:on": "●", "radio:off": "○", "check:on": "☑", "check:off": "☐"}.get(mark, "▸")
-                colour = cfg_fg if enabled else mix(cfg_fg, cfg_bg)
-                lines = wrap(f"{symbol}  {label}", font(px), width - 2 * pad - 2 * ring)
-                image = photo(text_image([(line, colour) for line in lines], width - 2 * ring, px, cfg_bg, pad))
-                widget = tk.Button(self.frame, image=image, bd=0, relief="flat", bg=cfg_bg, activebackground=cfg_bg,
-                                   highlightthickness=ring, highlightcolor=accent if fg == cfg_fg else fg,
-                                   highlightbackground=bg, takefocus=1, cursor="hand2",
-                                   command=action if enabled else (lambda: None))  # greyed text, no stipple
+                own_fg, own_bg = SCHEMES[scheme[0]][:2] if scheme else (fg, bg)
+                colour = own_fg if enabled else mix(own_fg, own_bg)  # greyed out
+                inner = width - 2 * ring
+                lines = wrap(label, font(px), inner - 2 * pad - mark_width(px))
+                image = text_image([(line, colour) for line in lines], inner, px, own_bg, pad, mark)
+                images = (photo(framed(image, ring, bg)), photo(framed(image, ring, accent)))  # (focused: framed)
+                widget = tk.Label(self.frame, image=images[0], bd=0, bg=bg, highlightthickness=0, takefocus=1,
+                                  cursor="hand2")
+                widget.row_id, widget.images, widget.action = row_id, images, action if enabled else None
+                widget.bind("<FocusIn>", self._focus_in)
+                widget.bind("<FocusOut>", lambda e: e.widget.configure(image=e.widget.images[0]))
+                widget.bind("<Button-1>", self._click)
                 for key in ("<Return>", "<KP_Enter>", "<space>"):  # "break": the key stops here, so it
-                    widget.bind(key, lambda e: (e.widget.invoke(), "break")[1])  # can't start a key capture
-                widget.bind("<Down>", lambda e: self._move(e.widget, e.widget.tk_focusNext()))
-                widget.bind("<Up>", lambda e: self._move(e.widget, e.widget.tk_focusPrev()))
-                widget.bind("<FocusIn>", self._scroll_to)
-                widget.row_id = row_id
-                buttons.append(widget)
-            self.images.append(image)
+                    widget.bind(key, self._press)  # can't start a key capture
+                widget.bind("<Down>", lambda e: self._move(e.widget, 1))
+                widget.bind("<Up>", lambda e: self._move(e.widget, -1))
+                self.buttons.append(widget)
+                self.images.extend(images)
             widget.pack(anchor="w", padx=0, pady=max(1, ring // 2))
         self.root.update_idletasks()
         height = min(self.frame.winfo_reqheight(), int(sh * 0.9))
@@ -497,17 +645,33 @@ class Settings:
                               scrollregion=(0, 0, self.frame.winfo_reqwidth(), self.frame.winfo_reqheight()))
         if self.capturing:  # keys go to the capture, not to a button (Space or Enter would press it)
             self.canvas.focus_set()
-            self._scroll_to(None, next((b for b in buttons if b.row_id == "key:change"), None))
+            self._scroll_to(None, next((b for b in self.buttons if b.row_id == "key:change"), None))
             return
-        target = next((b for b in buttons if b.row_id == focus_id), buttons[0] if buttons else None)
+        target = next((b for b in self.buttons if b.row_id == focus_id), self.buttons[0] if self.buttons else None)
         self.focus_target = target
         if target is not None:
             target.focus_set()
 
+    def _focus_in(self, event) -> None:
+        event.widget.configure(image=event.widget.images[1])
+        self.last_focus_id = event.widget.row_id
+        self._scroll_to(event)
+
+    def _click(self, event) -> None:
+        event.widget.focus_set()
+        self._press(event)
+
     @staticmethod
-    def _move(current, target) -> str:
-        if isinstance(target, tk.Button):  # not past the ends of the list
-            target.focus_set()
+    def _press(event) -> str:
+        if event.widget.action is not None:
+            event.widget.action()
+        return "break"
+
+    def _move(self, widget, step: int) -> str:
+        """Up and Down move to the button above or below (not round from the last to the first)."""
+        i = self.buttons.index(widget) + step if widget in self.buttons else -1
+        if 0 <= i < len(self.buttons):
+            self.buttons[i].focus_set()
         return "break"
 
     def _scroll_to(self, event, widget=None) -> None:
@@ -529,18 +693,22 @@ class Settings:
 
     # --- actions ---
     def stop(self) -> None:
-        if not WINDOWS and not MACOS and "dictate.service" in subprocess.run(
+        try:  # the systemd service (else it would start dictation again): stopped through systemd
+            service = not WINDOWS and not MACOS and "dictate.service" in subprocess.run(
                 ["systemctl", "--user", "list-units", "--state=active", "dictate.service"],
-                capture_output=True, text=True).stdout:
+                capture_output=True, text=True, timeout=5).stdout
+        except (OSError, subprocess.TimeoutExpired):  # no systemd (Devuan, Void, Alpine)
+            service = False
+        if service:
             subprocess.Popen(["systemctl", "--user", "stop", "dictate.service"])
         else:
             self.d.RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
-            (self.d.RUNTIME_DIR / "command").write_text("quit\n", encoding="utf-8")
+            self.d.COMMAND_PATH.write_text("quit\n", encoding="utf-8")
         self.message = "Dictation is stopping."
         self.root.after(1500, self.build)
 
     def capture(self) -> None:
-        self.capturing, self.held, self.lone = True, set(), None
+        self.capturing, self.down, self.lone = True, {}, None
         self.key_message = "Press the new dictation key, or a key combination like Ctrl+Alt+D, now. Esc cancels."
         self.build()
 
@@ -553,34 +721,55 @@ class Settings:
         self.focus_id = "key:change"
         self.set(trigger=trigger)
 
+    def key_name(self, event) -> str | None:
+        """The key of a Tk key event as a key name of keys.py. The key's code is used where a held
+        modifier changes the character (AltGr on Windows, Option on macOS) or Tk names the key
+        differently (the numpad on Windows, fn and Command on macOS)."""
+        if MACOS:
+            return self.keys.from_mac_keycode(event.keycode >> 24)  # (Tk keeps the Mac keycode in the top byte)
+        if WINDOWS:
+            name = self.keys.from_windows_vk(event.keycode, bool(event.state & WINDOWS_EXTENDED))
+            if name:
+                return name
+        return self.keys.from_tk(event.keysym)
+
     def _key(self, event) -> str | None:
         if not self.capturing:
             return None
-        keysym = event.keysym
-        if keysym in MODIFIER_KEYSYMS:
-            self.held.add(MODIFIER_KEYSYMS[keysym])
-            self.lone = keysym if self.lone is None and len(self.held) == 1 else None
+        code = event.keycode >> 24 if MACOS else event.keycode
+        if code in self.down:  # still held: a repeat (Windows repeats held modifiers too)
+            return "break"
+        name = self.down[code] = self.key_name(event)
+        if name in MODIFIER_OF or name in SOLO_KEYS:  # it is the key itself if it is released on its own
+            self.lone = name if len(self.down) == 1 else None
             return "break"
         self.lone = None
-        name = self.keys.from_tk(keysym)
+        held = list(self.down.values())
         try:
             if name is None:
-                raise ValueError(f"{keysym} can't be the dictation key")
-            trigger = self.keys.parse(str(self.keys.Trigger(frozenset(self.held), name)))
+                raise ValueError(f"{event.keysym} can't be the dictation key")
+            if any(n in SOLO_KEYS for n in held):
+                raise ValueError("AltGr and fn can be the dictation key only on their own")
+            trigger = self.keys.parse(str(self.keys.Trigger(frozenset(MODIFIER_OF[n] for n in held if n in MODIFIER_OF),
+                                                            name)))
         except ValueError as e:
-            self.key_message = f"{str(e)[0].upper()}{str(e)[1:]}. Try another key or combination; Esc cancels."
+            self.key_message = f"{sentence(str(e)[0].upper() + str(e)[1:])} Try another key or combination; Esc cancels."
             self.build()
             return "break"
         self.set_key(str(trigger))
         return "break"
 
     def _key_up(self, event) -> str | None:
-        if not self.capturing or event.keysym not in MODIFIER_KEYSYMS:
+        if not self.capturing:
             return None
-        name = self.keys.from_tk(event.keysym)
-        if self.lone == event.keysym and name in self.keys.LONE_MODIFIERS:  # a modifier pressed on its own
-            self.set_key(name)
-        self.held.discard(MODIFIER_KEYSYMS[event.keysym])
+        self.down.pop(event.keycode >> 24 if MACOS else event.keycode, None)
+        if self.lone is not None and not self.down:  # a modifier pressed and released on its own
+            name, self.lone = self.lone, None
+            try:
+                self.set_key(str(self.keys.parse(name)))
+            except ValueError as e:
+                self.key_message = f"{sentence(str(e)[0].upper() + str(e)[1:])} Try another key; Esc cancels."
+                self.build()
         return "break"
 
     def _escape(self, _event) -> None:
@@ -600,7 +789,10 @@ def mix(a: str, b: str) -> str:
 def main() -> int:
     what = sys.argv[1] if len(sys.argv) > 1 else "settings"
     if what == "panel":
-        Panel().root.mainloop()
+        if MACOS:
+            MacPanel().run()
+        else:
+            Panel().root.mainloop()
     elif what == "settings":
         settings = Settings()
         if MACOS:

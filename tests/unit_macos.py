@@ -1,6 +1,7 @@
 """The macOS event tap's decisions for made-up events (a stand-in replaces pyobjc's Quartz): Right
 Option alone, Right Option+2 (typing @ on a Slovak layout cancels the dictation and keeps the
-character), Left Option, a combination, auto-repeat, and keyboards that set no left/right bits.
+character), Left Option, a combination, auto-repeat, keyboards that set no left/right bits, a release
+whose press was missed, and a key Macs don't have.
 
     python3 tests/unit_macos.py        (any Python 3.11+)
 """
@@ -9,11 +10,18 @@ from pathlib import Path
 from types import SimpleNamespace
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+DOWN = set()  # keycodes the keyboard reports down (CGEventSourceKeyState)
 Q = SimpleNamespace(kCGEventKeyDown=10, kCGEventKeyUp=11, kCGEventFlagsChanged=12, kCGKeyboardEventAutorepeat=8,
+                    kCGEventSourceStateHIDSystemState=1,
                     CGEventGetIntegerValueField=lambda event, field: event.get(field, 0),
-                    CGEventSetFlags=lambda event, flags: event.__setitem__("flags", flags))
+                    CGEventSetFlags=lambda event, flags: event.__setitem__("flags", flags),
+                    CGEventSourceKeyState=lambda state, code: code in DOWN)
 sys.modules["Quartz"] = Q
+import dictate  # noqa: E402
 import macos  # noqa: E402
+
+notes = []
+dictate.notify = lambda summary, body="": notes.append(summary)
 
 OPTION, CTRL, SHIFT, RIGHT_OPTION_BIT, LEFT_OPTION_BIT = 0x80000, 0x40000, 0x20000, 0x40, 0x20
 checks = []
@@ -58,9 +66,17 @@ check("Control+Option+Shift+D passes", key(h, 0x02, CTRL | OPTION | SHIFT)[0] is
 check("plain D passes", key(h, 0x02)[0] is not None, True)
 
 h, events = tap("Alt_R")  # a keyboard that reports Option without the left/right bit
+DOWN.add(0x3D)
 flags_changed(h, 0x3D, OPTION)
+DOWN.discard(0x3D)
 flags_changed(h, 0x3D, OPTION)
-check("no device bits: down, then up", events, ["press", "release"])
+check("no device bits: the keyboard's key state decides", events, ["press", "release"])
+h, events = tap("Alt_R")  # its press was missed (the tap was off): the release starts nothing
+check("a release without its press does nothing", (flags_changed(h, 0x3D, 0)[0] is not None, events), (True, []))
+
+h, events = tap("Pause")  # no such key on a Mac
+check("a key Macs don't have: Right Option instead, and a notification",
+      (h.code, str(h.trigger), notes[-1:]), (0x3D, "Alt_R", ["Dictation key not on a Mac"]))
 
 for name, good, got, want in checks:
     print(f"{'ok  ' if good else 'FAIL'} {name}" + ("" if good else f": got {got!r}, want {want!r}"))

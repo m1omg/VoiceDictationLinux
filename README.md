@@ -191,9 +191,9 @@ Measured word error rates and times are under [Accuracy and speed](#accuracy-and
 ## The dictation key
 - **Defaults:** numpad **Del / "."** on keyboards with a numpad; the installer suggests **Right Ctrl**
   on laptops (Windows, Linux X11) and **Right Option** on Macs.
-- **Any key or combination** works: `F13`, `Pause`, `Ctrl+Alt+D`, `Super+Shift+H`, … Choose it in
-  the installer, or in the settings window (*Change it…*, then press the new key or combination;
-  Esc cancels).
+- **Any key or combination** works: `F13`, `Ctrl+Alt+D`, `Super+Shift+H`, … Choose it in the
+  installer, or in the settings window (*Change it…*, then press the new key or combination; Esc
+  cancels).
 - **A modifier on its own** (Right Ctrl, Right Option): if you press another key while holding it,
   that was a shortcut, not dictation. The recording is dropped and the shortcut works as usual, so
   Right Ctrl+C still copies, and Right Option+2 still types @ on a Slovak Mac keyboard.
@@ -202,20 +202,22 @@ Measured word error rates and times are under [Accuracy and speed](#accuracy-and
 - **Wayland (GNOME, KDE):** the desktop owns global shortcuts. It shows its own dialog to approve
   the key, and you can change it there.
 - In `config.toml`, `trigger` takes the same names (X11 keysyms: `KP_Delete`, `Control_R`, `Alt_R`,
-  `Super_R`, `F1`…`F24`, `Insert`, `Pause`, `Scroll_Lock`, `Menu`, letters and digits).
+  `Super_R`, `F1`…`F24`, `Insert`, `Pause`, `Scroll_Lock`, `Menu`, letters and digits; Macs have no
+  Pause, Scroll Lock or Menu key). On Linux a single key can be any X11 key name, such as
+  `ISO_Level3_Shift` (AltGr) or `XF86Launch5`.
 
 ## Large text, for low vision
 Each part is switched on by itself, in the menu (*Large text*), in the settings window, or by the
 installer's last question:
-- **Big status panel:** a band at the bottom (or top) of the screen while you dictate: *● Listening*
-  with the words as they are recognised, *Transcribing…*, then *✓ Typed* with the text, or what went
-  wrong (*Not typed (why). It is on the clipboard: paste it with Ctrl+V*, *Only silence was
-  recorded: is the microphone muted?*, *Nothing was heard*). It never takes the keyboard focus, and
-  hides 3 s after the text is typed (8 s after a problem).
+- **Big status panel:** a band at the bottom (or top) of the screen while you dictate: *Listening*
+  (with a red dot) and the words as they are recognised, *Transcribing…*, then *Typed* (with a tick)
+  and the text, or what went wrong (*Not typed. It is on the clipboard: paste it with Ctrl+V* and
+  why, *Only silence was recorded: is the microphone muted?*, *Nothing was heard*). It never takes
+  the keyboard focus, and hides 3 s after the text is typed (8 s after a problem).
 - **Big settings window:** every choice as a large button: language, live typing, sounds, speech
   model (with download sizes), graphics card or processor, the dictation key, the panel, text size,
-  colours, and stop. It works with the keyboard alone: **Tab** or the **arrow keys** move, **Space**
-  or **Enter** choose, **Esc** closes. It opens from the menu (*Settings window…*), from the
+  colours, and stop. It works with the keyboard alone: **Tab** or the **arrow keys** move (a thick
+  frame shows where you are), **Space** or **Enter** choose, **Esc** closes. It opens from the menu (*Settings window…*), from the
   **Dictate Settings** launcher (Linux app menu, Windows Start menu), by clicking the icon if you
   switch that on (Linux, Windows), on Windows also by starting Dictate again while it runs, and on a
   Mac by opening the Dictate app again (Spotlight: *Dictate*).

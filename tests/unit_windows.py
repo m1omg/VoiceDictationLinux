@@ -1,7 +1,8 @@
 """Windows code that can be checked anywhere: the Win32 structure sizes (a wrong INPUT size makes
 SendInput fail silently) and the keyboard hook's decisions for made-up key events: numpad Del with
-NumLock on and off, the Delete key, repeats, combinations, Right Ctrl used in a shortcut, and keys
-sent by programs (ours pass, others count).
+NumLock on and off, the Delete key, repeats, combinations, Right Ctrl used in a shortcut, keys sent by
+programs (ours pass, others count), modifiers whose release the hook missed (Win+L), a missed release
+of our own key, and Alt combinations that must not open menus.
 
     python3 tests/unit_windows.py        (any 64-bit Python 3.11+)
 """
@@ -33,6 +34,7 @@ w.send = lambda inputs: sent.append([(i.u.ki.wVk, bool(i.u.ki.dwFlags & w.KEYEVE
 def hook(trigger):
     events = []
     h = w.Hotkey(SimpleNamespace(trigger=trigger), lambda kind, value=None: events.append(kind))
+    h.modifiers = lambda: set(h.mods)  # as if Windows agreed with what the hook saw
     return h, events
 
 
@@ -67,6 +69,24 @@ check("Right Ctrl+C: cancelled, Ctrl and C replayed", (h._key(C, True), events, 
 check("C's release passes", h._key(C, False), False)
 check("Right Ctrl's release passes (the system saw its press)", (h._key(RCTRL, False), events[-1]), (False, "release"))
 check("next time it is taken again", h._key(RCTRL, True), True)
+
+h, events = hook("KP_Delete")  # Win+L: Win went up on the lock screen, where the hook can't see
+h._key(key(0x5B, 0x5B, extended=True), True)
+h.modifiers = lambda: set()  # but Windows knows it is up
+check("after Win+L, numpad Del still works", (h._key(NUMPAD_DEL, True), events), (True, ["press"]))
+t = h.last_seen
+h.tick(t + 1.0)
+check("a held key that repeats stays down", events, ["press"])
+h.tick(t + 2.0)
+check("one that stopped repeating went up unseen: released", (events, h.down), (["press", "release"], False))
+h._key(SimpleNamespace(vkCode=0x2E, scanCode=0x53, flags=0x10), True)  # sent by a program: no repeats
+h.tick(h.last_seen + 5)
+check("a press sent by a program is not released early", h.down, True)
+
+h, events = hook("Alt+F12")
+h._key(LALT, True)
+check("Alt+F12 taken, with a key that keeps Alt from opening a menu",
+      (h._key(key(0x7B, 0x58), True), sent[-1]), (True, [(0xE8, False), (0xE8, True)]))
 
 # The hook itself: our own key events (marked) go on untouched; a key another program sends (a key
 # remapper, an on-screen keyboard) counts like a real one.

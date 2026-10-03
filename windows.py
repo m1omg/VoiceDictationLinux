@@ -36,12 +36,15 @@ WNDPROC = FUNCTYPE(LRESULT, HANDLE, UINT, WPARAM, LPARAM)
 ERROR_ALREADY_EXISTS = 183
 WH_KEYBOARD_LL, WM_KEYDOWN, WM_SYSKEYDOWN, WM_TIMER, WM_APP = 13, 0x0100, 0x0104, 0x0113, 0x8000
 WM_RENDERFORMAT, WM_RENDERALLFORMATS, WM_DESTROYCLIPBOARD = 0x0305, 0x0306, 0x0307
-LLKHF_EXTENDED = 0x01
+LLKHF_EXTENDED, LLKHF_INJECTED = 0x01, 0x10
 INPUT_KEYBOARD, KEYEVENTF_EXTENDEDKEY, KEYEVENTF_KEYUP = 1, 0x1, 0x2
 CF_UNICODETEXT, GMEM_MOVEABLE = 13, 0x0002
 MARK = 0x44494354  # "DICT" in dwExtraInfo: our own key events
 MODIFIER_GROUPS = {0xA0: "shift", 0xA1: "shift", 0x10: "shift", 0xA2: "ctrl", 0xA3: "ctrl", 0x11: "ctrl",
                    0xA4: "alt", 0xA5: "alt", 0x12: "alt", 0x5B: "super", 0x5C: "super"}
+GROUP_KEYS = {"shift": (0xA0, 0xA1), "ctrl": (0xA2, 0xA3), "alt": (0xA4, 0xA5), "super": (0x5B, 0x5C)}
+REPEAT_GAP = 1.5  # seconds: a key held on a keyboard repeats more often than this
+MASK_KEY = 0xE8  # an unassigned key, sent when Alt or Win is part of our key: their release opens no menu
 
 
 class KBDLLHOOKSTRUCT(ctypes.Structure):
@@ -225,10 +228,11 @@ def send(inputs: list[INPUT]) -> int:
 
 class Hotkey(threading.Thread):
     """The push-to-talk key through a low-level keyboard hook. Windows silently drops a hook whose
-    callback is slow, so the callback only queues events, and the hook is renewed every minute while
-    the key is up. A combination (Ctrl+Alt+D) matches when exactly its modifiers are down. A modifier
-    on its own (Right Ctrl) is kept from the system while it is held; if another key goes down with
-    it, that was a shortcut: the dictation is cancelled and the modifier and the key are replayed."""
+    callback is slow, so the callback decides at once, and the hook is renewed every minute while the
+    key is up. A combination (Ctrl+Alt+D) matches when exactly its modifiers are down, as Windows
+    knows them. A modifier on its own (Right Ctrl) is kept from the system while it is held; if
+    another key goes down with it, that was a shortcut: the dictation is cancelled and the modifier
+    and the key are replayed. A held key that stops repeating went up where the hook couldn't see it."""
 
     def __init__(self, cfg, emit):
         super().__init__(name="win-key", daemon=True)
@@ -238,8 +242,20 @@ class Hotkey(threading.Thread):
         self.down = False  # our key is down (and kept from the system)
         self.replayed = False  # the system was given the modifier after all (a shortcut)
         self.mods: set[str] = set()  # modifiers down, as the hook saw them
+        self.injected = False  # the press came from a program (which sends no repeats)
+        self.last_seen = 0.0  # the last press or repeat of our key
+        self.renewed = 0.0
         self.proc = HOOKPROC(self._callback)  # referenced for as long as the hook may call it
         self.hook = None
+
+    def modifiers(self) -> set[str]:
+        """The modifier groups down now, as Windows knows them. The hook's own record misses key-ups
+        that happen where it can't see them: after Win+L, the Win key goes up on the lock screen."""
+        try:
+            u = user32()
+            return {group for group, vks in GROUP_KEYS.items() if any(u.GetAsyncKeyState(vk) & 0x8000 for vk in vks)}
+        except (OSError, AttributeError):  # not Windows (the unit tests): what the hook saw
+            return set(self.mods)
 
     def matches(self, kb) -> bool:
         return ((self.vk is None or kb.vkCode == self.vk) and (self.scan is None or kb.scanCode == self.scan)
@@ -260,10 +276,14 @@ class Hotkey(threading.Thread):
         """Handle one key event; True keeps it from the system."""
         if self.matches(kb):
             if down:
+                self.last_seen = time.monotonic()
                 if self.down:
                     return not self.replayed  # a repeat
-                if self.trigger.lone_modifier or self.mods == set(self.trigger.mods):
+                if self.trigger.lone_modifier or self.modifiers() == set(self.trigger.mods):
                     self.down, self.replayed = True, False
+                    self.injected = bool(kb.flags & LLKHF_INJECTED)
+                    if self.trigger.mods & {"alt", "super"}:  # Alt or Win alone would open a menu
+                        send([key_input(MASK_KEY), key_input(MASK_KEY, up=True)])
                     self.emit("press", time.monotonic())
                     return True
                 return False  # e.g. the D of Ctrl+Shift+D when the key is Ctrl+Alt+D
@@ -283,6 +303,15 @@ class Hotkey(threading.Thread):
             return True  # this key went out again just now, after the modifier
         return False
 
+    def tick(self, now: float) -> None:
+        """Twice a second. A key held on a keyboard repeats; none for REPEAT_GAP means it went up where
+        the hook couldn't see it (the lock screen, an administrator's window) or Windows dropped the
+        hook, so it is taken as released rather than recording on and typing into another window."""
+        if self.down and not self.injected and now - self.last_seen > REPEAT_GAP:
+            log.info("the key's release was not seen; taking it as released")
+            self.down = False
+            self.emit("release", self.last_seen)
+
     def _install(self):
         return user32().SetWindowsHookExW(WH_KEYBOARD_LL, self.proc, kernel32().GetModuleHandleW(None), 0)
 
@@ -294,12 +323,17 @@ class Hotkey(threading.Thread):
             return
         log.info("push-to-talk key: %s (Windows keyboard hook)", self.trigger)
         self.emit("key_ready", self.cfg.trigger)
-        u.SetTimer(None, 0, 60_000, None)
+        u.SetTimer(None, 0, 500, None)
+        self.renewed = time.monotonic()
         msg = MSG()
         while u.GetMessageW(ctypes.byref(msg), None, 0, 0) > 0:
-            if msg.message == WM_TIMER and not self.down:  # renew the hook in case Windows dropped it
-                u.UnhookWindowsHookEx(self.hook)
-                self.hook = self._install()
+            if msg.message == WM_TIMER:
+                now = time.monotonic()
+                self.tick(now)
+                if not self.down and now - self.renewed > 60:  # renew the hook in case Windows dropped it
+                    u.UnhookWindowsHookEx(self.hook)
+                    self.hook = self._install()
+                    self.renewed = now
             u.DispatchMessageW(ctypes.byref(msg))
 
 

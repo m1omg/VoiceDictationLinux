@@ -2,8 +2,8 @@
 label, tooltip), refresh_menu(), set_activate(), start(), and the same MenuItem trees.
 
 The icon is drawn with Pillow: a ring, filled while recording, with the language code inside (the
-Windows tray and the macOS menu bar show no text label). macOS draws menu-bar icons as templates
-(shape only), so the state shows in the shape as well as in the colour.
+Windows tray and the macOS menu bar show no text label). On macOS it is a template image (shape
+only, coloured by macOS for the menu bar), so the state shows in the shape as well as in the colour.
 """
 from __future__ import annotations
 
@@ -52,6 +52,35 @@ def draw_icon(state: str, code: str, size: int = 64) -> Image.Image:
     return image
 
 
+def _menu_bar_image(icon) -> None:
+    """pystray's Icon._assert_image on macOS, but as a template image, which macOS colours for a
+    light or a dark menu bar (pystray's plain black image vanishes on a dark one), and made from the
+    full-size picture, so it stays sharp on Retina screens."""
+    if icon._icon_image is not None:
+        return
+    import io
+
+    import AppKit
+    import Foundation
+    buf = io.BytesIO()
+    icon._icon.save(buf, "png")
+    data = buf.getvalue()
+    image = AppKit.NSImage.alloc().initWithData_(Foundation.NSData.dataWithBytes_length_(data, len(data)))
+    side = icon._status_bar.thickness()
+    image.setSize_((side, side))
+    image.setTemplate_(True)
+    icon._icon_image = image
+    icon._status_item.button().setImage_(image)
+
+
+if MACOS:
+    try:
+        import pystray._darwin
+        pystray._darwin.Icon._assert_image = _menu_bar_image
+    except (ImportError, AttributeError) as e:  # a pystray that works differently: its own image then
+        log.debug("menu bar image: %s", e)
+
+
 class TrayIcon:
     needs_main_thread = MACOS  # AppKit: the menu bar item belongs to the main thread
 
@@ -94,8 +123,10 @@ class TrayIcon:
             threading.Thread(target=self.icon.run, name="tray", daemon=True).start()
 
     def run(self) -> None:
-        """macOS: run the menu bar item on the main thread until stop()."""
-        self.icon.run()
+        """macOS: run the menu bar item on the main thread until stop(). (pystray would show it from
+        another thread; AppKit wants that on the main one.)"""
+        from PyObjCTools import AppHelper
+        self.icon.run(setup=lambda icon: AppHelper.callAfter(setattr, icon, "visible", True))
 
     def stop(self) -> None:
         self._later(self.icon.stop)  # macOS: AppKit's loop is stopped from its own (main) thread

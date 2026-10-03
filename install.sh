@@ -103,6 +103,9 @@ if [[ ! -x "$D/venv/bin/python" ]]; then
 fi
 
 say "Python packages"
+# PyAV's newest wheels need macOS 14 on Apple silicon; without building it (FFmpeg's sources would be
+# needed), uv picks the newest version that has a wheel for this Mac.
+NO_BUILD=(--only-binary av)
 if [[ $GPU == amd ]]; then
   # CTranslate2's ROCm build of the version in requirements.txt, for this Python (e.g. cp314)
   ct2=$(sed -n 's/^ctranslate2==\([0-9.]*\).*/\1/p' "$D/requirements.txt")
@@ -131,12 +134,12 @@ PY
   fi
   rocm() { echo "$1 @ $ROCM_WHEELS/${1//-/_}-$ROCM_VERSION-py3-none-linux_x86_64.whl"; }
   echo "    ROCm $ROCM_VERSION runtime with device code for $AMD_TARGET (downloads about 1 GB the first time)"
-  "$UV" pip install --python "$D/venv/bin/python" -r "$D/requirements.txt" "$wheel" \
+  "$UV" pip install "${NO_BUILD[@]}" --python "$D/venv/bin/python" -r "$D/requirements.txt" "$wheel" \
     "$(rocm rocm-sdk-core)" "$(rocm rocm-sdk-libraries)" "$(rocm "rocm-sdk-device-$AMD_TARGET")"
 elif [[ $GPU == nvidia ]]; then
-  "$UV" pip install --python "$D/venv/bin/python" -r "$D/requirements.txt" -r "$D/requirements-cuda.txt"
+  "$UV" pip install "${NO_BUILD[@]}" --python "$D/venv/bin/python" -r "$D/requirements.txt" -r "$D/requirements-cuda.txt"
 else  # no GPU: no CUDA libraries (they are about 650 MB)
-  "$UV" pip install --python "$D/venv/bin/python" -r "$D/requirements.txt"
+  "$UV" pip install "${NO_BUILD[@]}" --python "$D/venv/bin/python" -r "$D/requirements.txt"
 fi
 
 say "Language, speech model and key (Enter takes the suggestion)"
@@ -150,6 +153,12 @@ if [[ $OS == Darwin ]]; then
   APP="$HOME/Applications/Dictate.app"
   script="$SRC/packaging/macos/Dictate.applescript"
   stamp=$(shasum -a 256 "$script" | cut -d' ' -f1)
+  # Stop an earlier copy first; its app quits within 5 s of noticing (so "open" below starts a new one).
+  pkill -f "venv/bin/python -X utf8 dictate.py" 2>/dev/null || true
+  for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14; do
+    pgrep -f "$APP/Contents/MacOS/" >/dev/null || break
+    sleep 0.5
+  done
   # Built and signed once: a re-signed app loses the Accessibility permission without a word.
   if [[ "$(cat "$APP/Contents/Resources/dictate-applet.sha256" 2>/dev/null)" != "$stamp" ]]; then
     [[ -e $APP ]] && echo "    The launcher changed: macOS will ask for its permissions again."
@@ -169,9 +178,8 @@ if [[ $OS == Darwin ]]; then
   else
     echo "    keeping $APP"
   fi
-  pkill -f "venv/bin/python -X utf8 dictate.py" 2>/dev/null || true  # an earlier copy (the app quits with it)
-  sleep 1
   AGENT="$HOME/Library/LaunchAgents/$APP_ID.plist"
+  started=0
   if [[ "${DICTATE_NO_AUTOSTART:-}" == 1 ]]; then
     say "Skipping start-at-login (DICTATE_NO_AUTOSTART=1)"
   else
@@ -189,9 +197,9 @@ if [[ $OS == Darwin ]]; then
 </plist>
 EOF
     launchctl bootout "gui/$(id -u)/$APP_ID" 2>/dev/null || true
-    launchctl bootstrap "gui/$(id -u)" "$AGENT" 2>/dev/null || true
+    launchctl bootstrap "gui/$(id -u)" "$AGENT" 2>/dev/null && started=1 || true  # RunAtLoad opens the app
   fi
-  open -g -a "$APP"
+  [[ $started == 1 ]] || open -g -a "$APP"
 else
   if [[ $MODE == systemd ]]; then
     START="systemctl --user restart dictate.service"

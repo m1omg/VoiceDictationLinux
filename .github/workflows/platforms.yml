@@ -56,7 +56,8 @@ jobs:
       - name: Unit tests
         run: |
           $Py = "$env:LOCALAPPDATA\dictate\venv\Scripts\python.exe"
-          foreach ($Test in "unit_keys", "unit_models", "unit_topbar", "unit_windows", "unit_audio", "unit_portability") {
+          foreach ($Test in "unit_keys", "unit_models", "unit_topbar", "unit_windows", "unit_audio", "unit_portability",
+                         "unit_setup", "unit_paster", "unit_switch") {
             Write-Host "== $Test"
             & $Py -X utf8 "tests\$Test.py"
             if ($LASTEXITCODE -ne 0) { exit 1 }
@@ -75,7 +76,7 @@ jobs:
           if (-not (Select-String -Path $Log -Pattern "model ready" -Quiet)) { Write-Host "no model loaded"; exit 1 }
           if (Select-String -Path $Log -Pattern "Traceback" -Quiet) { Write-Host "an error in the log"; exit 1 }
           New-Item -ItemType Directory -Force "$D\run" | Out-Null
-          Set-Content -Path "$D\run\command" -Value "quit"
+          Set-Content -Path "$D\run\dictate-command" -Value "quit"
           for ($i = 0; $i -lt 20; $i++) {
             $Running = @(Get-CimInstance Win32_Process -Filter "Name = 'pythonw.exe'" |
               Where-Object { $_.CommandLine -like "*dictate.py*" })
@@ -142,7 +143,7 @@ jobs:
       - name: Unit tests
         run: |
           PY="$HOME/Library/Application Support/dictate/venv/bin/python"
-          for t in unit_keys unit_models unit_topbar unit_macos unit_audio unit_portability; do
+          for t in unit_keys unit_models unit_topbar unit_macos unit_audio unit_portability unit_setup unit_paster unit_switch; do
             echo "== $t"
             "$PY" "tests/$t.py"
           done
@@ -200,7 +201,8 @@ jobs:
       - name: Unit tests
         run: |
           PY="$HOME/.local/share/dictate/venv/bin/python"
-          for t in unit_keys unit_models unit_topbar unit_windows unit_macos unit_audio unit_portability; do
+          for t in unit_keys unit_models unit_topbar unit_windows unit_macos unit_audio unit_portability unit_setup \
+                   unit_paster unit_switch; do
             echo "== $t"
             "$PY" "tests/$t.py"
           done

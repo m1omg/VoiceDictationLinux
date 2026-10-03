@@ -16,6 +16,7 @@ Run with --help for the setup and test modes.
 from __future__ import annotations
 
 import argparse
+import atexit
 import ctypes
 import faulthandler
 import functools
@@ -65,6 +66,9 @@ else:
     STATE_PATH = Path(os.environ.get("XDG_STATE_HOME") or Path.home() / ".local/state") / "dictate/state.json"
     RUNTIME_DIR = Path(os.environ.get("XDG_RUNTIME_DIR") or f"/run/user/{os.getuid()}")
 MODELS_DIR = APP_DIR / "models"
+# Between dictation and its settings window (RUNTIME_DIR is shared with other programs on Linux):
+STATUS_PATH = RUNTIME_DIR / "dictate-status.json"  # what dictation is doing, for the window
+COMMAND_PATH = RUNTIME_DIR / "dictate-command"  # "quit" from the window's Stop button
 LOG_PATH = APP_DIR / "dictate.log"  # used when there is no journal (autostart desktops, Windows, macOS)
 RATE = 16000
 STALE_SECONDS = 15
@@ -135,9 +139,24 @@ def load_config() -> SimpleNamespace:
 DEVICES = ("auto", "gpu", "cpu")  # "auto": the GPU when one works, else quietly the CPU
 
 
+def x11_keysym(name: str) -> int:
+    """An X11 key name's keysym, 0 if there's none. (python-xlib spells XF86Launch5 as XF86_Launch5.)"""
+    from Xlib import XK
+    XK.load_keysym_group("xf86")
+    return XK.string_to_keysym(name) or (XK.string_to_keysym("XF86_" + name[4:]) if name.startswith("XF86") else 0)
+
+
+def parse_trigger(text: str) -> keys.Trigger:
+    """keys.parse, and on Linux a key name outside keys.NAMED must be one X11 knows. Raises ValueError."""
+    trigger = keys.parse(text)
+    if LINUX and len(trigger.key) > 1 and trigger.key not in keys.NAMED and not x11_keysym(trigger.key):
+        raise ValueError(f"X11 has no key called {trigger.key!r}")
+    return trigger
+
+
 def valid_trigger(text: str) -> bool:
     try:
-        keys.parse(text)
+        parse_trigger(text)
         return True
     except ValueError as e:
         log.warning("the key %r can't be used: %s", text, e)
@@ -223,16 +242,22 @@ class UiState:
         raise AttributeError(name)
 
     def set(self, **changes) -> None:
+        """Save choices. Only these are written into what state.json holds now, so a choice the other
+        process (the daemon's tray, or the settings window) saved meanwhile stays."""
         with self._lock:
             self._values.update(changes)
-            data = json.dumps(self._values, indent=1) + "\n"
-        try:
-            STATE_PATH.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-            tmp = STATE_PATH.with_suffix(".tmp")
-            tmp.write_text(data, encoding="utf-8")
-            tmp.replace(STATE_PATH)
-        except OSError as e:
-            log.warning("state: cannot save %s: %s", STATE_PATH, e)
+            try:
+                saved = json.loads(STATE_PATH.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                saved = {}
+            saved = {**(saved if isinstance(saved, dict) else {}), **changes}
+            try:
+                STATE_PATH.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+                tmp = STATE_PATH.with_name(f"{STATE_PATH.stem}.{os.getpid()}.tmp")
+                tmp.write_text(json.dumps(saved, indent=1) + "\n", encoding="utf-8")
+                tmp.replace(STATE_PATH)
+            except OSError as e:
+                log.warning("state: cannot save %s: %s", STATE_PATH, e)
         log.info("menu: %s", ", ".join(f"{k}={v}" for k, v in changes.items()))
         for listener in self.listeners:
             listener()
@@ -786,6 +811,26 @@ class PortalShortcut(threading.Thread):
                     raise RuntimeError(f"{msg.body[0]} restarted")
 
 
+CLEANUPS: list = []  # (function, args) to run when dictation ends, and before it restarts itself
+
+
+def at_exit(fn, *args) -> None:
+    CLEANUPS.append((fn, args))
+    atexit.register(fn, *args)
+
+
+def restore_repeat(code: int) -> None:
+    """Give an X11 key its auto-repeat back (when dictation ends or restarts)."""
+    try:
+        from Xlib import X, display
+        d = display.Display()
+        d.change_keyboard_control(key=code, auto_repeat_mode=X.AutoRepeatModeDefault)
+        d.sync()
+        d.close()
+    except Exception as e:
+        log.debug("auto-repeat not restored: %s", e)
+
+
 class X11Hotkey(threading.Thread):
     """The push-to-talk key on an X11 desktop (e.g. Cinnamon on LMDE).
 
@@ -793,8 +838,10 @@ class X11Hotkey(threading.Thread):
     us the whole keyboard until the key is released, which would swallow our own Shift+Insert,
     so the grab is handed back at once and the release is found by polling the key state.
     Auto-repeat is switched off for this one key (again whenever a keyboard is plugged in or
-    comes back after a suspend), because every repeat would grab the keyboard once more.
-    A combination (Ctrl+Alt+D) is grabbed with its modifiers; it ends when its key is released.
+    comes back after a suspend), because every repeat would grab the keyboard once more; it comes
+    back when dictation ends.
+    A combination (Ctrl+Alt+D) is grabbed with its modifiers; it ends when its key is released. Its
+    key (D) keeps repeating for typing: nothing is pasted while Ctrl and Alt are held anyway.
     A modifier key on its own (Right Ctrl) is still a modifier: pressing another key while it is
     held means a shortcut, so the dictation is cancelled (the shortcut works as usual).
     """
@@ -804,20 +851,23 @@ class X11Hotkey(threading.Thread):
         self.cfg, self.emit = cfg, emit
 
     def run(self):
-        from Xlib import X, XK, display, error
+        from Xlib import X, display, error
         from Xlib.ext import xinput
         try:
             trigger = keys.parse(self.cfg.trigger)
             d = display.Display()
             root = d.screen().root
-            code = d.keysym_to_keycode(XK.string_to_keysym(trigger.key))
+            code = d.keysym_to_keycode(x11_keysym(trigger.key))
             if not code:
                 raise RuntimeError(f"no key on this keyboard produces {trigger.key}")
             catch = error.CatchError(error.BadAccess)
             for mods in (0, X.Mod2Mask, X.LockMask, X.Mod2Mask | X.LockMask):  # NumLock / CapsLock on or off
                 root.grab_key(code, keys.x11_mask(trigger) | mods, True, X.GrabModeAsync, X.GrabModeAsync,
                               onerror=catch)
-            d.change_keyboard_control(key=code, auto_repeat_mode=X.AutoRepeatModeOff)
+            no_repeat = not trigger.mods  # a single key (a combination's key is a typing key)
+            if no_repeat:
+                d.change_keyboard_control(key=code, auto_repeat_mode=X.AutoRepeatModeOff)
+                at_exit(restore_repeat, code)
             root.xinput_select_events([(xinput.AllDevices, xinput.HierarchyChangedMask)])
             d.sync()
             if catch.get_error():
@@ -845,14 +895,14 @@ class X11Hotkey(threading.Thread):
             e = d.next_event()
             if e.type == X.KeyPress and e.detail == code:
                 d.ungrab_keyboard(X.CurrentTime)  # let our Shift+Insert reach the app while the key is held
-                if down:  # a repeat: some keyboard still repeats the key
+                if down and no_repeat:  # a repeat: some keyboard still repeats the key
                     d.change_keyboard_control(key=code, auto_repeat_mode=X.AutoRepeatModeOff)
                 d.flush()
                 keymap = d.query_keymap()
                 if not down and held(keymap):  # not a repeat, nor a press that is already over
                     down, before = True, keymap
                     self.emit("press", time.monotonic())
-            elif getattr(e, "evtype", None) == xinput.HierarchyChanged:  # a keyboard came (back)
+            elif getattr(e, "evtype", None) == xinput.HierarchyChanged and no_repeat:  # a keyboard came (back)
                 d.change_keyboard_control(key=code, auto_repeat_mode=X.AutoRepeatModeOff)
                 d.flush()
 
@@ -861,8 +911,9 @@ def microphone() -> str:
     """The default input device and its volume, for the log when only silence came in."""
     if not LINUX:
         try:
-            import sounddevice as sd
-            return sd.query_devices(kind="input")["name"]
+            with PortAudioRecorder.lock:  # not while another thread re-initialises PortAudio
+                import sounddevice as sd
+                return sd.query_devices(kind="input")["name"]
         except Exception as e:
             return f"unknown ({e})"
     try:
@@ -972,6 +1023,12 @@ class PortAudioRecorder(Recorder):
             log.warning("closing the microphone stream failed: %s", e)
         threading.Thread(target=self.refresh, name="audio-devices", daemon=True).start()
         return self.snapshot()
+
+    @classmethod
+    def warm_up(cls) -> None:
+        """Load PortAudio (it lists the devices then, slowly on Windows) before the first key press."""
+        with cls.lock:
+            import sounddevice  # noqa: F401
 
     @classmethod
     def refresh(cls) -> None:
@@ -1334,6 +1391,7 @@ class Session:
     dropped: bool = False
     audio: np.ndarray | None = None
     t_release: float = 0.0
+    key_up_at: float = 0.0  # when the key that started it went up (0: still held)
 
 
 @dataclass
@@ -1436,10 +1494,10 @@ class Worker(threading.Thread):
         self.topbar.update(loading=True)
         try:
             self.transcriber.load(*choice)
-            self.topbar.update(loading=False, problem=None, model=self.transcriber.desc)
+            self.topbar.update(loading=False, model_problem=None, model=self.transcriber.desc)
         except Exception as e:
             log.exception("model loading failed")
-            self.topbar.update(loading=False, problem=f"The speech model could not be loaded: {e}", model=None)
+            self.topbar.update(loading=False, model_problem=f"The speech model could not be loaded: {e}", model=None)
             notify("Dictation can't transcribe", f"The speech model could not be loaded: {e}")
         finally:
             self.loading = None
@@ -1543,7 +1601,8 @@ class Watchdog(threading.Thread):
     """Restarts dictate when a model pass hangs, instead of leaving it "Transcribing…" forever.
 
     A pass normally takes 0.3-1.5 s on a GPU. Once one has run for 30 s plus a quarter of its
-    audio's length (or a model load for 3 minutes), every thread's stack goes to the log (to find
+    audio's length (on a processor: plus its whole length, since a big model on a 2-core laptop is
+    many times slower), or a model load for 3 minutes, every thread's stack goes to the log (to find
     the cause) and the program starts over.
     """
 
@@ -1557,7 +1616,7 @@ class Watchdog(threading.Thread):
         while True:
             time.sleep(2)
             busy, loading, now = self.worker.busy, self.worker.loading, time.monotonic()
-            if busy is not None and now - busy[0] >= 30 + busy[1] / 4:
+            if busy is not None and now - busy[0] >= 30 + busy[1] * (1.0 if self.worker.transcriber.on_cpu else 0.25):
                 log.error("a model pass has run for %.0f s (%.1f s of audio); thread stacks follow",
                           now - busy[0], busy[1])
             elif loading is not None and now - loading >= self.LOAD_LIMIT:
@@ -1584,6 +1643,8 @@ class Watchdog(threading.Thread):
 class ModelSwitch:
     """Applies the model and device chosen in the menu: a missing model is downloaded first, in a
     child process (dictate.py --download NAME), while the current one keeps working."""
+    STAND_INS = {"gpu_model": ("large-v3-turbo", "medium", "small", "base", "tiny"),
+                 "cpu_model": ("small", "base", "tiny", "large-v3-turbo", "medium")}
 
     def __init__(self, ui: UiState, worker: Worker, topbar):
         self.ui, self.worker, self.topbar = ui, worker, topbar
@@ -1591,6 +1652,30 @@ class ModelSwitch:
         self.lock = threading.Lock()
         # After a GPU hang the CPU is used until the user picks a model or device again.
         self.held = (ui.device, ui.gpu_model, ui.cpu_model) if os.environ.get("DICTATE_FORCE_CPU") else None
+
+    def start(self) -> None:
+        """The first load. A chosen model that isn't there (dictation restarted during its download,
+        say) is replaced by an installed one, and downloaded once it's known which one runs."""
+        device = "cpu" if os.environ.get("DICTATE_FORCE_CPU") else self.ui.device  # see Watchdog
+        choice = {"device": device, "gpu_model": self.ui.gpu_model, "cpu_model": self.ui.cpu_model}
+        missing = False
+        for key, order in self.STAND_INS.items():
+            if not models.installed(MODELS_DIR, choice[key]):
+                missing = True
+                choice[key] = next((m for m in order if models.installed(MODELS_DIR, m)), choice[key])
+        self.worker.want((choice["device"], choice["gpu_model"], choice["cpu_model"]))
+        if missing:
+            threading.Thread(target=self._after_first_load, name="models", daemon=True).start()
+
+    def _after_first_load(self) -> None:
+        while self.worker.choice == ("auto", None, None) or self.worker.loading or self.worker.wanted:
+            time.sleep(0.5)
+        self.changed()
+
+    def loaded(self) -> tuple[bool, str] | None:
+        """What runs now: (on the GPU?, the model), or None while no model is loaded."""
+        tr = self.worker.transcriber
+        return (not tr.on_cpu, tr.name) if tr.ready.is_set() else None
 
     def on_gpu(self) -> bool:
         """Whether the choice in the menu means the GPU (as far as one can be used)."""
@@ -1608,38 +1693,39 @@ class ModelSwitch:
             if choice == self.held:
                 return
             self.held = None
-        if self.target(choice) == self.target(self.worker.wanted or self.worker.choice):
+        pending = self.worker.wanted or (self.worker.choice if self.worker.loading else None)
+        if self.target(choice) == (self.target(pending) if pending else self.loaded()):
             return  # e.g. a language change, or "auto" -> "gpu" with a GPU already in use
-        name = self.target(choice)[1]
+        on_gpu, name = self.target(choice)
         if not models.installed(MODELS_DIR, name):
             if name in models.MODELS:
-                self.download(name)
+                self.download(name, "gpu_model" if on_gpu else "cpu_model")
             else:
                 notify("Speech model not found", f"There is no model called {name} in {MODELS_DIR}.")
             return
         self.worker.want(choice)
 
-    def download(self, name: str) -> None:
+    def download(self, name: str, key: str) -> None:
         with self.lock:
             if name in self.downloading:
                 return
             self.downloading.add(name)
-        threading.Thread(target=self._download, args=(name,), name="download", daemon=True).start()
+        threading.Thread(target=self._download, args=(name, key), name="download", daemon=True).start()
 
-    def _download(self, name: str) -> None:
+    def _download(self, name: str, key: str) -> None:
         notify(f"Downloading the {name} speech model", f"{models.size_label(name)}. Dictation keeps working "
                "with the current model meanwhile.")
         log.info("downloading the %s model", name)
         env = {**os.environ, "HF_HUB_DISABLE_PROGRESS_BARS": "1"}
         try:
             proc = subprocess.Popen([sys.executable, str(Path(__file__).resolve()), "--download", name], env=env,
-                                    stdin=subprocess.DEVNULL, creationflags=NO_WINDOW)
+                                    stdin=subprocess.DEVNULL, creationflags=NO_WINDOW, **child_streams())
             expected = models.MODELS[name][1] * 1e6
             while proc.poll() is None:
                 done = models.partial_bytes(MODELS_DIR, name) / expected
                 self.topbar.update(download=f"{name} {min(99, int(done * 100))} %")
                 time.sleep(1)
-            ok = proc.returncode == 0 and models.installed(MODELS_DIR, name)
+            ok = models.installed(MODELS_DIR, name)  # (also if a copy started before a restart finished it)
         except OSError as e:
             log.error("cannot start the download: %s", e)
             ok = False
@@ -1653,20 +1739,25 @@ class ModelSwitch:
         else:
             notify(f"The {name} model could not be downloaded", "Check the internet connection. The log has "
                    "the details.")
+            loaded = self.loaded()
+            if loaded and loaded[1] != name and key == ("gpu_model" if loaded[0] else "cpu_model"):
+                self.ui.set(**{key: loaded[1]})  # the menu shows what really runs; picking it again retries
 
 
 def restart_self() -> None:
     """Start this program over with the same arguments (systemd keeps seeing the same PID on Linux)."""
     for handler in logging.getLogger().handlers:
         handler.flush()
+    for fn, args in CLEANUPS:  # e.g. a key's auto-repeat back (execv skips atexit; the new copy redoes its own)
+        fn(*args)
     if not WINDOWS:
         os.execv(sys.executable, sys.orig_argv)
     # Windows' execv doesn't quote arguments with spaces and changes the PID anyway: start a new copy,
     # which waits for our single-instance lock, then leave.
     from windows import release_single_instance
     release_single_instance()
-    subprocess.Popen([sys.executable, *sys.orig_argv[1:]], close_fds=True,
-                     creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP)
+    subprocess.Popen([sys.executable, *sys.orig_argv[1:]], close_fds=True, stdin=subprocess.DEVNULL,
+                     creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP, **child_streams())
     os._exit(0)
 
 
@@ -1681,6 +1772,12 @@ class Paster(threading.Thread):
         self.on_inject = lambda: None  # set by the controller (our keystrokes stop the key's auto-repeat)
         self.on_done = lambda kind, text: None  # "typed" (the whole text) or "copied" (why), for the panel
         self.saved: dict[int, bytes | None] = {}  # session id -> clipboard text from before it
+        # A combination (Ctrl+Alt+D) or a lone modifier as the key, with a keyboard that can't see
+        # whether Ctrl/Alt are down (uinput, on Wayland): words wait until the key is up, or our
+        # Shift+Insert would arrive as Ctrl+Alt+Shift+Insert, which no app pastes on.
+        trigger = keys.parse(cfg.trigger) if valid_trigger(cfg.trigger) else None
+        self.wait_for_key = (keyboard is not None and not hasattr(keyboard, "modifiers_held")
+                             and trigger is not None and bool(trigger.mods or trigger.lone_modifier))
         self.diverted: dict[int, tuple[str, str]] = {}  # session id -> (why not typed, text so far)
         self.live_started: set[int] = set()
 
@@ -1709,6 +1806,8 @@ class Paster(threading.Thread):
 
     def paste(self, item: PasteItem) -> None:
         s = item.session
+        if s.dropped and not item.final:  # cancelled (the key was part of a shortcut): no more words
+            return
         problem = None if s.id in self.diverted else self._problem(item)
         if problem:
             self.diverted[s.id] = (problem, "")
@@ -1721,10 +1820,12 @@ class Paster(threading.Thread):
         if s.id not in self.saved:
             self.saved[s.id] = self.sel.read_clipboard() if self.cfg.restore_clipboard else None
         chunks = split_chunks(item.text, self.cfg.paste_chunk_chars) if item.text else []
-        if chunks and not self._modifiers_up(item.final):
+        if chunks and not self._modifiers_up(item):
             self.diverted[s.id] = ("a modifier key stayed pressed", "".join(chunks))
             if item.final:
                 self._give_up(s, *self.diverted.pop(s.id))
+            return
+        if s.dropped and not item.final:  # cancelled while it waited for Ctrl to come up
             return
         for i, chunk in enumerate(chunks):
             if not self.sel.publish(chunk):
@@ -1759,7 +1860,8 @@ class Paster(threading.Thread):
             return
         if s.t_release:
             log.info("typed; release -> done %.2f s", time.monotonic() - s.t_release)
-        self.on_done("typed", s.text.typed if s.text and s.text.typed else item.text)
+        if not s.dropped:
+            self.on_done("typed", s.text.typed if s.text and s.text.typed else item.text)
         old = self.saved.pop(s.id, None)
         if old:  # nothing to restore if the clipboard was empty or held non-text (e.g. an image)
             time.sleep(0.3)
@@ -1768,19 +1870,26 @@ class Paster(threading.Thread):
             else:
                 log.info("clipboard changed meanwhile; not restoring")
 
-    def _modifiers_up(self, final: bool) -> bool:
+    def _modifiers_up(self, item: PasteItem) -> bool:
         """Wait while Ctrl/Alt/Shift/Super are held: with a Ctrl+Alt+D key (or Right Ctrl on X11) our
-        Shift+Insert would arrive as Ctrl+Alt+Shift+Insert. Live words wait as long as it takes."""
+        Shift+Insert would arrive as Ctrl+Alt+Shift+Insert. Live words wait as long as it takes. A
+        keyboard that can't see the modifiers waits until the key is up (see wait_for_key). False:
+        they stayed down too long; a session cancelled meanwhile returns at once."""
+        s = item.session
         held = getattr(self.kbd, "modifiers_held", None)
-        if held is None or not held():
+        if held is None:
+            if not self.wait_for_key:
+                return True
+            held = lambda: not s.key_up_at or time.monotonic() - s.key_up_at < 0.25  # noqa: E731
+        if not held():
             return True
         log.info("waiting for Ctrl/Alt/Shift to be released before typing")
-        deadline = time.monotonic() + (STALE_SECONDS if final else self.cfg.max_seconds)
-        while time.monotonic() < deadline:
+        deadline = time.monotonic() + (STALE_SECONDS if item.final else self.cfg.max_seconds)
+        while time.monotonic() < deadline and not s.dropped:
             time.sleep(0.05)
             if not held():
                 return True
-        return False
+        return s.dropped
 
     def _give_up(self, s: Session, why: str, text: str) -> None:
         self.saved.pop(s.id, None)
@@ -1789,7 +1898,8 @@ class Paster(threading.Thread):
         log.info("left %d chars on the clipboard: %s", len(text), why)
         self.sel.publish(text, immediate=True)
         self.on_done("copied", why)
-        notify("Dictation copied to the clipboard", f"It was not typed because {why}. Paste it with Ctrl+V.")
+        notify("Dictation copied to the clipboard",
+               f"It was not typed because {why}. Paste it with {'Cmd+V' if MACOS else 'Ctrl+V'}.")
 
 
 def open_text_file(path: Path) -> None:
@@ -1806,11 +1916,17 @@ HERE = Path(__file__).resolve().parent
 NO_WINDOW = 0x08000000 if WINDOWS else 0  # CREATE_NO_WINDOW: child processes without a console window
 
 
+def child_streams() -> dict:
+    """Output for a child process. pythonw.exe has no standard handles, and a child started without
+    them gets a pipe that nobody reads, so its first print fails: it gets our log file instead."""
+    return {"stdout": sys.stderr, "stderr": subprocess.STDOUT} if WINDOWS and sys.__stderr__ is None else {}
+
+
 def open_settings_window():
     """The big settings window (bigui.py settings), a process of its own."""
     try:
         return subprocess.Popen([sys.executable, str(HERE / "bigui.py"), "settings"], creationflags=NO_WINDOW,
-                                stdin=subprocess.DEVNULL, start_new_session=not WINDOWS)
+                                stdin=subprocess.DEVNULL, start_new_session=not WINDOWS, **child_streams())
     except OSError as e:
         log.warning("cannot open the settings window: %s", e)
         return None
@@ -1832,7 +1948,7 @@ class StateWatcher(threading.Thread):
             return 0
 
     def run(self):
-        command = RUNTIME_DIR / "command"
+        command = COMMAND_PATH
         while True:
             time.sleep(0.5)
             mtime = self._mtime()
@@ -1856,23 +1972,29 @@ class PanelProcess:
         self.ui, self.proc, self.started = ui, None, -60.0
         self.lock = threading.Lock()
 
-    def send(self, msg: dict) -> None:
+    def send(self, msg: dict | None) -> None:
+        """Show msg on the panel; None only starts the panel (or stops it when it was switched off).
+        It is started ahead of the first dictation: a window shown for the first time can take the
+        keyboard focus on Windows."""
         with self.lock:
             if not self.ui.big_panel:
                 self._stop()
                 return
-            msg = {**msg, "scale": self.ui.ui_scale, "colors": self.ui.ui_colors, "position": self.ui.panel_position}
             if self.proc is None or self.proc.poll() is not None:
                 if time.monotonic() - self.started < 30:
                     return
                 self.started = time.monotonic()
                 try:
                     self.proc = subprocess.Popen([sys.executable, str(HERE / "bigui.py"), "panel"], text=True,
-                                                 encoding="utf-8", stdin=subprocess.PIPE, creationflags=NO_WINDOW)
+                                                 encoding="utf-8", stdin=subprocess.PIPE, creationflags=NO_WINDOW,
+                                                 **child_streams())
                 except OSError as e:
                     log.warning("cannot start the big status panel: %s", e)
                     self.proc = None
                     return
+            if msg is None:
+                return
+            msg = {**msg, "scale": self.ui.ui_scale, "colors": self.ui.ui_colors, "position": self.ui.panel_position}
             try:
                 self.proc.stdin.write(json.dumps(msg) + "\n")
                 self.proc.stdin.flush()
@@ -1904,7 +2026,7 @@ class Quiet:
 class TopBar:
     """The top-bar (tray) icon: shows ready / recording / working / problem plus the language; its
     menu switches language, model, device, live typing, sounds and large text. It also feeds the
-    big status panel and status.json (read by the big settings window)."""
+    big status panel and STATUS_PATH (read by the big settings window)."""
     ICONS = {"ready": "audio-input-microphone-symbolic", "recording": "media-record-symbolic",
              "working": "content-loading-symbolic", "problem": "microphone-disabled-symbolic"}
 
@@ -1917,8 +2039,8 @@ class TopBar:
             from tray_pystray import MenuItem, TrayIcon
         self.ui, self.MenuItem = ui, MenuItem
         self.lock = threading.Lock()
-        self.state = {"loading": True, "recording": False, "busy": 0, "problem": None, "detected": None,
-                      "preview": "", "model": None, "download": None, "key": None}
+        self.state = {"loading": True, "recording": False, "busy": 0, "key_problem": None, "model_problem": None,
+                      "detected": None, "preview": "", "model": None, "download": None, "key": None}
         self.on_quit = lambda: None  # set by the daemon: ends the program cleanly
         self.switch: ModelSwitch | None = None  # set by the daemon: applies model and device choices
         # After the state above: pystray builds the menu right away (Linux's tray builds it on request).
@@ -1939,18 +2061,20 @@ class TopBar:
     def event(self, kind: str, text: str = "") -> None:
         """An outcome for the big panel: "typed" (text), "copied" (why), "muted", "nothing", "error"."""
         paste = "Cmd+V" if MACOS else "Ctrl+V"
-        title, accent, seconds = {
-            "typed": ("✓ Typed", False, 3), "copied": (f"Not typed ({text}). It is on the clipboard: paste it with "
-                                                     f"{paste}.", True, 8),
-            "muted": ("Only silence was recorded: is the microphone muted?", True, 8),
-            "nothing": ("Nothing was heard.", False, 3), "error": (f"Dictation failed: {text}", True, 8),
-        }.get(kind, (text, False, 3))
+        title, words, accent, seconds = {
+            "typed": ("Typed", text, False, 3),
+            "copied": (f"Not typed. It is on the clipboard: paste it with {paste}.", f"It was not typed because {text}.",
+                       True, 8),
+            "muted": ("Only silence was recorded: is the microphone muted?", "", True, 8),
+            "nothing": ("Nothing was heard.", "", False, 3), "error": (f"Dictation failed: {text}", "", True, 8),
+        }.get(kind, (text, "", False, 3))
         self.panel_ongoing = False
-        self.panel.send({"show": True, "title": title, "text": text if kind == "typed" else "", "accent": accent,
-                         "hide_after": seconds})
+        self.panel.send({"show": True, "title": title, "mark": "tick" if kind == "typed" else None, "text": words,
+                         "accent": accent, "hide_after": seconds})
 
     def start(self) -> None:
         self.tray.start()
+        self.panel.send(None)
         self.push()
 
     def update(self, **changes) -> None:
@@ -1968,6 +2092,7 @@ class TopBar:
     def changed(self) -> None:
         if (self.tray.on_activate is not None) != self.ui.big_settings:  # a click opens the window, or the menu
             self.tray.set_activate(self.open_settings if self.ui.big_settings else None)
+        self.panel.send(None)  # started, or stopped, as the big panel was switched on or off
         self.tray.refresh_menu()
         self.push()
 
@@ -2010,7 +2135,8 @@ class TopBar:
                 M(41, f"Run on: {'graphics card' if on_gpu else 'processor'}", children=run_on),
                 M(42, "Large text", children=[
                     M(420, "Big status panel while dictating", "check", ui.big_panel),
-                    M(421, "Clicking the icon opens the big settings window", "check", ui.big_settings),
+                    *([] if MACOS else  # the menu bar item always opens its menu there
+                      [M(421, "Clicking the icon opens the big settings window", "check", ui.big_settings)]),
                     M(422, "Text size and colours…")]),
                 M(5, kind="separator"),
                 M(32, "Settings window…"),
@@ -2058,8 +2184,8 @@ class TopBar:
         language = self.ui.language
         if s["recording"]:  # a press while a model loads still records
             icon, tip = "recording", "Listening…"
-        elif s["problem"]:
-            icon, tip = "problem", s["problem"]
+        elif s["model_problem"] or s["key_problem"]:  # (kept apart: one being solved doesn't hide the other)
+            icon, tip = "problem", s["model_problem"] or s["key_problem"]
         elif s["loading"]:
             icon, tip = "working", "Loading the speech model…"
         elif s["busy"]:
@@ -2089,7 +2215,8 @@ class TopBar:
         """The big panel shows what is going on; event() shows how it ended."""
         if s["recording"]:
             note = " (the speech model is still loading)" if s["loading"] else ""
-            message = {"show": True, "title": f"● Listening — {code}{note}", "text": s["preview"], "accent": True}
+            message = {"show": True, "title": f"Listening — {code}{note}", "mark": "dot", "text": s["preview"],
+                       "accent": True}
         elif s["busy"]:
             message = {"show": True, "title": "Transcribing…", "text": s["preview"]}
         elif self.panel_ongoing:  # ended without an outcome (e.g. a recording too short to use)
@@ -2102,17 +2229,17 @@ class TopBar:
             self.panel.send(message)
 
     def write_status(self, status: dict) -> None:
-        """status.json: what the big settings window shows about the running dictation."""
+        """STATUS_PATH: what the big settings window shows about the running dictation."""
         text = json.dumps(status)
         if text == self.status_text:
             return
         self.status_text = text
         try:
-            tmp = RUNTIME_DIR / "status.tmp"
+            tmp = STATUS_PATH.with_suffix(".tmp")
             tmp.write_text(text, encoding="utf-8")
-            tmp.replace(RUNTIME_DIR / "status.json")
+            tmp.replace(STATUS_PATH)
         except OSError as e:
-            log.debug("cannot write status.json: %s", e)
+            log.debug("cannot write %s: %s", STATUS_PATH, e)
 
 
 class Controller:
@@ -2173,6 +2300,7 @@ class Controller:
                     self.last = t
                 elif t - self.t_release < 0.12:  # key bounce: keep the same recording
                     self.state, self.last = "HOLD", t
+                    self.session.key_up_at = 0.0
                 else:
                     self._finish()
                     self._start(t)
@@ -2189,6 +2317,8 @@ class Controller:
             elif self.state == "WAIT_RELEASE":
                 self.last = t
         elif kind == "release":
+            if self.state == "HOLD" and self.session is not None:
+                self.session.key_up_at = value
             if self.state == "HOLD" and not self.reps and value - self.t_press < self.TAP:
                 self.state = "LATCHED"  # a tap: keep dictating until the next press
                 log.info("tapped: dictating until the next press")
@@ -2204,12 +2334,12 @@ class Controller:
                 self.cues.play("start")
             log.debug("microphone live %.0f ms after the key press", (value - self.t_press) * 1000)
         elif kind == "key_ready":  # value: the key, as the desktop or the config names it
-            self.topbar.update(problem=None, key=value)
+            self.topbar.update(key_problem=None, key=value)
         elif kind == "key_lost":
             if self.state in ("HOLD", "LATCHED", "TAIL"):
                 self._finish()
             self.state = "IDLE"
-            self.topbar.update(problem="Waiting for the keyboard shortcut…")
+            self.topbar.update(key_problem="Waiting for the keyboard shortcut…")
         elif kind == "not_approved":
             notify("Dictation shortcut was not approved",
                    "Run 'systemctl --user restart dictate' to see GNOME's dialog again.")
@@ -2332,7 +2462,7 @@ def run_daemon(cfg) -> int:
         print("dictate is already running; opening its settings window")
         open_settings_window()
         return 0
-    RUNTIME_DIR.mkdir(parents=True, exist_ok=True)  # status.json, the sounds, the settings window's commands
+    RUNTIME_DIR.mkdir(parents=True, exist_ok=True)  # the status, the sounds, the settings window's commands
     ui = UiState(cfg)
     topbar = TopBar(ui)
     topbar.start()
@@ -2341,7 +2471,7 @@ def run_daemon(cfg) -> int:
     cfg.trigger, cfg.shortcut_id = trigger, shortcut_id(cfg, trigger)
     selection, keyboard, no_keyboard, Hotkey = make_io(cfg)
     if not LINUX:  # PortAudio lists the devices once, slowly on Windows: not on the first key press
-        threading.Thread(target=PortAudioRecorder.refresh, name="audio-devices", daemon=True).start()
+        threading.Thread(target=PortAudioRecorder.warm_up, name="audio-devices", daemon=True).start()
     if keyboard is None:
         log.error("cannot create the virtual keyboard: %s", no_keyboard)
         notify("Dictation can't type", f"{no_keyboard}; text will only be copied.")
@@ -2349,11 +2479,10 @@ def run_daemon(cfg) -> int:
     paster = Paster(cfg, selection, keyboard, no_keyboard)
     paster.start()
     worker = Worker(cfg, transcriber, paster, cues, topbar)
-    # After the GPU hung while loading (see Watchdog), stay on the CPU until dictation is started anew.
-    worker.want(("cpu" if os.environ.get("DICTATE_FORCE_CPU") else ui.device, ui.gpu_model, ui.cpu_model))
+    switch = ModelSwitch(ui, worker, topbar)
+    switch.start()  # the first load (after the GPU hung while loading, on the CPU: see Watchdog)
     worker.start()
     Watchdog(worker).start()
-    switch = ModelSwitch(ui, worker, topbar)
     topbar.switch = switch
     ui.listeners.append(switch.changed)
     ctl = Controller(cfg, ui, cues, worker, topbar)
@@ -2370,7 +2499,8 @@ def run_daemon(cfg) -> int:
     Hotkey(cfg, ctl.emit).start()
     if MACOS:  # ask for the microphone now, not on the first key press
         from macos import ask_for_microphone
-        threading.Thread(target=ask_for_microphone, name="microphone", daemon=True).start()
+        threading.Thread(target=ask_for_microphone, args=(PortAudioRecorder.lock,), name="microphone",
+                         daemon=True).start()
     try:
         if not getattr(topbar.tray, "needs_main_thread", False):
             return ctl.run()
@@ -2395,7 +2525,7 @@ def run_daemon(cfg) -> int:
             ctl.session.rec.stop()
         if keyboard:
             keyboard.close()
-        (RUNTIME_DIR / "status.json").unlink(missing_ok=True)
+        STATUS_PATH.unlink(missing_ok=True)
 
 
 def run_check(cfg) -> int:
@@ -2416,13 +2546,14 @@ def run_check(cfg) -> int:
         report("GPU libraries", False, str(e))
         return 1
     if platform == "rocm":
-        gpu, code = amd_gpu()
-        override = os.environ.get("HSA_OVERRIDE_GFX_VERSION")
         report("ROCm libraries", True, ", ".join(Path(p).name for p in libs))
-        report("AMD GPU", bool(gpu and code), f"{gpu or 'not found'}, ROCm device code for {code or '?'}"
-               + (f" (HSA_OVERRIDE_GFX_VERSION={override})" if override else ""))
-        kfd = os.access("/dev/kfd", os.R_OK | os.W_OK)
-        report("/dev/kfd", kfd, "accessible" if kfd else "no access (README: Troubleshooting, AMD)")
+        if LINUX:  # (Windows: the GPU devices line below says whether it works)
+            gpu, code = amd_gpu()
+            override = os.environ.get("HSA_OVERRIDE_GFX_VERSION")
+            report("AMD GPU", bool(gpu and code), f"{gpu or 'not found'}, ROCm device code for {code or '?'}"
+                   + (f" (HSA_OVERRIDE_GFX_VERSION={override})" if override else ""))
+            kfd = os.access("/dev/kfd", os.R_OK | os.W_OK)
+            report("/dev/kfd", kfd, "accessible" if kfd else "no access (README: Troubleshooting, AMD)")
     elif platform == "cuda":
         report("cuBLAS", len(libs) == 2, ", ".join(Path(p).name for p in libs))
     else:
@@ -2549,9 +2680,11 @@ def run_portal_test(cfg, seconds: float) -> int:
     return 0
 
 
-def ask(question: str, options: list[tuple[str, str]], default: str, env: str | None = None) -> str:
-    """A multiple-choice question in the terminal; Enter takes the default (the recommendation).
-    The environment variable `env`, or having no terminal, answers it without asking."""
+def ask(question: str, options: list[tuple[str, str]], default: str, env: str | None = None,
+        note: str = "recommended") -> str:
+    """A multiple-choice question in the terminal; Enter takes the default (the recommendation, or
+    the current choice when updating). The environment variable `env`, or having no terminal,
+    answers it without asking."""
     keys = [key for key, _ in options]
     preset = os.environ.get(env or "", "").strip()
     if preset in keys:
@@ -2564,7 +2697,7 @@ def ask(question: str, options: list[tuple[str, str]], default: str, env: str | 
         return default
     print(f"\n{question}")
     for i, (key, label) in enumerate(options, 1):
-        print(f"  {i}) {label}" + ("   <- recommended" if key == default else ""))
+        print(f"  {i}) {label}" + (f"   <- {note}" if key == default else ""))
     while True:
         answer = input(f"Type 1-{len(options)} and Enter, or just Enter for {keys.index(default) + 1}: ").strip()
         if not answer:
@@ -2592,15 +2725,14 @@ def ensure_config(cpu_only: bool) -> None:
 
 
 def previous_setup() -> bool:
-    """Whether choices were saved before (an earlier --setup or the menu), so an update can keep them."""
-    try:
-        return "trigger" in json.loads(STATE_PATH.read_text(encoding="utf-8"))
-    except (OSError, ValueError, TypeError):
-        return False
+    """Whether this computer was set up before, so an update keeps its choices. Installs from before
+    the choosable models made only the settings file; state.json holds what the menu chose."""
+    return CONFIG_PATH.exists() or STATE_PATH.exists()
 
 
-def ask_key(hw) -> str:
-    """The push-to-talk key: suggested for this keyboard, or any key or combination typed in."""
+def ask_key(hw, current: str | None = None) -> str:
+    """The push-to-talk key: suggested for this keyboard (or the current one, when updating), or any
+    key or combination typed in."""
     if MACOS:  # MacBooks have no numpad; Left Option still types @ # { } on Slovak layouts
         options = [("Alt_R", "Right Option (⌥)"), ("Super_R", "Right Command (⌘)"),
                    ("KP_Delete", "numpad . (a keyboard with a numpad)")]
@@ -2611,6 +2743,8 @@ def ask_key(hw) -> str:
         options = [("KP_Delete", "numpad Del / .   (keyboards with a numpad)"),
                    ("Control_R", "Right Ctrl        (laptops; it still works in shortcuts)")]
         default = "Control_R" if hw.laptop else "KP_Delete"
+    if current and current not in [key for key, _ in options]:
+        options.insert(0, (current, keys.label(keys.parse(current), sys.platform)))
     options.append(("other", "another key or a combination, typed in (e.g. F13, Ctrl+Alt+D)"))
     question = "Which key do you hold to dictate?" + (" (On Wayland the desktop then shows its own dialog "
                                                       "to approve or change it.)" if LINUX else "")
@@ -2618,7 +2752,8 @@ def ask_key(hw) -> str:
     if preset and valid_trigger(preset):
         print(f"{question} {keys.parse(preset)} (DICTATE_KEY)")
         return str(keys.parse(preset))
-    choice = ask(question, options, default)
+    default = current or default
+    choice = ask(question, options, default, note="current" if current else "recommended")
     if choice != "other":
         return choice
     while True:
@@ -2626,48 +2761,75 @@ def ask_key(hw) -> str:
         if not text:
             return default
         try:
-            return str(keys.parse(text))
+            return str(parse_trigger(text))
         except ValueError as e:
             print(f"  {e}")
 
 
 def run_setup(cfg, gpu: str) -> int:
-    """The installers' shared part: questions with recommendations for this computer, the model
-    downloads, the settings file and the menu choices. Ends by loading the model once."""
+    """The installers' shared part: questions with suggestions for this computer, the model
+    downloads, the settings file and the menu choices. Ends by loading the model once. Run again
+    (an update), it keeps the current choices unless the user chooses again; an environment
+    variable (DICTATE_LANGUAGE, DICTATE_MODEL, DICTATE_KEY, DICTATE_LARGE_UI) changes only its own."""
     if gpu == "auto":  # what the installed GPU libraries say
         gpu = {"cuda": "nvidia", "rocm": "amd"}.get(preload_gpu_libraries()[0], "none")
     hw = models.probe(None if gpu == "none" else gpu)
     print(f"This computer: {hw.describe()}")
     ui = UiState(cfg)
-    if previous_setup():
-        current = (f"language {LANGUAGES[ui.language]}, model {ui.gpu_model if gpu != 'none' else ui.cpu_model}, "
-                   f"key {keys.label(keys.parse(ui.trigger), sys.platform)}")
-        if ask(f"Your current choices: {current}.", [("keep", "keep them"), ("change", "choose again")],
-               "keep", "DICTATE_KEEP") == "keep" and not any(os.environ.get(v) for v in
-                                                             ("DICTATE_LANGUAGE", "DICTATE_MODEL", "DICTATE_KEY")):
-            ensure_config(cpu_only=gpu == "none")
-            return finish_setup(ui.gpu_model if gpu != "none" else None, ui.cpu_model)
-    language = ask("Which language will you dictate?", [("en", "English"), ("sk", "Slovak (Slovenčina)"),
-                   ("auto", "Both: English or Slovak, detected each time")], "en", "DICTATE_LANGUAGE")
+    previous = previous_setup()
+    note = "current" if previous else "recommended"
+    on_gpu = gpu != "none" and ui.device != "cpu"
+    keep = previous and ask(
+        f"Your current choices: language {LANGUAGES[ui.language]}, model {ui.gpu_model if on_gpu else ui.cpu_model}, "
+        f"key {keys.label(keys.parse(ui.trigger), sys.platform)}.", [("keep", "keep them"), ("change", "choose again")],
+        "keep", "DICTATE_KEEP") == "keep"
+
+    def asked(env: str) -> bool:  # not kept: asked, or answered by its environment variable
+        return not keep or bool(os.environ.get(env, "").strip())
+
+    language = ui.language
+    if asked("DICTATE_LANGUAGE"):
+        language = ask("Which language will you dictate?", [("en", "English"), ("sk", "Slovak (Slovenčina)"),
+                       ("auto", "Both: English or Slovak, detected each time")], ui.language if previous else "en",
+                       "DICTATE_LANGUAGE", note)
     device, gpu_model, cpu_model = models.recommend(hw, language)
-    where = "on the graphics card" if device == "gpu" else "on the processor (no usable graphics card)"
-    options = [(name, f"{name:<15}{models.size_label(name):>8}   {info}") for name, (_, _, info) in models.MODELS.items()]
-    chosen = ask(f"Which speech model? It runs {where}; bigger models are more accurate but slower.",
-                 options, gpu_model or cpu_model, "DICTATE_MODEL")
-    if device == "gpu":
-        gpu_model = chosen
-    else:
-        cpu_model = chosen
-    trigger = ask_key(hw)
-    large = ask("Large text, for low vision? (Size and colours can be changed later in the settings window.)",
-                [("off", "no"), ("panel", "a big status panel while dictating"),
-                 ("both", "the big panel, and a big settings window when you click the tray icon")], "off",
-                "DICTATE_LARGE_UI")
+    suggested = gpu_model or cpu_model
+    if previous:  # where it runs, and the model of the other device, stay as they are
+        device, gpu_model, cpu_model = ("gpu" if on_gpu else "cpu"), (ui.gpu_model if gpu != "none" else None), ui.cpu_model
+    if asked("DICTATE_MODEL"):
+        current = gpu_model if device == "gpu" else cpu_model
+        options = [(name, f"{name:<15}{models.size_label(name):>8}   {info}"
+                    + ("   (suggested for this computer)" if name == suggested != current else ""))
+                   for name, (_, _, info) in models.MODELS.items()]
+        if current not in models.MODELS:  # a model of your own
+            options.insert(0, (current, f"{current:<15}{'':>8}   your own model"))
+        where = ("on the graphics card" if device == "gpu" else
+                 "on the processor" + (" (no usable graphics card)" if gpu == "none" else ""))
+        chosen = ask(f"Which speech model? It runs {where}; bigger models are more accurate but slower.",
+                     options, current, "DICTATE_MODEL", note)
+        if device == "gpu":
+            gpu_model = chosen
+        else:
+            cpu_model = chosen
+    trigger = ask_key(hw, ui.trigger if previous else None) if asked("DICTATE_KEY") else ui.trigger
+    large_now = "both" if ui.big_settings else "panel" if ui.big_panel else "off"
+    large = large_now
+    if asked("DICTATE_LARGE_UI"):
+        large = ask("Large text, for low vision? (Size and colours can be changed later in the settings window.)",
+                    [("off", "no"), ("panel", "a big status panel while dictating"),
+                     ("both", "the big panel, and a big settings window when you click the tray icon")],
+                    large_now if previous else "off", "DICTATE_LARGE_UI", note)
     ensure_config(cpu_only=device == "cpu")
     ui = UiState(load_config())
-    ui.set(language=language, cpu_model=cpu_model, trigger=trigger, big_panel=large != "off",
-           big_settings=large == "both", **({"gpu_model": gpu_model} if gpu_model else {}))
-    return finish_setup(gpu_model, cpu_model)
+    changes = {"language": language, "cpu_model": cpu_model, "trigger": trigger}
+    if gpu_model:
+        changes["gpu_model"] = gpu_model
+    if large != large_now:
+        changes.update(big_panel=large != "off", big_settings=large == "both")
+    if not previous and gpu != "none" and device == "cpu":  # a graphics card too small for the models
+        changes["device"] = "cpu"
+    ui.set(**changes)
+    return finish_setup(gpu_model if device == "gpu" else None, cpu_model)
 
 
 def finish_setup(gpu_model: str | None, cpu_model: str) -> int:

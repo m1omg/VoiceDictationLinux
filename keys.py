@@ -5,6 +5,8 @@ Pure tables and string handling, no OS calls (tests/unit_keys.py covers them).
 """
 from __future__ import annotations
 
+import re
+import sys
 from dataclasses import dataclass
 
 MODIFIERS = {"ctrl": "ctrl", "control": "ctrl", "shift": "shift", "alt": "alt", "option": "alt", "opt": "alt",
@@ -29,6 +31,10 @@ NAMED = ["KP_Delete", "KP_Insert", "KP_Enter", "KP_Add", "KP_Subtract", "KP_Mult
          "Super_R", "Fn"] + [f"F{n}" for n in range(1, 25)]
 LONE_MODIFIERS = {"Control_L", "Control_R", "Alt_L", "Alt_R", "Shift_L", "Shift_R", "Super_L", "Super_R", "Fn"}
 TYPING_KEYS = {"space", "Return", "Tab", "Escape", "Delete"}  # (and letters, digits) only with a modifier
+# On Linux any X11 key name works as a single key (X11 and the desktop's portal know them all), as it
+# did before combinations existed: Caps_Lock, KP_Begin, F25, XF86Launch5. Elsewhere only NAMED keys
+# map to the system's own key codes.
+ANY_KEYSYM = sys.platform.startswith("linux")
 
 
 @dataclass(frozen=True)
@@ -63,9 +69,10 @@ def parse(text: str) -> Trigger:
         key = key.lower()
     else:
         known = {n.lower(): n for n in NAMED}
-        if key.lower() not in known:
-            raise ValueError(f"unknown key {key!r}")
-        key = known[key.lower()]
+        if key.lower() in known:
+            key = known[key.lower()]
+        elif not (ANY_KEYSYM and not mods and re.fullmatch(r"[A-Za-z][A-Za-z0-9_]+", key)):
+            raise ValueError(f"unknown key {key!r}")  # (an X11 key name stays as written: they are case-sensitive)
     if mods and key in LONE_MODIFIERS:
         raise ValueError("a combination needs a key that isn't a modifier, like Ctrl+Alt+D")
     if not mods and (len(key) == 1 or key in TYPING_KEYS):
@@ -79,7 +86,7 @@ LABELS = {"KP_Delete": "numpad Del", "KP_Insert": "numpad 0", "KP_Enter": "numpa
           "Next": "Page Down", "Scroll_Lock": "Scroll Lock", "Print": "Print Screen", "space": "Space",
           "Control_R": "Right Ctrl", "Control_L": "Left Ctrl", "Alt_R": "Right Alt", "Alt_L": "Left Alt",
           "Shift_R": "Right Shift", "Shift_L": "Left Shift", "Super_R": "Right Super", "Super_L": "Left Super",
-          "Menu": "Menu key"}
+          "Menu": "Menu key", "ISO_Level3_Shift": "AltGr"}
 MAC_LABELS = {"Alt_R": "Right Option", "Alt_L": "Left Option", "Super_R": "Right Command",
               "Super_L": "Left Command", "Control_R": "Right Control", "Control_L": "Left Control", "Fn": "fn"}
 WIN_LABELS = {"Super_R": "Right Windows key", "Super_L": "Left Windows key"}
@@ -168,9 +175,35 @@ def mac_flags(trigger: Trigger) -> int:
 
 
 # --- Tk key events (capturing a new key in the settings window) ---------------------------
-TK_NAMES = {"Option_L": "Alt_L", "Option_R": "Alt_R", "Meta_L": "Super_L", "Meta_R": "Super_R",
+TK_NAMES = {"Option_L": "Alt_L", "Option_R": "Alt_R", "Meta_L": "Alt_L", "Meta_R": "Alt_R",  # (X11: Shift+Alt)
             "Command_L": "Super_L", "Command_R": "Super_R", "Win_L": "Super_L", "Win_R": "Super_R",
             "App": "Menu", "KP_Decimal": "KP_Delete", "KP_0": "KP_Insert", "Escape": "Escape"}
+
+
+def from_windows_vk(vk: int, extended: bool = False) -> str | None:
+    """A Windows virtual-key code (Tk's keycode there) as our key name, for the keys Tk names by the
+    character they type: letters and digits whose character a held modifier changed (Ctrl+Alt is
+    AltGr on many layouts), and the numpad (with NumLock off its Del and 0 are Delete and Insert
+    without the extended flag; its Enter is Enter with it)."""
+    if 0x41 <= vk <= 0x5A or 0x30 <= vk <= 0x39:
+        return chr(vk).lower()
+    if 0x70 <= vk <= 0x87:
+        return f"F{vk - 0x6F}"
+    if vk in (0x2E, 0x2D) and not extended:
+        return "KP_Delete" if vk == 0x2E else "KP_Insert"
+    if vk == 0x0D and extended:
+        return "KP_Enter"
+    return {0x60: "KP_Insert", 0x6E: "KP_Delete", 0x6B: "KP_Add", 0x6D: "KP_Subtract", 0x6A: "KP_Multiply",
+            0x6F: "KP_Divide"}.get(vk)
+
+
+def from_mac_keycode(code: int) -> str | None:
+    """A Mac virtual keycode as our key name (letter keys by their US-layout letter)."""
+    for table in (MAC_LETTERS, MAC_KEYS):
+        for name, value in table.items():
+            if value == code:
+                return name
+    return None
 
 
 def from_tk(keysym: str) -> str | None:
@@ -179,4 +212,8 @@ def from_tk(keysym: str) -> str | None:
     if len(name) == 1:
         return name.lower() if name.isascii() and name.isalnum() else None
     known = {n.lower(): n for n in NAMED}
-    return known.get(name.lower())
+    if name.lower() in known:
+        return known[name.lower()]
+    if ANY_KEYSYM and (name.startswith("XF86") or name == "ISO_Level3_Shift"):  # keys that type nothing (AltGr)
+        return name
+    return None

@@ -60,6 +60,12 @@ def yellow_pixels(image, box) -> int:
     return int(((px[..., 0] > 200) & (px[..., 1] > 200) & (px[..., 2] < 80)).sum())
 
 
+def frame_pixels(image) -> int:
+    """Pixels of the focus frame's colour (#ff6060 in yellow on black)."""
+    px = np.asarray(image.convert("RGB")).astype(int)
+    return int(((abs(px[..., 0] - 0xff) < 8) & (abs(px[..., 1] - 0x60) < 8) & (abs(px[..., 2] - 0x60) < 8)).sum())
+
+
 def press(*names, hold=0.05):
     codes = [app.keysym_to_keycode(XK.string_to_keysym(n)) for n in names]
     for c in codes:
@@ -87,14 +93,14 @@ try:
     def send(**msg):
         panel.stdin.write(json.dumps({"scale": 2.0, "colors": "yellow-on-black", "position": "bottom", **msg}) + "\n")
         panel.stdin.flush()
-    send(show=True, title="● Listening — SK", text="Toto je skúška: čšťžýáíé ľ ň ô ä, a teraz trochu dlhšia veta, "
+    send(show=True, title="Listening — SK", mark="dot", text="Toto je skúška: čšťžýáíé ľ ň ô ä, a teraz trochu dlhšia veta, "
          "aby bolo vidno zalamovanie riadkov na viac riadkov panela.", accent=True)
     time.sleep(2.5)
     image = shot("panel_listening")
     bottom = (0, 500, 1600, 1000)
     checks.append(("panel shows at the bottom", yellow_pixels(image, bottom) > 500))
     checks.append(("panel left the focus with the app", focus() == win.id))
-    send(show=True, title="✓ Typed", text="Hello, this went into the app.", hide_after=1)
+    send(show=True, title="Typed", mark="tick", text="Hello, this went into the app.", hide_after=1)
     time.sleep(0.8)
     shot("panel_typed")
     time.sleep(1.5)
@@ -109,7 +115,14 @@ try:
     # The settings window, by keyboard alone
     settings = subprocess.Popen([sys.executable, str(ROOT / "bigui.py"), "settings"], env=env)
     time.sleep(4)
-    shot("settings")
+    checks.append(("the focused choice has a thick frame", frame_pixels(shot("settings")) > 500))
+    status_line = (0, 0, 1600, 300)
+    before = shot("settings").crop(status_line)
+    (TMP / "run/dictate-status.json").write_text(json.dumps({"pid": os.getpid(), "tip": "Listening…", "model": "small"}),
+                                                 encoding="utf-8")
+    time.sleep(2.5)
+    checks.append(("what dictation does shows by itself", shot("settings_status").crop(status_line).tobytes()
+                   != before.tobytes()))
     press("Down")  # English -> Slovenčina
     press("space")
     time.sleep(0.5)
@@ -123,6 +136,16 @@ try:
     time.sleep(0.8)
     checks.append(("a new key combination is captured", state().get("trigger") == "Ctrl+Alt+D"))
     shot("settings_new_key")
+    press("Return")  # the focus stayed on "Change it…"
+    code = app.keysym_to_keycode(XK.string_to_keysym("Control_R"))
+    for _ in range(3):  # held: repeated presses, as Windows sends for a held modifier
+        xtest.fake_input(app, X.KeyPress, code)
+        app.sync()
+        time.sleep(0.15)
+    xtest.fake_input(app, X.KeyRelease, code)
+    app.sync()
+    time.sleep(0.8)
+    checks.append(("a modifier on its own (held, repeating) is captured", state().get("trigger") == "Control_R"))
     STATE.write_text(json.dumps({**state(), "ui_colors": "black-on-white", "ui_scale": 1.5}), encoding="utf-8")
     time.sleep(2)
     shot("settings_white")

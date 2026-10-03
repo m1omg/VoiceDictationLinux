@@ -148,7 +148,7 @@ try:
     saved = json.loads(state.read_text())
     state.write_text(json.dumps({**saved, "ui_colors": "black-on-white"}))
     checks.append(("a choice from the settings window is applied", wait_log("settings window: ui_colors=black-on-white", 5)))
-    (TMP / "run/command").write_text("quit\n")
+    (TMP / "run/dictate-command").write_text("quit\n")
     checks.append(("its quit command ends dictation", daemon.wait(timeout=10) == 0))
 finally:
     if daemon and daemon.poll() is None:

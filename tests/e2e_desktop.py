@@ -298,7 +298,7 @@ try:
 
     # 4. Its "Stop dictation" command ends dictation.
     (app_dir / "run").mkdir(exist_ok=True)
-    (app_dir / "run/command").write_text("quit\n", encoding="utf-8")
+    (app_dir / "run/dictate-command").write_text("quit\n", encoding="utf-8")
     try:
         code = daemon.wait(timeout=15)
     except subprocess.TimeoutExpired:

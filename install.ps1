@@ -142,15 +142,18 @@ if ($Gpu -eq "nvidia") {
         $Packages += @("$Name @ $RocmWheels/$File")
     }
 }
-& $Uv pip install --python $Py @Packages
+& $Uv pip install --only-binary av --python $Py @Packages
 if ($LASTEXITCODE -ne 0) { throw "installing the Python packages failed" }
 
 # CTranslate2 needs the Visual C++ runtime (msvcp140.dll), which a fresh Windows may lack: onnxruntime
-# brings a copy, which CTranslate2 loads from its own folder.
-if ((Invoke-Quiet { & $Py -c "import ctranslate2" }) -ne 0) {
+# brings a copy, which CTranslate2 loads from its own folder. (Its GPU libraries are loaded first, as
+# dictation does: CTranslate2's ROCm build can't find AMD's by itself.)
+$Import = "import sys, pathlib; sys.path.insert(0, str(pathlib.Path(sys.prefix).parent)); " +
+          "import windows; windows.preload_gpu_libraries(); import ctranslate2"
+if ((Invoke-Quiet { & $Py -c $Import }) -ne 0) {
     $Site = "$D\venv\Lib\site-packages"
     Copy-Item -Force "$Site\onnxruntime\capi\msvcp140*.dll" "$Site\ctranslate2\" -ErrorAction SilentlyContinue
-    & $Py -c "import ctranslate2"
+    & $Py -c $Import
     if ($LASTEXITCODE -ne 0) {
         throw ("CTranslate2 can't load. Install the Microsoft Visual C++ Redistributable " +
                "(https://aka.ms/vs/17/release/vc_redist.x64.exe), then run this installer again.")
@@ -164,7 +167,8 @@ Invoke-Quiet { & $Uv cache clean } | Out-Null
 
 Say "Start menu shortcuts"
 $Icon = "$D\dictate.ico"
-& $Py -c "import sys; sys.path.insert(0, r'$D'); from tray_pystray import draw_icon; draw_icon('ready', 'D', 256).save(r'$Icon', sizes=[(16, 16), (32, 32), (48, 48), (256, 256)])"
+& $Py -c ("import sys, pathlib; sys.path.insert(0, str(pathlib.Path(sys.prefix).parent)); from tray_pystray import " +
+          "draw_icon; draw_icon('ready', 'D', 256).save(sys.argv[1], sizes=[(16, 16), (32, 32), (48, 48), (256, 256)])") $Icon
 $Pyw = "$D\venv\Scripts\pythonw.exe"
 $Shell = New-Object -ComObject WScript.Shell
 function New-Shortcut([string]$Path, [string]$Arguments, [string]$Description) {

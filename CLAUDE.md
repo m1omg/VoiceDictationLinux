@@ -253,8 +253,8 @@ input, `windows_paste.py`, and `e2e_desktop.py` / `e2e_x11.py`. It is started by
   the processor.
 - **The settings window** writes `state.json`; the daemon's `StateWatcher` polls its mtime every
   0.5 s and applies changes (a new key restarts the program). The daemon writes
-  `RUNTIME_DIR/status.json` for the window, and the window's *Stop dictation* writes `quit` to
-  `RUNTIME_DIR/command` (Linux with systemd: `systemctl --user stop`).
+  `RUNTIME_DIR/dictate-status.json` for the window, and the window's *Stop dictation* writes `quit`
+  to `RUNTIME_DIR/dictate-command` (Linux with systemd: `systemctl --user stop`).
 - **Keys** (`keys.py`): one trigger string (`KP_Delete`, `Control_R`, `Ctrl+Alt+D`) mapped to an
   X11 keysym and modifier mask, the portal's format, a Windows scan code / virtual key, and a macOS
   keycode or modifier bit. Letters, digits and typing keys alone are refused.

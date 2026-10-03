@@ -65,12 +65,14 @@ def open_settings(pane: str) -> None:
     subprocess.Popen(["open", SETTINGS_PANES[pane]], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
-def ask_for_microphone() -> None:
-    """Open the microphone once at start-up, so macOS asks for it now, not on the first key press."""
+def ask_for_microphone(lock: threading.Lock) -> None:
+    """Open the microphone once at start-up, so macOS asks for it now, not on the first key press.
+    `lock`: PortAudio's (it must not be used while another thread re-initialises it)."""
     try:
-        import sounddevice as sd
-        with sd.InputStream(samplerate=16000, channels=1):
-            time.sleep(0.2)
+        with lock:
+            import sounddevice as sd
+            with sd.InputStream(samplerate=16000, channels=1):
+                time.sleep(0.2)
     except Exception as e:
         log.warning("microphone: %s", e)
 
@@ -86,7 +88,15 @@ class Hotkey(threading.Thread):
         super().__init__(name="mac-key", daemon=True)
         self.cfg, self.emit = cfg, emit
         self.trigger = keys.parse(cfg.trigger)
-        self.code = keys.mac(self.trigger)
+        try:
+            self.code = keys.mac(self.trigger)
+        except ValueError:  # e.g. Pause or Scroll Lock: Mac keyboards have none
+            log.warning("%s has no key on a Mac: using Right Option", self.trigger)
+            from dictate import notify
+            notify("Dictation key not on a Mac", f"{self.trigger} doesn't exist on a Mac keyboard, so Right Option "
+                   "is used. Choose another key in the settings window.")
+            self.trigger = keys.parse("Alt_R")
+            self.code = keys.mac(self.trigger)
         self.flags = keys.mac_flags(self.trigger)
         self.group, self.bit = DEVICE_BITS.get(self.code, (None, 0))
         self.down = self.replayed = False
@@ -122,6 +132,9 @@ class Hotkey(threading.Thread):
         try:
             if kind in (Quartz.kCGEventTapDisabledByTimeout, Quartz.kCGEventTapDisabledByUserInput):
                 Quartz.CGEventTapEnable(self.tap, True)
+                if self.down and not self.key_is_down():  # its release came while the tap was off
+                    self.down = False
+                    self.emit("release", time.monotonic())
                 return event
             if Quartz.CGEventGetIntegerValueField(event, Quartz.kCGEventSourceUserData) == MARK:
                 return event  # our own Cmd+V
@@ -132,13 +145,20 @@ class Hotkey(threading.Thread):
             log.exception("event tap")
             return event
 
+    def key_is_down(self) -> bool:
+        """Whether our key is down now, as the keyboard reports it."""
+        import Quartz
+        return bool(Quartz.CGEventSourceKeyState(Quartz.kCGEventSourceStateHIDSystemState, self.code))
+
     def _key(self, kind, code, flags, event):
         """Decide one event: return it to let it through, None to keep it from apps."""
         import Quartz
         if code == self.code:
             if self.group:  # a modifier key: flagsChanged, down while its own bit is set
                 own_bits = sum(b for g, b in DEVICE_BITS.values() if g == self.group)
-                down = bool(flags & self.bit) if flags & own_bits else not self.down  # some keyboards set no bit
+                # Some keyboards set no left/right bit: then ask the keyboard (not toggling, which a
+                # single missed event would turn upside down).
+                down = bool(flags & self.bit) if flags & own_bits else self.key_is_down()
             else:
                 if kind == Quartz.kCGEventFlagsChanged:
                     return event
@@ -194,8 +214,8 @@ class Keyboard:
 
 class Clipboard:
     """The general pasteboard. macOS doesn't tell when an app reads it, so after Cmd+V the Paster
-    waits a moment before the earlier clipboard comes back. Our text is marked transient, so clipboard
-    managers skip it (nspasteboard.org)."""
+    waits (0.8 s between live pieces, 1.5 s before the earlier clipboard comes back). Our text is
+    marked transient, so clipboard managers skip it (nspasteboard.org), and kept to this Mac."""
 
     def __init__(self):
         self.change = None
@@ -213,7 +233,11 @@ class Clipboard:
         from Foundation import NSData
         with objc.autorelease_pool():
             pb = self._pasteboard()
-            pb.clearContents()
+            try:  # this Mac only: not to the user's other devices through Universal Clipboard
+                import AppKit
+                pb.prepareForNewContentsWithOptions_(AppKit.NSPasteboardContentsCurrentHostOnly)
+            except AttributeError:
+                pb.clearContents()
             ok = pb.setString_forType_(text, NSPasteboardTypeString)
             if not immediate:
                 pb.setData_forType_(NSData.data(), "org.nspasteboard.TransientType")
@@ -224,7 +248,7 @@ class Clipboard:
         return 0, 0
 
     def wait_served(self, base, timeout: float) -> bool:
-        time.sleep(0.25)
+        time.sleep(timeout)  # no word from the app: give it the whole time before the text changes
         return True
 
     def read_clipboard(self):
