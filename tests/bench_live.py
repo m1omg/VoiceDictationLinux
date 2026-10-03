@@ -15,12 +15,11 @@ LMDE 7, RX 6700 XT (ROCm), with words also typed at a pause after a sentence: fi
 import time
 
 import numpy as np
-from _common import audio, errors, load_dictate, sentences, words
+from _common import audio, errors, load_dictate, load_model, sentences, words
 
 d = load_dictate()
 cfg = d.load_config()
-tr = d.Transcriber(cfg)
-tr.load()
+tr = load_model(d, cfg)
 
 
 class FakeRecording:

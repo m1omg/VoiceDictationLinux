@@ -125,3 +125,13 @@ def preload_gpu_libraries() -> tuple[str, list[str]]:
             ctypes.WinDLL(str(path))
         return "cuda", [str(p) for p in paths]
     return "cpu", []
+
+
+def short_path(path: str) -> str:
+    """The 8.3 form of a path (ASCII, so C/C++ libraries that open files by narrow path manage)."""
+    k = kernel32()
+    k.GetShortPathNameW.argtypes = [ctypes.c_wchar_p, ctypes.c_wchar_p, DWORD]
+    k.GetShortPathNameW.restype = DWORD
+    buf = ctypes.create_unicode_buffer(1024)
+    n = k.GetShortPathNameW(path, buf, len(buf))
+    return buf.value if 0 < n < len(buf) else path

@@ -31,6 +31,16 @@ def load_dictate():
     return module
 
 
+def load_model(d, cfg):
+    """The model dictation would use (the menu's choice), or the one named on the command line, e.g.
+    `bench_asr.py small` (add --cpu to run it on the CPU)."""
+    ui = d.UiState(cfg)
+    names = [a for a in sys.argv[1:] if not a.startswith("--")]
+    tr = d.Transcriber(cfg)
+    tr.load("cpu" if "--cpu" in sys.argv else ui.device, *(names[:1] * 2 or (ui.gpu_model, ui.cpu_model)))
+    return tr
+
+
 def sentences(lang: str) -> list[dict]:
     """The downloaded test sentences for "en" or "sk" (run fetch_fleurs.py first)."""
     name = {"en": "eng_Latn", "sk": "slk_Latn"}[lang]

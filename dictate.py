@@ -19,6 +19,7 @@ import argparse
 import ctypes
 import faulthandler
 import functools
+import gc
 import glob
 import inspect
 import itertools
@@ -45,6 +46,8 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
+
+import models
 
 WINDOWS, MACOS = sys.platform == "win32", sys.platform == "darwin"
 LINUX = not (WINDOWS or MACOS)
@@ -81,12 +84,14 @@ DEFAULTS = {
     "backend": "auto",  # "auto", "wayland" (GNOME/KDE: portal + uinput) or "x11" (e.g. Cinnamon)
     "trigger": "KP_Delete",
     "shortcut_id": "push-to-talk",
-    "model": "large-v3-turbo",
-    "fallback_model": "small",  # used on the CPU when there is no usable GPU (multilingual)
-    "language": "en",  # starting values for the menu choices
+    "model": "large-v3-turbo",  # starting values for the menu choices: the model on the GPU,
+    "fallback_model": "small",  # the model on the CPU (all are folders in models/),
+    "device": "auto",  # "auto" (the GPU when one works), "gpu" or "cpu",
+    "language": "en",
     "live_typing": True,
     "sounds": True,
     "beam_size": 5,
+    "cpu_beam_size": 2,  # on the CPU a narrower beam saves time for little accuracy
     "vocabulary": ["Claude", "Claude Code", "GNOME", "Wayland", "Python", "Git", "GitHub", "Linux"],
     "trailing_space": True,
     "remove_fillers": True,
@@ -120,12 +125,24 @@ def load_config() -> SimpleNamespace:
     return SimpleNamespace(**cfg)
 
 
+DEVICES = ("auto", "gpu", "cpu")  # "auto": the GPU when one works, else quietly the CPU
+
+
 class UiState:
-    """Choices made from the top-bar menu (language, live typing, sounds), kept across restarts."""
+    """Choices made from the tray menu or the settings window, kept across restarts in state.json
+    (config.toml only gives their starting values). Read them as attributes: ui.language, ui.device."""
 
     def __init__(self, cfg):
-        values = {"language": cfg.language if cfg.language in LANGUAGES else "en",
-                  "live": cfg.live_typing, "sounds": cfg.sounds}
+        self._defaults = {"language": cfg.language if cfg.language in LANGUAGES else "en",
+                          "live": cfg.live_typing, "sounds": cfg.sounds,
+                          "device": cfg.device if cfg.device in DEVICES else "auto",
+                          "gpu_model": cfg.model, "cpu_model": cfg.fallback_model}
+        self._lock = threading.Lock()
+        self.listeners: list = []
+        self._values = self._read()
+
+    def _read(self) -> dict:
+        values = dict(self._defaults)
         try:
             saved = json.loads(STATE_PATH.read_text(encoding="utf-8"))
         except FileNotFoundError:
@@ -133,24 +150,26 @@ class UiState:
         except (OSError, ValueError) as e:
             log.warning("state: %s is unreadable (%s); using defaults", STATE_PATH, e)
             saved = {}
-        for key, value in saved.items():
-            if key in values and type(value) is type(values[key]) and (key != "language" or value in LANGUAGES):
+        for key, value in saved.items() if isinstance(saved, dict) else ():
+            if key in values and type(value) is type(values[key]) and self._valid(key, value):
                 values[key] = value
-        self._values = values
-        self._lock = threading.Lock()
-        self.listeners: list = []
+        return values
 
-    @property
-    def language(self) -> str:
-        return self._values["language"]
+    @staticmethod
+    def _valid(key: str, value) -> bool:
+        if key == "language":
+            return value in LANGUAGES
+        if key == "device":
+            return value in DEVICES
+        if key.endswith("_model"):  # a folder name in models/
+            return bool(value) and not value.startswith(".") and not set("/\\:") & set(value)
+        return True
 
-    @property
-    def live(self) -> bool:
-        return self._values["live"]
-
-    @property
-    def sounds(self) -> bool:
-        return self._values["sounds"]
+    def __getattr__(self, name: str):
+        values = self.__dict__.get("_values", {})
+        if name in values:
+            return values[name]
+        raise AttributeError(name)
 
     def set(self, **changes) -> None:
         with self._lock:
@@ -950,42 +969,76 @@ def preload_gpu_libraries() -> tuple[str, list[str]]:
     return "rocm", loaded
 
 
+def release_memory() -> None:
+    """Free a dropped model's memory for real: glibc keeps freed memory in the loading thread's
+    arena, so switching models back and forth would otherwise grow the process (measured: base
+    and tiny alternating on the worker thread went from 380 MB to 730 MB; with this, ~490 MB)."""
+    gc.collect()
+    if LINUX:
+        try:
+            ctypes.CDLL(None).malloc_trim(0)
+        except (OSError, AttributeError):  # not glibc (e.g. musl)
+            pass
+
+
+def model_dir(name: str) -> str:
+    path = str(MODELS_DIR / name)
+    if WINDOWS and not path.isascii():  # e.g. C:\\Users\\Ján: hand CTranslate2 the 8.3 short path
+        from windows import short_path
+        return short_path(path)
+    return path
+
+
 class Transcriber:
     def __init__(self, cfg):
         self.cfg = cfg
         self.model = self.batched = None
-        self.desc = "not loaded"
+        self.desc, self.name, self.on_cpu = "not loaded", None, False
+        self.gpu_available = None  # known after the first load: a GPU this install can use
         self.ready = threading.Event()
         # hotwords are added to every 30 s window (initial_prompt only reaches the first one)
         self.hotwords = ", ".join(cfg.vocabulary) + "." if cfg.vocabulary else None
 
-    def load(self) -> None:
+    def load(self, device: str = "auto", gpu_model: str | None = None, cpu_model: str | None = None) -> None:
+        """Load the model for `device` ("auto", "gpu" or "cpu"): the GPU model in the best compute type
+        the GPU supports (GTX 10xx cards have no fast float16), else the CPU model. The previous model
+        is freed first, so two models never share the GPU's memory."""
         self.ready.clear()
+        self.model = self.batched = None
+        release_memory()
+        gpu_model, cpu_model = gpu_model or self.cfg.model, cpu_model or self.cfg.fallback_model
         platform, _libs = preload_gpu_libraries()
+        import ctranslate2
         from faster_whisper import BatchedInferencePipeline, WhisperModel
-        ladder = [("cuda", "float16", self.cfg.model), ("cuda", "int8_float16", self.cfg.model),
-                  ("cpu", "int8", self.cfg.fallback_model)]
-        for device, compute_type, name in ladder:
-            path = MODELS_DIR / name
-            if not (path / "model.bin").exists():
-                log.warning("model %s is missing", path)
+        self.gpu_available = platform != "cpu" and ctranslate2.get_cuda_device_count() > 0
+        ladder = []
+        if device != "cpu" and self.gpu_available:
+            supported = ctranslate2.get_supported_compute_types("cuda")
+            ladder += [("cuda", t, gpu_model) for t in ("float16", "int8_float16", "int8", "float32") if t in supported]
+        supported = ctranslate2.get_supported_compute_types("cpu")
+        ladder += [("cpu", t, cpu_model) for t in ("int8", "float32") if t in supported]
+        wanted_gpu = device == "gpu" or (device == "auto" and self.gpu_available)
+        for where, compute_type, name in ladder:
+            if not models.installed(MODELS_DIR, name):
+                log.warning("model %s is missing or incomplete", MODELS_DIR / name)
                 continue
             started = time.monotonic()
             try:
-                model = WhisperModel(str(path), device=device, compute_type=compute_type,
-                                     cpu_threads=6 if device == "cpu" else 0)
+                model = WhisperModel(model_dir(name), device=where, compute_type=compute_type,
+                                     cpu_threads=models.cpu_threads() if where == "cpu" else 0)
                 warmup = np.random.default_rng(0).standard_normal(RATE).astype(np.float32) * 0.01
                 list(model.transcribe(warmup, language="en", beam_size=1, max_new_tokens=8,
                                       without_timestamps=True)[0])
             except Exception as e:
-                log.warning("loading %s on %s/%s failed: %s", name, device, compute_type, e)
+                log.warning("loading %s on %s/%s failed: %s", name, where, compute_type, e)
                 continue
             self.model, self.batched = model, BatchedInferencePipeline(model)
-            self.desc = f"{name} on {platform if device == 'cuda' else device}/{compute_type}"
+            self.name, self.on_cpu = name, where == "cpu"
+            self.desc = f"{name} on {platform if where == 'cuda' else where}/{compute_type}"
             log.info("model ready: %s (%.1f s)", self.desc, time.monotonic() - started)
-            if device == "cpu":
+            if where == "cpu" and wanted_gpu:
                 notify("Dictation is running on the CPU",
-                       "The GPU could not be used, so a smaller, less accurate model is active.")
+                       f"The GPU could not be used, so the {name} model runs on the processor instead.")
             self.ready.set()
             return
         raise RuntimeError("no Whisper model could be loaded")
@@ -999,7 +1052,8 @@ class Transcriber:
             audio = audio * min(0.9 / peak, 10.0)  # lift quiet input
         batched = len(audio) > 30 * RATE and not words
         fn = self.batched.transcribe if batched else self.model.transcribe
-        opts = dict(language=language, beam_size=beam_size or self.cfg.beam_size, vad_filter=True,
+        beam_size = beam_size or (self.cfg.cpu_beam_size if self.on_cpu else self.cfg.beam_size)
+        opts = dict(language=language, beam_size=beam_size, vad_filter=True,
                     condition_on_previous_text=False, without_timestamps=not words, word_timestamps=words,
                     hotwords=self.hotwords if hotwords else None, initial_prompt=prompt)
         if batched:
@@ -1230,6 +1284,16 @@ class Worker(threading.Thread):
         self.active: Session | None = None
         self.finished: deque = deque()
         self.busy: tuple[float, float] | None = None  # (since, seconds of audio) while a pass runs
+        self.loading: float | None = None  # since when a model has been loading
+        self.wanted: tuple | None = None  # (device, gpu model, cpu model) to load next
+        self.choice: tuple = ("auto", None, None)  # what was loaded last (or is loading)
+
+    def want(self, choice: tuple) -> None:
+        """Load this model choice once nothing is being dictated; the latest request wins. All loading
+        happens on this thread, between passes, so a pass never meets a half-swapped model."""
+        with self.cond:
+            self.wanted = choice
+            self.cond.notify()
 
     def begin(self, session: Session) -> None:
         with self.cond:
@@ -1257,27 +1321,60 @@ class Worker(threading.Thread):
     def run(self):
         while True:
             with self.cond:
-                while not self.finished and not self._live_due():
+                while not self.finished and not self._live_due() and not self._load_due():
                     self.cond.wait(0.1)
-                session, final = (self.finished.popleft(), True) if self.finished else (self.active, False)
-            self.busy = (time.monotonic(), len(session.audio) / RATE if final else session.rec.seconds())
-            if final:
-                self.transcriber.ready.wait()
+                if self._load_due():
+                    choice, self.wanted = self.wanted, None
+                    session = None
+                else:
+                    session, final = (self.finished.popleft(), True) if self.finished else (self.active, False)
+            if session is None:
+                self._load(choice)
+            elif final:
                 try:
-                    self._final(session)
+                    if self.transcriber.ready.is_set():
+                        self.busy = (time.monotonic(), len(session.audio) / RATE)
+                        self._final(session)
+                    else:  # the last load failed; the tray says why
+                        log.info("no speech model is loaded; dictation dropped")
+                        self.cues.play("error")
+                        if session.text and session.text.typed:  # let the paster restore the clipboard
+                            self.paster.put(PasteItem("", session, final=True))
                 finally:
+                    self.busy = None
                     self.topbar.busy(-1)
             else:
+                self.busy = (time.monotonic(), session.rec.seconds())
                 try:
                     self._live(session)
                 except Exception as e:
                     log.warning("live pass failed: %s", e)
                     session.live_ok = False
-            self.busy = None
+                self.busy = None
+
+    def _load_due(self) -> bool:
+        """A load waits until nothing is being dictated, unless there is no model at all yet."""
+        return self.wanted is not None and (not self.transcriber.ready.is_set()
+                                            or (self.active is None and not self.finished))
+
+    def _load(self, choice: tuple) -> None:
+        self.choice, self.loading = choice, time.monotonic()
+        self.topbar.update(loading=True)
+        try:
+            self.transcriber.load(*choice)
+            self.topbar.update(loading=False, problem=None, model=self.transcriber.desc)
+        except Exception as e:
+            log.exception("model loading failed")
+            self.topbar.update(loading=False, problem=f"The speech model could not be loaded: {e}", model=None)
+            notify("Dictation can't transcribe", f"The speech model could not be loaded: {e}")
+        finally:
+            self.loading = None
 
     def _live_due(self) -> bool:
         s = self.active
+        # On the CPU a preview-only pass (live typing off) would delay the final pass.
         return (s is not None and s.live_ok and self.transcriber.ready.is_set()
+                and (s.live or not self.transcriber.on_cpu)
                 and s.rec.seconds() - s.passed_at >= self.STEP)
 
     def _live(self, s: Session) -> None:
@@ -1359,39 +1456,115 @@ class Worker(threading.Thread):
             return self.transcriber.run(audio, language, **kw)
         except Exception as e:
             log.warning("transcription failed (%s); reloading the model", e)
-            self.transcriber.load()
+            self.busy = None  # the watchdog times loads separately
+            self._load(self.choice)
+            self.busy = (time.monotonic(), len(audio) / RATE)
             return self.transcriber.run(audio, language, **kw)
 
 
 class Watchdog(threading.Thread):
     """Restarts dictate when a model pass hangs, instead of leaving it "Transcribing…" forever.
 
-    A pass normally takes 0.3-1.5 s. Once one has run for 30 s plus a quarter of its audio's
-    length, every thread's stack goes to the log (to find the cause) and the program starts over.
+    A pass normally takes 0.3-1.5 s on a GPU. Once one has run for 30 s plus a quarter of its
+    audio's length (or a model load for 3 minutes), every thread's stack goes to the log (to find
+    the cause) and the program starts over.
     """
 
     def __init__(self, worker: Worker):
         super().__init__(name="watchdog", daemon=True)
         self.worker = worker
 
+    LOAD_LIMIT = 180  # loading a model: slow disks, a virus scanner reading model.bin, a 2-core CPU
+
     def run(self):
         while True:
             time.sleep(2)
-            busy = self.worker.busy
-            if busy is None or time.monotonic() - busy[0] < 30 + busy[1] / 4:
+            busy, loading, now = self.worker.busy, self.worker.loading, time.monotonic()
+            if busy is not None and now - busy[0] >= 30 + busy[1] / 4:
+                log.error("a model pass has run for %.0f s (%.1f s of audio); thread stacks follow",
+                          now - busy[0], busy[1])
+            elif loading is not None and now - loading >= self.LOAD_LIMIT:
+                log.error("loading the model has taken %.0f s; thread stacks follow", now - loading)
+            else:
                 continue
-            log.error("a model pass has run for %.0f s (%.1f s of audio); thread stacks follow",
-                      time.monotonic() - busy[0], busy[1])
             if sys.stderr is not None:  # the log file or the journal
                 faulthandler.dump_traceback(file=sys.stderr, all_threads=True)
             if time.time() - float(os.environ.get("DICTATE_RESTARTED", 0)) < 600:
                 notify("Dictation is stuck", "It already restarted itself recently. Restart the computer if "
                        "it stays stuck.")
                 return
-            notify("Dictation restarted", "Transcribing got stuck, so dictation started over. The last "
-                   "dictation was lost.")
+            if loading is not None and self.worker.choice[0] != "cpu" and self.worker.transcriber.gpu_available:
+                os.environ["DICTATE_FORCE_CPU"] = "1"  # for the restarted copy, until dictation is started anew
+                notify("Dictation restarted on the processor", "The graphics card did not respond while the "
+                       "speech model was loading, so the model now runs on the CPU.")
+            else:
+                notify("Dictation restarted", "Transcribing got stuck, so dictation started over. The last "
+                       "dictation was lost.")
             os.environ["DICTATE_RESTARTED"] = str(time.time())
             restart_self()
+
+
+class ModelSwitch:
+    """Applies the model and device chosen in the menu: a missing model is downloaded first, in a
+    child process (dictate.py --download NAME), while the current one keeps working."""
+
+    def __init__(self, ui: UiState, worker: Worker, topbar):
+        self.ui, self.worker, self.topbar = ui, worker, topbar
+        self.downloading: set[str] = set()
+        self.lock = threading.Lock()
+
+    def on_gpu(self) -> bool:
+        """Whether the choice in the menu means the GPU (as far as one can be used)."""
+        return self.ui.device != "cpu" and self.worker.transcriber.gpu_available is not False
+
+    def changed(self) -> None:
+        choice = (self.ui.device, self.ui.gpu_model, self.ui.cpu_model)
+        if choice in (self.worker.choice, self.worker.wanted):
+            return
+        name = self.ui.gpu_model if self.on_gpu() else self.ui.cpu_model
+        if not models.installed(MODELS_DIR, name):
+            if name in models.MODELS:
+                self.download(name)
+            else:
+                notify("Speech model not found", f"There is no model called {name} in {MODELS_DIR}.")
+            return
+        self.worker.want(choice)
+
+    def download(self, name: str) -> None:
+        with self.lock:
+            if name in self.downloading:
+                return
+            self.downloading.add(name)
+        threading.Thread(target=self._download, args=(name,), name="download", daemon=True).start()
+
+    def _download(self, name: str) -> None:
+        notify(f"Downloading the {name} speech model", f"{models.size_label(name)}. Dictation keeps working "
+               "with the current model meanwhile.")
+        log.info("downloading the %s model", name)
+        env = {**os.environ, "HF_HUB_DISABLE_PROGRESS_BARS": "1"}
+        flags = subprocess.CREATE_NO_WINDOW if WINDOWS else 0
+        try:
+            proc = subprocess.Popen([sys.executable, str(Path(__file__).resolve()), "--download", name], env=env,
+                                    stdin=subprocess.DEVNULL, creationflags=flags)
+            expected = models.MODELS[name][1] * 1e6
+            while proc.poll() is None:
+                done = models.partial_bytes(MODELS_DIR, name) / expected
+                self.topbar.update(download=f"{name} {min(99, int(done * 100))} %")
+                time.sleep(1)
+            ok = proc.returncode == 0 and models.installed(MODELS_DIR, name)
+        except OSError as e:
+            log.error("cannot start the download: %s", e)
+            ok = False
+        finally:
+            with self.lock:
+                self.downloading.discard(name)
+            self.topbar.update(download=None)
+        if ok:
+            log.info("the %s model is downloaded", name)
+            self.changed()
+        else:
+            notify(f"The {name} model could not be downloaded", "Check the internet connection. The log has "
+                   "the details.")
 
 
 def restart_self() -> None:
@@ -1529,8 +1702,9 @@ class TopBar:
         self.tray = TrayIcon("dictate", "Dictate", self.menu, self.clicked)
         self.lock = threading.Lock()
         self.state = {"loading": True, "recording": False, "busy": 0, "problem": None, "detected": None,
-                      "preview": ""}
+                      "preview": "", "model": None, "download": None}
         self.on_quit = lambda: None  # set by the daemon: ends the program cleanly
+        self.switch: ModelSwitch | None = None  # set by the daemon: applies model and device choices
         ui.listeners.append(self.changed)
 
     def start(self) -> None:
@@ -1583,12 +1757,12 @@ class TopBar:
         with self.lock:
             s = dict(self.state)
         language = self.ui.language
-        if s["problem"]:
+        if s["recording"]:  # a press while a model loads still records
+            icon, tip = "recording", "Listening…"
+        elif s["problem"]:
             icon, tip = "problem", s["problem"]
         elif s["loading"]:
             icon, tip = "working", "Loading the speech model…"
-        elif s["recording"]:
-            icon, tip = "recording", "Listening…"
         elif s["busy"]:
             icon, tip = "working", "Transcribing…"
         else:
@@ -1603,7 +1777,10 @@ class TopBar:
                 label += f"  {'…' if len(preview) > 30 else ''}{preview[-30:]}"
         else:
             label = code
-        self.tray.set(icon=self.ICONS[icon], label=label, tooltip=f"{tip}\nLanguage: {LANGUAGES[language]}")
+        tooltip = f"{tip}\nLanguage: {LANGUAGES[language]}" + (f"\nModel: {s['model']}" if s["model"] else "")
+        if s["download"]:
+            tooltip += f"\nDownloading {s['download']}"
+        self.tray.set(icon=self.ICONS[icon], label=label, tooltip=tooltip)
 
 
 class Controller:
@@ -1826,20 +2003,16 @@ def run_daemon(cfg) -> int:
     paster = Paster(cfg, selection, keyboard, no_keyboard)
     paster.start()
     worker = Worker(cfg, transcriber, paster, cues, topbar)
+    # After the GPU hung while loading (see Watchdog), stay on the CPU until dictation is started anew.
+    worker.want(("cpu" if os.environ.get("DICTATE_FORCE_CPU") else ui.device, ui.gpu_model, ui.cpu_model))
     worker.start()
     Watchdog(worker).start()
+    switch = ModelSwitch(ui, worker, topbar)
+    topbar.switch = switch
+    ui.listeners.append(switch.changed)
     ctl = Controller(cfg, ui, cues, worker, topbar)
     paster.on_inject = ctl.mark_injection
     topbar.on_quit = lambda: ctl.emit("quit")
-
-    def load_model():
-        try:
-            transcriber.load()
-            topbar.update(loading=False)
-        except Exception as e:
-            log.exception("model loading failed")
-            ctl.emit("fatal", f"The speech model could not be loaded: {e}")
-    threading.Thread(target=load_model, name="model", daemon=True).start()
     Hotkey(cfg, ctl.emit).start()
     try:
         return ctl.run()
@@ -1883,9 +2056,12 @@ def run_check(cfg) -> int:
     count = ctranslate2.get_cuda_device_count()
     report("GPU devices", count > 0, f"{count} ({platform}, ctranslate2 {ctranslate2.__version__})",
            required=platform != "cpu")
-    for name in (cfg.model, cfg.fallback_model):
-        path = MODELS_DIR / name
-        report(f"model {name}", (path / "model.bin").exists(), str(path))
+    on_gpu = ui.device != "cpu" and platform != "cpu" and count > 0
+    for kind, name in (("GPU", ui.gpu_model), ("CPU", ui.cpu_model)):
+        report(f"{kind} model {name}", models.installed(MODELS_DIR, name), str(MODELS_DIR / name),
+               required=on_gpu == (kind == "GPU"))
+    have = sorted(p.name for p in MODELS_DIR.glob("*") if models.installed(MODELS_DIR, p.name)) if MODELS_DIR.exists() else []
+    report("downloaded models", bool(have), ", ".join(have) or "none", required=False)
     if LINUX:
         check_linux(cfg, report)
     else:
@@ -1941,8 +2117,9 @@ def run_selftest(cfg, seconds: float, language: str) -> int:
     time.sleep(seconds)
     audio = rec.stop()
     transcriber = Transcriber(cfg)
+    ui = UiState(cfg)
     started = time.monotonic()
-    transcriber.load()
+    transcriber.load(ui.device, ui.gpu_model, ui.cpu_model)
     load_time = time.monotonic() - started
     started = time.monotonic()
     if language == "auto":
@@ -1996,6 +2173,114 @@ def run_portal_test(cfg, seconds: float) -> int:
     return 0
 
 
+def ask(question: str, options: list[tuple[str, str]], default: str, env: str | None = None) -> str:
+    """A multiple-choice question in the terminal; Enter takes the default (the recommendation).
+    The environment variable `env`, or having no terminal, answers it without asking."""
+    keys = [key for key, _ in options]
+    preset = os.environ.get(env or "", "").strip()
+    if preset in keys:
+        print(f"{question} {preset} ({env})")
+        return preset
+    if preset:
+        print(f"{env}={preset!r} is not one of: {', '.join(keys)}")
+    if not sys.stdin or not sys.stdin.isatty():
+        print(f"{question} {default}")
+        return default
+    print(f"\n{question}")
+    for i, (key, label) in enumerate(options, 1):
+        print(f"  {i}) {label}" + ("   <- recommended" if key == default else ""))
+    while True:
+        answer = input(f"Type 1-{len(options)} and Enter, or just Enter for {keys.index(default) + 1}: ").strip()
+        if not answer:
+            return default
+        if answer.isdigit() and 1 <= int(answer) <= len(options):
+            return keys[int(answer) - 1]
+        if answer in keys:
+            return answer
+        print("Please type one of the numbers, or just press Enter.")
+
+
+def ensure_config(cpu_only: bool) -> None:
+    """Create config.toml from config.example.toml if there is none; keep an existing one."""
+    if CONFIG_PATH.exists():
+        print(f"Keeping your settings file {CONFIG_PATH}")
+        return
+    example = Path(__file__).resolve().parent / "config.example.toml"
+    CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    text = example.read_text(encoding="utf-8") if example.exists() else ""
+    if cpu_only:  # a CPU can't keep up with repeated live passes
+        text += ("\n# No usable GPU found at install time: the model runs on the CPU and live typing "
+                 "starts off.\nlive_typing = false\n")
+    CONFIG_PATH.write_text(text, encoding="utf-8")
+    print(f"Created the settings file {CONFIG_PATH}")
+
+
+def run_setup(cfg, gpu: str) -> int:
+    """The installers' shared part: questions with recommendations for this computer, the model
+    downloads, the settings file and the menu choices. Ends by loading the model once."""
+    if gpu == "auto":  # what the installed GPU libraries say
+        gpu = {"cuda": "nvidia", "rocm": "amd"}.get(preload_gpu_libraries()[0], "none")
+    hw = models.probe(None if gpu == "none" else gpu)
+    print(f"This computer: {hw.describe()}")
+    language = ask("Which language will you dictate?", [("en", "English"), ("sk", "Slovak (Slovenčina)"),
+                   ("auto", "Both: English or Slovak, detected each time")], "en", "DICTATE_LANGUAGE")
+    device, gpu_model, cpu_model = models.recommend(hw, language)
+    where = "on the graphics card" if device == "gpu" else "on the processor (no usable graphics card)"
+    options = [(name, f"{name:<15}{models.size_label(name):>8}   {info}") for name, (_, _, info) in models.MODELS.items()]
+    chosen = ask(f"Which speech model? It runs {where}; bigger models are more accurate but slower.",
+                 options, gpu_model or cpu_model, "DICTATE_MODEL")
+    if device == "gpu":
+        gpu_model = chosen
+    else:
+        cpu_model = chosen
+    ensure_config(cpu_only=device == "cpu")
+    for name in dict.fromkeys(m for m in (gpu_model, cpu_model) if m):
+        if models.installed(MODELS_DIR, name):
+            print(f"The {name} model is already downloaded")
+            continue
+        print(f"Downloading the {name} model ({models.size_label(name)})…", flush=True)
+        models.download(MODELS_DIR, name)
+    ui = UiState(load_config())
+    ui.set(language=language, cpu_model=cpu_model, **({"gpu_model": gpu_model} if gpu_model else {}))
+    print("\nLoading the model once to check it:", flush=True)
+    return subprocess.run([sys.executable, str(Path(__file__).resolve()), "--check-model"]).returncode
+
+
+def run_download(names: list[str]) -> int:
+    for name in names:
+        if name not in models.MODELS:
+            print(f"Unknown model {name!r}; available: {', '.join(models.MODELS)}")
+            return 2
+        if models.installed(MODELS_DIR, name):
+            print(f"{name}: already downloaded")
+            continue
+        print(f"Downloading {name} ({models.size_label(name)})…", flush=True)
+        models.download(MODELS_DIR, name)
+    return 0
+
+
+def run_check_model(cfg) -> int:
+    """Load the chosen model the way dictation does and time one pass of a short dictation's size."""
+    ui = UiState(cfg)
+    tr = Transcriber(cfg)
+    started = time.monotonic()
+    try:
+        tr.load(ui.device, ui.gpu_model, ui.cpu_model)
+    except Exception as e:
+        print(f"FAIL model: {e}")
+        return 1
+    loaded = time.monotonic() - started
+    noise = np.random.default_rng(1).standard_normal(5 * RATE).astype(np.float32) * 0.01
+    started = time.monotonic()
+    list(tr.model.transcribe(noise, language="en", vad_filter=False, without_timestamps=True, max_new_tokens=24,
+                             beam_size=cfg.cpu_beam_size if tr.on_cpu else cfg.beam_size)[0])
+    print(f"ok   model: {tr.desc}, loaded in {loaded:.1f} s; a pass for a short dictation takes about "
+          f"{time.monotonic() - started:.1f} s")
+    if tr.on_cpu and ui.device != "cpu" and tr.gpu_available:
+        print("note the GPU could not be used, so the model runs on the CPU (the log has the reason)")
+    return 0
+
+
 def open_log():
     """dictate.log for appending (UTF-8, line by line); the previous one is kept once it passes 5 MB."""
     LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -2015,17 +2300,27 @@ def main() -> int:
     mode.add_argument("--paste-test", metavar="TEXT", help="paste TEXT into the focused window after 5 s")
     mode.add_argument("--portal-test", type=float, nargs="?", const=30, metavar="SECONDS",
                       help="bind the key and print press/release events")
+    mode.add_argument("--setup", action="store_true", help="choose language and model, download it (installers)")
+    mode.add_argument("--download", nargs="+", metavar="MODEL", help=f"download models: {', '.join(models.MODELS)}")
+    mode.add_argument("--check-model", action="store_true", help="load the chosen model and time one pass")
+    parser.add_argument("--gpu", choices=("auto", "nvidia", "amd", "none"), default="auto",
+                        help="the GPU the installer found, for --setup")
     parser.add_argument("--language", choices=sorted(LANGUAGES), default="en", help="language for --selftest")
     parser.add_argument("-v", "--verbose", action="store_true", help="debug logging (includes transcripts)")
     args = parser.parse_args()
 
     if sys.stderr is None:  # pythonw.exe on Windows has no console: log to a file
         sys.stdout = sys.stderr = open_log()
+    if args.setup or args.download:  # set before anything imports huggingface_hub
+        os.environ["HF_HUB_OFFLINE"] = "0"
+        import warnings
+        warnings.filterwarnings("ignore", message=".*unauthenticated requests.*")
     under_systemd = "INVOCATION_ID" in os.environ
     logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO,
                         format="%(levelname)s %(message)s" if under_systemd
                         else "%(asctime)s.%(msecs)03d %(levelname)s %(message)s", datefmt="%H:%M:%S")
-    logging.getLogger("faster_whisper").setLevel(logging.WARNING)
+    for noisy in ("faster_whisper", "httpx", "huggingface_hub"):
+        logging.getLogger(noisy).setLevel(logging.ERROR if noisy == "huggingface_hub" else logging.WARNING)
     signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
     cfg = load_config()
     global APP_ID
@@ -2038,6 +2333,12 @@ def main() -> int:
         return run_paste_test(cfg, args.paste_test)
     if args.portal_test is not None:
         return run_portal_test(cfg, args.portal_test)
+    if args.setup:
+        return run_setup(cfg, args.gpu)
+    if args.download:
+        return run_download(args.download)
+    if args.check_model:
+        return run_check_model(cfg)
     return run_daemon(cfg)
 
 
