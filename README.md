@@ -318,8 +318,9 @@ key ──► recorder ──► Whisper ──► text ──► clipboard ─�
 
 The automated tests (`.github/workflows/platforms.yml`, started by hand in the Actions tab) install
 the program with the tiny model, check it, measure accuracy and speed, and dictate recorded
-sentences into a text field. Reports and fixes for the untested parts are welcome;
-[CLAUDE.md](CLAUDE.md) lists what to check.
+sentences into a text field. Reports and fixes for the untested parts are welcome:
+[TESTING.md](TESTING.md) has short checklists for a first test, and [CLAUDE.md](CLAUDE.md) lists
+what to check in depth.
 
 ## Accuracy and speed
 Word error rate (lower is better) on real recorded sentences
