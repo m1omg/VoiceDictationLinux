@@ -66,7 +66,7 @@ env = {**os.environ, "HOME": str(TMP / "home"), "XDG_STATE_HOME": str(TMP / "sta
 (TMP / "run").mkdir()
 
 from PIL import ImageGrab  # noqa: E402
-from Xlib import X, XK, Xatom, display  # noqa: E402
+from Xlib import X, XK, display  # noqa: E402
 from Xlib.ext import xtest  # noqa: E402
 from Xlib.protocol import event  # noqa: E402
 

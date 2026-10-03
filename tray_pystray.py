@@ -58,6 +58,9 @@ class TrayIcon:
     def __init__(self, item_id: str, title: str, build_menu, on_click, on_activate=None):
         self.title, self.build_menu, self.on_click, self.on_activate = title, build_menu, on_click, on_activate
         self.state, self.code, self.tooltip = "ready", "EN", title
+        if MACOS:  # a menu bar item only: no Dock icon and no menu bar of our own
+            import AppKit
+            AppKit.NSApplication.sharedApplication().setActivationPolicy_(AppKit.NSApplicationActivationPolicyAccessory)
         self.icon = pystray.Icon(item_id, draw_icon("ready", "EN"), title, menu=self._menu())
 
     # --- called from any thread ---
@@ -95,7 +98,7 @@ class TrayIcon:
         self.icon.run()
 
     def stop(self) -> None:
-        self.icon.stop()
+        self._later(self.icon.stop)  # macOS: AppKit's loop is stopped from its own (main) thread
 
     # --- the icon's own thread ---
     def _later(self, fn) -> None:

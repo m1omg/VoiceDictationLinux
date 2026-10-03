@@ -1498,7 +1498,9 @@ class Worker(threading.Thread):
             self.topbar.event({"muted": "muted", "no speech": "nothing"}.get(problem, "error"), problem)
             if problem == "muted":
                 log.info("default microphone: %s", microphone())
-                notify("Microphone is muted", "Only silence was recorded. Check the headset's mute switch.")
+                notify("Microphone is muted", "Only silence was recorded. Check the headset's mute switch"
+                       + (", and that Dictate may use the microphone (System Settings > Privacy & Security)."
+                          if MACOS else "."))
         else:
             log.info("transcribed %.1f s of %s audio in %.2f s (%d chars%s)", seconds, s.language,
                      time.monotonic() - started, len(s.text.typed) if typed_live else len(piece),
@@ -2364,8 +2366,28 @@ def run_daemon(cfg) -> int:
     ui.listeners.append(key_changed)
     StateWatcher(ui, ctl.emit).start()
     Hotkey(cfg, ctl.emit).start()
+    if MACOS:  # ask for the microphone now, not on the first key press
+        from macos import ask_for_microphone
+        threading.Thread(target=ask_for_microphone, name="microphone", daemon=True).start()
     try:
-        return ctl.run()
+        if not getattr(topbar.tray, "needs_main_thread", False):
+            return ctl.run()
+        # macOS: the menu bar item runs on the main thread, the controller on another one.
+        result = {}
+
+        def control():
+            try:
+                result["code"] = ctl.run()
+            finally:
+                topbar.tray.stop()
+        try:  # SIGTERM (Dictate.app quitting) arrives while AppKit's loop has the main thread
+            from PyObjCTools import MachSignals
+            MachSignals.signal(signal.SIGTERM, lambda *_: ctl.emit("quit"))
+        except Exception as e:
+            log.debug("no SIGTERM handler: %s", e)
+        threading.Thread(target=control, name="control", daemon=True).start()
+        topbar.tray.run()
+        return result.get("code", 0)
     finally:
         if ctl.session:
             ctl.session.rec.stop()
