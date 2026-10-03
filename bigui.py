@@ -482,6 +482,7 @@ class Settings:
         self.down: dict[int, str | None] = {}  # during a key capture: the keys held down (code: name)
         self.lone: str | None = None  # a modifier pressed on its own: the key, if it is released so
         self.focus_target = None
+        self.placed_scale = None  # the text size the window was last centred for
         self.build()
         root.after(1000, self._watch)
         root.lift()
@@ -645,6 +646,9 @@ class Settings:
         self.canvas.configure(width=self.frame.winfo_reqwidth(), height=height,
                               scrollregion=(0, 0, self.frame.winfo_reqwidth(), self.frame.winfo_reqheight()))
         self.root.update_idletasks()  # (the view's new size, before a focus change scrolls it)
+        if self.placed_scale != self.ui.ui_scale:  # opened, or the text size changed
+            self.placed_scale = self.ui.ui_scale
+            self._place()
         if self.capturing:  # keys go to the capture, not to a button (Space or Enter would press it)
             self.canvas.focus_set()
             self._scroll_to(None, next((b for b in self.buttons if b.row_id == "key:change"), None))
@@ -653,6 +657,13 @@ class Settings:
         self.focus_target = target
         if target is not None:
             target.focus_set()
+
+    def _place(self) -> None:
+        """Centre the window on the primary monitor's usable area (Windows opens it where it opens
+        every window, partly off a small screen)."""
+        x0, y0, sw, sh = primary_monitor(self.root)
+        w, h = self.root.winfo_reqwidth(), self.root.winfo_reqheight()
+        self.root.geometry(f"+{x0 + max(0, (sw - w) // 2)}+{y0 + max(0, (sh - h) // 2)}")
 
     def _focus_in(self, event) -> None:
         event.widget.configure(image=event.widget.images[1])

@@ -93,8 +93,8 @@ FLEURS sentence; README → Accuracy and speed has the per-OS numbers):
 | large-v3-turbo | 3.9 % | 7.0 % | 3.9–4.0 s |
 
 English is fine from base up; Slovak needs large-v3-turbo (small gets a third of the words wrong).
-Offer the trade-off to the user: speed or accuracy. A 2-core laptop (2017 MacBook Air) takes about
-twice as long; `tests/bench_asr.py MODEL --cpu` measures it on their machine.
+Offer the trade-off to the user: speed or accuracy. A 2-core laptop (2017 MacBook Air) hasn't been
+measured and will be slower; `tests/bench_asr.py MODEL --cpu` measures it on their machine.
 
 ## 3. Install
 Ask the installer's questions up front, in one multiple-choice round: language (English / Slovak /

@@ -339,16 +339,30 @@ Word error rate (lower is better) on real recorded sentences
 (For live typing, the one-shot rates on the same long dictations were 1.3 % / 6.2 % in English and
 6.8 % / 7.8 % in Slovak.)
 
-**On the processor** (int8, `cpu_beam_size = 2`; seconds per ~9 s English sentence; Slovak ones
-take 10–25 % longer). Auto-detect picked the right language every time (15/15, 30/30).
+**On the processor** (int8, `cpu_beam_size = 2`). Auto-detect picked the right language every time
+(15/15, 30/30). Word error rates (the ranges are the different machines below; their processors
+round int8 arithmetic slightly differently):
 
-| Model | English | Slovak | 4-core Xeon, 2.1 GHz (Linux) | GitHub's Linux machine (4 vCPU) |
-|---|---|---|---|---|
-| tiny | 8.8 % | 78 % | 0.53 s | 0.40 s |
-| base | 5.5–6.2 % | 70–72 % | 0.71 s | 0.75 s |
-| small | 4.5 % | 34–36 % | 1.65 s | 2.27 s |
-| medium | 3.2 % | 15 % | 3.75 s | |
-| large-v3-turbo | 3.9 % | 7.0 % | 3.89 s | |
+| Model | English | Slovak |
+|---|---|---|
+| tiny | 8.8 % | 78–79 % |
+| base | 5.5–6.2 % | 70–73 % |
+| small | 3.2–4.5 % | 32–36 % |
+| medium | 3.2 % | 15 % |
+| large-v3-turbo | 3.9 % | 7.0 % |
+
+Seconds per ~9 s English sentence (a Slovak one takes up to 40 % longer):
+
+| Processor | tiny | base | small | medium | large-v3-turbo |
+|---|---|---|---|---|---|
+| 4-core Xeon, 2.1 GHz (Linux) | 0.53 | 0.71 | 1.65 | 3.75 | 3.89 |
+| GitHub's Linux machine (4 vCPU) | 0.40 | 0.73 | 2.17 | | |
+| GitHub's Windows machine (4 vCPU) | 0.48 | 0.95 | 3.16 | | |
+| GitHub's Mac, Intel (4 cores) | 0.79 | 1.02 | 3.57 | | |
+| GitHub's Mac, Apple M1 (3 cores) | 0.34 | 0.65 | 1.86 | | |
+
+A 2-core laptop such as a 2017 MacBook Air hasn't been measured yet; expect it to be slower than
+these. `tests/bench_asr.py MODEL --cpu` measures any machine.
 
 Reproduce with the scripts in `tests/`. They need no microphone, windows or user:
 ```bash

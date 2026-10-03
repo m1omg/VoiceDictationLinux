@@ -116,6 +116,11 @@ try:
     settings = subprocess.Popen([sys.executable, str(ROOT / "bigui.py"), "settings"], env=env)
     time.sleep(4)
     checks.append(("the focused choice has a thick frame", frame_pixels(shot("settings")) > 500))
+    tops = [w for w in app.screen().root.query_tree().children if w.get_wm_name() == "Dictate settings"]
+    box = tops[0].get_geometry() if tops else None
+    checks.append(("the window is centred on the screen", box is not None and box.x > 0 and box.y > 0
+                   and box.x + box.width <= 1600 and box.y + box.height <= 1000
+                   and abs(box.x + box.width / 2 - 800) < 20))
     status_line = (0, 0, 1600, 300)
     before = shot("settings").crop(status_line)
     (TMP / "run/dictate-status.json").write_text(json.dumps({"pid": os.getpid(), "tip": "Listening…", "model": "small"}),
