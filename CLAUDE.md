@@ -121,7 +121,8 @@ $D/venv/bin/python $D/dictate.py --check        # every line should say ok (info
 python3 tests/fetch_fleurs.py
 $D/venv/bin/python tests/bench_asr.py           # GPU targets: en ~4 % WER, sk ~6-7 %, ~0.35-0.5 s per sentence
 $D/venv/bin/python tests/bench_live.py          # GPU targets: live WER ≈ one-shot; first words ~2 s (en)
-for t in unit_keys unit_models unit_audio unit_portability unit_windows unit_macos unit_topbar unit_setup unit_paster unit_switch
+for t in unit_keys unit_models unit_audio unit_portability unit_windows unit_macos unit_topbar unit_setup unit_paster unit_switch \
+         unit_capture
 do $D/venv/bin/python tests/$t.py; done
 dbus-run-session -- $D/venv/bin/python tests/unit_tray.py
 XVFB=… $D/venv/bin/python tests/x11_paste.py   # X11 desktops: key grab, combinations, repeats, paste, clipboard

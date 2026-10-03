@@ -747,10 +747,10 @@ class Settings:
         self.lone = None
         held = list(self.down.values())
         try:
+            if "ISO_Level3_Shift" in held:  # (it changes the key's character: đ, not d)
+                raise ValueError("AltGr can be the dictation key only on its own")
             if name is None:
                 raise ValueError(f"{event.keysym} can't be the dictation key")
-            if "ISO_Level3_Shift" in held:
-                raise ValueError("AltGr can be the dictation key only on its own")
             trigger = self.keys.parse(str(self.keys.Trigger(frozenset(MODIFIER_OF[n] for n in held if n in MODIFIER_OF),
                                                             name)))
         except ValueError as e:
