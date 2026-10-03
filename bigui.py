@@ -430,7 +430,8 @@ def x11_click_through(root: tk.Tk) -> None:
 # --- the settings window -----------------------------------------------------------------------
 MODIFIER_OF = {"Control_L": "ctrl", "Control_R": "ctrl", "Alt_L": "alt", "Alt_R": "alt", "Shift_L": "shift",
                "Shift_R": "shift", "Super_L": "super", "Super_R": "super"}
-SOLO_KEYS = {"Fn", "ISO_Level3_Shift"}  # held like modifiers, but they can only be the key on their own
+SOLO_KEYS = {"Fn", "ISO_Level3_Shift"}  # held like modifiers, but they can be the key only on their own
+# (fn with another key is how Mac keyboards type F1-F12 and forward Delete: that key counts.)
 WINDOWS_EXTENDED = 0x40000  # in a Tk key event's state on Windows: an extended key (numpad Enter, not Enter)
 
 
@@ -748,8 +749,8 @@ class Settings:
         try:
             if name is None:
                 raise ValueError(f"{event.keysym} can't be the dictation key")
-            if any(n in SOLO_KEYS for n in held):
-                raise ValueError("AltGr and fn can be the dictation key only on their own")
+            if "ISO_Level3_Shift" in held:
+                raise ValueError("AltGr can be the dictation key only on its own")
             trigger = self.keys.parse(str(self.keys.Trigger(frozenset(MODIFIER_OF[n] for n in held if n in MODIFIER_OF),
                                                             name)))
         except ValueError as e:

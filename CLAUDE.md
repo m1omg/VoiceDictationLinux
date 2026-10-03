@@ -121,7 +121,8 @@ $D/venv/bin/python $D/dictate.py --check        # every line should say ok (info
 python3 tests/fetch_fleurs.py
 $D/venv/bin/python tests/bench_asr.py           # GPU targets: en ~4 % WER, sk ~6-7 %, ~0.35-0.5 s per sentence
 $D/venv/bin/python tests/bench_live.py          # GPU targets: live WER ≈ one-shot; first words ~2 s (en)
-for t in unit_keys unit_models unit_audio unit_portability unit_windows unit_macos; do $D/venv/bin/python tests/$t.py; done
+for t in unit_keys unit_models unit_audio unit_portability unit_windows unit_macos unit_topbar unit_setup unit_paster unit_switch
+do $D/venv/bin/python tests/$t.py; done
 dbus-run-session -- $D/venv/bin/python tests/unit_tray.py
 XVFB=… $D/venv/bin/python tests/x11_paste.py   # X11 desktops: key grab, combinations, repeats, paste, clipboard
 XVFB=… $D/venv/bin/python tests/bigui_test.py  # large text: panel, focus, settings window by keyboard
@@ -201,6 +202,10 @@ input, `windows_paste.py`, and `e2e_desktop.py` / `e2e_x11.py`. It is started by
     extended flag (the Delete key has it). The callback only decides and queues; Windows silently
     drops slow hooks, so the hook is renewed every 60 s while the key is up. Keys other programs
     inject count (remappers, on-screen keyboards); only ours, marked `dwExtraInfo = MARK`, pass.
+  - Which modifiers are down comes from `GetAsyncKeyState` (the hook misses releases, e.g. after
+    Win+L). A release the hook missed is inferred when the key's repeats stop for 1.5 s. A
+    combination with Alt or Win sends the unassigned key 0xE8 before it is swallowed, so Windows
+    doesn't open the window menu or Start.
   - A lone modifier held with another key: the hook cancels and replays the modifier and the key.
   - Typing: Shift+Insert through one `SendInput` call (`sizeof(INPUT)` must be 40; unit-tested).
   - Clipboard: a message-only window with delayed rendering, so `WM_RENDERFORMAT` tells us the app
@@ -225,7 +230,13 @@ input, `windows_paste.py`, and `e2e_desktop.py` / `e2e_x11.py`. It is started by
     right Settings pane opens, and it retries every 3 s. Modifiers come as `flagsChanged` events;
     left and right are told apart by device bits (Right Option 0x40).
   - Typing: Cmd+V from a private event source with explicit flags (a held Option doesn't turn it
-    into Cmd+Option+V), marked so our own tap ignores it. The pasteboard text is marked transient.
+    into Cmd+Option+V), marked so our own tap ignores it. The pasteboard text is marked transient
+    and kept off Universal Clipboard (`NSPasteboardContentsCurrentHostOnly`).
+  - A key without a Mac keycode (Pause, Menu) falls back to Right Option, with a notification.
+    When macOS disables the tap (a slow callback, secure input), it is re-enabled, and a release
+    missed meanwhile is caught with `CGEventSourceKeyState`.
+  - The menu bar icon is a template image (it follows light and dark menu bars); pystray's
+    `_assert_image` is replaced for that, so check it after a pystray upgrade.
   - pystray needs the main thread (AppKit): the controller runs on another thread, and SIGTERM
     (the applet quitting) arrives through `PyObjCTools.MachSignals`.
   - Intel Macs: Python 3.12 and `onnxruntime<1.20` (the last x86_64 wheels for macOS 11–12).
@@ -234,10 +245,25 @@ input, `windows_paste.py`, and `e2e_desktop.py` / `e2e_x11.py`. It is started by
     the applet quits within 5 s.
 - **Large text** (`bigui.py`, Tk): the panel and the settings window are separate processes. Text
   is drawn with Pillow (FreeType) into images, because the private Python's Tk on Linux has no Xft
-  and falls back to tiny bitmap fonts. The panel never takes focus: override-redirect and an empty
-  input shape on X11, `WS_EX_NOACTIVATE|TRANSPARENT` on Windows, a help-style window with the
-  accessory activation policy on macOS. All its timing uses `after()` with wall-clock delays,
-  never frames.
+  and falls back to tiny bitmap fonts. Marks (dot, tick, radio, check box) are drawn as shapes:
+  many fonts lack ● ○ ☑ ✓.
+  - The panel never takes focus: override-redirect and an empty input shape on X11;
+    `WS_EX_NOACTIVATE|TOOLWINDOW|TRANSPARENT` on Windows, where the window is mapped once,
+    off-screen, when the panel starts (with dictation) and is only moved after that, since a Tk
+    window activates whenever it is shown; an AppKit `NSPanel` with
+    `NSWindowStyleMaskNonactivatingPanel` on macOS (a Tk window brings its app to the front). All
+    its timing uses `after()` or `callLater` with wall-clock delays, never frames.
+  - The settings window's buttons are `tk.Label`s with two pictures each (with and without the
+    focus frame), so they look the same on every system (Aqua ignores most `tk.Button` options).
+    It polls `state.json` and `dictate-status.json` every second and rebuilds when what it shows
+    changes. On a Retina Mac its pictures are scaled up by Tk (slightly soft); the panel is drawn
+    at the screen's pixel density.
+  - Key capture reads the key's code where Tk's key name is unreliable: on Windows the virtual-key
+    code (`event.keycode`) and the extended flag (0x40000 in `event.state`), because Tk names the
+    numpad by its character, and with NumLock off its Del is Delete without the extended flag; on
+    macOS the keycode in the top byte (`event.keycode >> 24`), because Tk names Command `Meta_L`
+    and fn `Super_L`, and Option changes letters (∂). Windows repeats held modifiers: a key
+    already down is ignored.
 
 ## How it works (for debugging)
 - **The model stays loaded.** The `Worker` thread loads it at start-up and keeps it. Never load the
@@ -245,7 +271,8 @@ input, `windows_paste.py`, and `e2e_desktop.py` / `e2e_x11.py`. It is started by
 - **Models and devices.** The menu's choices (`UiState`, `state.json`) say which model runs on the
   graphics card and which on the processor, and where to run. `Worker.want()` queues a load; it
   happens on the worker thread when nothing is being dictated (a dictation during a load waits for
-  it). The old model is freed first (`release_memory()`: `gc` and glibc's `malloc_trim`, or memory
+  it). At start-up a chosen model that isn't downloaded (dictation restarted during its download)
+  is replaced by an installed one, then downloaded. The old model is freed first (`release_memory()`: `gc` and glibc's `malloc_trim`, or memory
   grows with each switch). A missing model is downloaded by a `dictate.py --download NAME`
   subprocess (`ModelSwitch`); `models.download()` fills `models/.partial-NAME`, checks every file,
   then renames it. The GPU ladder tries the compute types CTranslate2 reports (float16,

@@ -140,9 +140,11 @@ DEVICES = ("auto", "gpu", "cpu")  # "auto": the GPU when one works, else quietly
 
 
 def x11_keysym(name: str) -> int:
-    """An X11 key name's keysym, 0 if there's none. (python-xlib spells XF86Launch5 as XF86_Launch5.)"""
+    """An X11 key name's keysym, 0 if there's none. (python-xlib spells XF86Launch5 as XF86_Launch5,
+    and knows the XF86 keys and AltGr, ISO_Level3_Shift, only after loading their groups.)"""
     from Xlib import XK
     XK.load_keysym_group("xf86")
+    XK.load_keysym_group("xkb")
     return XK.string_to_keysym(name) or (XK.string_to_keysym("XF86_" + name[4:]) if name.startswith("XF86") else 0)
 
 
@@ -2680,6 +2682,16 @@ def run_portal_test(cfg, seconds: float) -> int:
     return 0
 
 
+def read_line(prompt: str) -> str:
+    """A line typed in the terminal; "" (the default) when input has ended, as it has at once when
+    it comes from NUL on Windows, which counts as a terminal there."""
+    try:
+        return input(prompt).strip()
+    except EOFError:
+        print()
+        return ""
+
+
 def ask(question: str, options: list[tuple[str, str]], default: str, env: str | None = None,
         note: str = "recommended") -> str:
     """A multiple-choice question in the terminal; Enter takes the default (the recommendation, or
@@ -2699,7 +2711,7 @@ def ask(question: str, options: list[tuple[str, str]], default: str, env: str | 
     for i, (key, label) in enumerate(options, 1):
         print(f"  {i}) {label}" + (f"   <- {note}" if key == default else ""))
     while True:
-        answer = input(f"Type 1-{len(options)} and Enter, or just Enter for {keys.index(default) + 1}: ").strip()
+        answer = read_line(f"Type 1-{len(options)} and Enter, or just Enter for {keys.index(default) + 1}: ")
         if not answer:
             return default
         if answer.isdigit() and 1 <= int(answer) <= len(options):
@@ -2757,7 +2769,7 @@ def ask_key(hw, current: str | None = None) -> str:
     if choice != "other":
         return choice
     while True:
-        text = input("Type the key or combination (Enter for the suggestion): ").strip()
+        text = read_line("Type the key or combination (Enter for the suggestion): ")
         if not text:
             return default
         try:

@@ -220,7 +220,8 @@ installer's last question:
   frame shows where you are), **Space** or **Enter** choose, **Esc** closes. It opens from the menu (*Settings window…*), from the
   **Dictate Settings** launcher (Linux app menu, Windows Start menu), by clicking the icon if you
   switch that on (Linux, Windows), on Windows also by starting Dictate again while it runs, and on a
-  Mac by opening the Dictate app again (Spotlight: *Dictate*).
+  Mac by opening the Dictate app again (Spotlight: *Dictate*). On a Mac with a Retina screen its
+  text is a little soft (the panel's is sharp).
 - **Text size** 1× to 3× (default 2×) and **colours**: yellow on black (default), white on black,
   black on white, black on yellow. Both apply to the panel and the window.
 

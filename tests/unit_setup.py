@@ -60,6 +60,22 @@ check("first install, Slovak on a 4-core laptop: turbo on the processor, Right C
       (state["language"], state["cpu_model"], state["trigger"], downloads[-1]),
       ("sk", "large-v3-turbo", "Alt_R" if d.MACOS else "Control_R", (None, "large-v3-turbo")))
 
+
+
+class EndedInput(io.StringIO):
+    """A terminal whose input has ended: NUL on Windows counts as a terminal."""
+
+    def isatty(self):
+        return True
+
+
+fresh()
+sys.stdin = EndedInput()
+state = setup(LAPTOP, DICTATE_LANGUAGE="sk")
+sys.stdin = open(os.devnull)
+check("the same when the terminal's input has ended (NUL on Windows)",
+      (state["cpu_model"], state["trigger"]), ("large-v3-turbo", "Alt_R" if d.MACOS else "Control_R"))
+
 fresh()  # an install from before the models could be chosen: a settings file, and the menu's three choices
 d.CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
 d.CONFIG_PATH.write_text('model = "large-v3-turbo"\nfallback_model = "small"\n', encoding="utf-8")
@@ -79,6 +95,11 @@ check("an update with DICTATE_MODEL changes only the model",
 state = setup(LAPTOP, DICTATE_KEEP="change")
 check("choosing again without a terminal suggests the current choices",
       (state["cpu_model"], state["language"], state["trigger"], state["big_panel"]), ("medium", "sk", "KP_Delete", True))
+
+if d.LINUX:  # any X11 key name, also those python-xlib knows only after loading their group
+    check("Linux: AltGr (ISO_Level3_Shift) and XF86 keys are accepted", [
+        setup(LAPTOP, DICTATE_KEY=key)["trigger"] for key in ("ISO_Level3_Shift", "XF86Launch5")],
+        ["ISO_Level3_Shift", "XF86Launch5"])
 
 fresh()
 state = setup(models.Hardware("nvidia", vram_gb=1.5, cores=8, ram_gb=16), "nvidia", DICTATE_LANGUAGE="en")
