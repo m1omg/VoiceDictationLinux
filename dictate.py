@@ -47,6 +47,7 @@ from types import SimpleNamespace
 
 import numpy as np
 
+import keys
 import models
 
 WINDOWS, MACOS = sys.platform == "win32", sys.platform == "darwin"
@@ -128,6 +129,23 @@ def load_config() -> SimpleNamespace:
 DEVICES = ("auto", "gpu", "cpu")  # "auto": the GPU when one works, else quietly the CPU
 
 
+def valid_trigger(text: str) -> bool:
+    try:
+        keys.parse(text)
+        return True
+    except ValueError as e:
+        log.warning("the key %r can't be used: %s", text, e)
+        return False
+
+
+def shortcut_id(cfg, trigger: str) -> str:
+    """The id the desktop stores the approved shortcut under (Wayland). A new key gets a new id, so
+    the desktop asks again: GNOME and KDE keep the key a user approved under an id."""
+    if trigger == cfg.trigger:
+        return cfg.shortcut_id
+    return f"{cfg.shortcut_id}-" + re.sub(r"[^a-z0-9]+", "-", trigger.lower()).strip("-")
+
+
 class UiState:
     """Choices made from the tray menu or the settings window, kept across restarts in state.json
     (config.toml only gives their starting values). Read them as attributes: ui.language, ui.device."""
@@ -136,7 +154,8 @@ class UiState:
         self._defaults = {"language": cfg.language if cfg.language in LANGUAGES else "en",
                           "live": cfg.live_typing, "sounds": cfg.sounds,
                           "device": cfg.device if cfg.device in DEVICES else "auto",
-                          "gpu_model": cfg.model, "cpu_model": cfg.fallback_model}
+                          "gpu_model": cfg.model, "cpu_model": cfg.fallback_model,
+                          "trigger": cfg.trigger if valid_trigger(cfg.trigger) else DEFAULTS["trigger"]}
         self._lock = threading.Lock()
         self.listeners: list = []
         self._values = self._read()
@@ -163,6 +182,8 @@ class UiState:
             return value in DEVICES
         if key.endswith("_model"):  # a folder name in models/
             return bool(value) and not value.startswith(".") and not set("/\\:") & set(value)
+        if key == "trigger":
+            return valid_trigger(value)
         return True
 
     def __getattr__(self, name: str):
@@ -387,6 +408,13 @@ class XTestKeyboard:
                                (X.KeyRelease, self.insert), (X.KeyRelease, self.shift)):
                 self.xtest.fake_input(self.d, kind, code)
             self.d.sync()
+
+    def modifiers_held(self) -> bool:
+        """Ctrl, Alt, Shift or Super down (our Shift+Insert would arrive as e.g. Ctrl+Shift+Insert)."""
+        with self.lock:
+            X = self.X
+            return bool(self.d.screen().root.query_pointer().mask
+                        & (X.ShiftMask | X.ControlMask | X.Mod1Mask | X.Mod4Mask))
 
     def close(self) -> None:
         self.d.close()
@@ -702,7 +730,8 @@ class PortalShortcut(threading.Thread):
             subscribe(signals, interface="org.freedesktop.portal.Session", member="Closed", path=session)
 
             asked = time.monotonic()
-            wanted = {"description": ("s", "Hold to dictate"), "preferred_trigger": ("s", self.cfg.trigger)}
+            wanted = {"description": ("s", "Hold to dictate"),
+                      "preferred_trigger": ("s", keys.portal(keys.parse(self.cfg.trigger)))}
             code, results = request("BindShortcuts", "oa(sa{sv})sa{sv}",
                                     (session, [(self.cfg.shortcut_id, wanted)], ""))
             if code != 0:
@@ -734,6 +763,9 @@ class X11Hotkey(threading.Thread):
     so the grab is handed back at once and the release is found by polling the key state.
     Auto-repeat is switched off for this one key (again whenever a keyboard is plugged in or
     comes back after a suspend), because every repeat would grab the keyboard once more.
+    A combination (Ctrl+Alt+D) is grabbed with its modifiers; it ends when its key is released.
+    A modifier key on its own (Right Ctrl) is still a modifier: pressing another key while it is
+    held means a shortcut, so the dictation is cancelled (the shortcut works as usual).
     """
 
     def __init__(self, cfg, emit):
@@ -744,14 +776,16 @@ class X11Hotkey(threading.Thread):
         from Xlib import X, XK, display, error
         from Xlib.ext import xinput
         try:
+            trigger = keys.parse(self.cfg.trigger)
             d = display.Display()
             root = d.screen().root
-            code = d.keysym_to_keycode(XK.string_to_keysym(self.cfg.trigger))
+            code = d.keysym_to_keycode(XK.string_to_keysym(trigger.key))
             if not code:
-                raise RuntimeError(f"no key on this keyboard produces {self.cfg.trigger}")
+                raise RuntimeError(f"no key on this keyboard produces {trigger.key}")
             catch = error.CatchError(error.BadAccess)
             for mods in (0, X.Mod2Mask, X.LockMask, X.Mod2Mask | X.LockMask):  # NumLock / CapsLock on or off
-                root.grab_key(code, mods, True, X.GrabModeAsync, X.GrabModeAsync, onerror=catch)
+                root.grab_key(code, keys.x11_mask(trigger) | mods, True, X.GrabModeAsync, X.GrabModeAsync,
+                              onerror=catch)
             d.change_keyboard_control(key=code, auto_repeat_mode=X.AutoRepeatModeOff)
             root.xinput_select_events([(xinput.AllDevices, xinput.HierarchyChangedMask)])
             d.sync()
@@ -760,16 +794,22 @@ class X11Hotkey(threading.Thread):
         except Exception as e:
             self.emit("fatal", f"The dictation key could not be set up: {e}")
             return
-        log.info("push-to-talk key grabbed: %s (X11)", self.cfg.trigger)
+        log.info("push-to-talk key grabbed: %s (X11)", trigger)
         self.emit("key_ready", self.cfg.trigger)
-        held = lambda: d.query_keymap()[code // 8] & (1 << (code % 8))
-        down = False
+        held = lambda keymap: keymap[code // 8] & (1 << (code % 8))
+        down, before = False, None  # keys already down when the trigger went down
         while True:
             if down and not d.pending_events():
                 select.select([d.fileno()], [], [], 0.02)  # a repeat wakes us at once; else poll the key
-                if not d.pending_events() and not held():
+                if d.pending_events():
+                    continue
+                keymap = d.query_keymap()
+                if not held(keymap):
                     down = False
                     self.emit("release", time.monotonic())
+                elif trigger.lone_modifier and any(k & ~b for k, b in zip(keymap, before)):
+                    self.emit("cancel")  # another key went down: Right Ctrl was part of a shortcut
+                    before = keymap
                 continue
             e = d.next_event()
             if e.type == X.KeyPress and e.detail == code:
@@ -777,8 +817,9 @@ class X11Hotkey(threading.Thread):
                 if down:  # a repeat: some keyboard still repeats the key
                     d.change_keyboard_control(key=code, auto_repeat_mode=X.AutoRepeatModeOff)
                 d.flush()
-                if not down and held():  # not a repeat, nor a press that is already over
-                    down = True
+                keymap = d.query_keymap()
+                if not down and held(keymap):  # not a repeat, nor a press that is already over
+                    down, before = True, keymap
                     self.emit("press", time.monotonic())
             elif getattr(e, "evtype", None) == xinput.HierarchyChanged:  # a keyboard came (back)
                 d.change_keyboard_control(key=code, auto_repeat_mode=X.AutoRepeatModeOff)
@@ -1644,6 +1685,11 @@ class Paster(threading.Thread):
         if s.id not in self.saved:
             self.saved[s.id] = self.sel.read_clipboard() if self.cfg.restore_clipboard else None
         chunks = split_chunks(item.text, self.cfg.paste_chunk_chars) if item.text else []
+        if chunks and not self._modifiers_up(item.final):
+            self.diverted[s.id] = ("a modifier key stayed pressed", "".join(chunks))
+            if item.final:
+                self._give_up(s, *self.diverted.pop(s.id))
+            return
         for i, chunk in enumerate(chunks):
             if not self.sel.publish(chunk):
                 self.diverted[s.id] = ("the clipboard handoff could not be confirmed", "".join(chunks[i:]))
@@ -1671,6 +1717,20 @@ class Paster(threading.Thread):
                 log.info("restored the previous clipboard (%d bytes)", len(old))
             else:
                 log.info("clipboard changed meanwhile; not restoring")
+
+    def _modifiers_up(self, final: bool) -> bool:
+        """Wait while Ctrl/Alt/Shift/Super are held: with a Ctrl+Alt+D key (or Right Ctrl on X11) our
+        Shift+Insert would arrive as Ctrl+Alt+Shift+Insert. Live words wait as long as it takes."""
+        held = getattr(self.kbd, "modifiers_held", None)
+        if held is None or not held():
+            return True
+        log.info("waiting for Ctrl/Alt/Shift to be released before typing")
+        deadline = time.monotonic() + (STALE_SECONDS if final else self.cfg.max_seconds)
+        while time.monotonic() < deadline:
+            time.sleep(0.05)
+            if not held():
+                return True
+        return False
 
     def _give_up(self, s: Session, why: str, text: str) -> None:
         self.saved.pop(s.id, None)
@@ -1714,7 +1774,7 @@ class TopBar:
         self.tray = TrayIcon("dictate", "Dictate", self.menu, self.clicked)
         self.lock = threading.Lock()
         self.state = {"loading": True, "recording": False, "busy": 0, "problem": None, "detected": None,
-                      "preview": "", "model": None, "download": None}
+                      "preview": "", "model": None, "download": None, "key": None}
         self.on_quit = lambda: None  # set by the daemon: ends the program cleanly
         self.switch: ModelSwitch | None = None  # set by the daemon: applies model and device choices
         ui.listeners.append(self.changed)
@@ -1726,7 +1786,7 @@ class TopBar:
     def update(self, **changes) -> None:
         with self.lock:
             self.state.update(changes)
-        if {"download", "model"} & set(changes):  # the menu shows both
+        if {"download", "model", "key"} & set(changes):  # the menu shows them
             self.tray.refresh_menu()
         self.push()
 
@@ -1765,7 +1825,8 @@ class TopBar:
         on_gpu = self.model_key() == "gpu_model"
         run_on = [M(410, "Graphics card (GPU)" if gpu else "Graphics card (none usable)", "radio", on_gpu, enabled=gpu),
                   M(411, "Processor (CPU)", "radio", not on_gpu)]
-        return [M(1, "Hold numpad Del to dictate, or tap it to start and stop", enabled=False), M(2, kind="separator"),
+        return [M(1, f"Hold {self.key_label()} to dictate, or tap it to start and stop", enabled=False),
+                M(2, kind="separator"),
                 M(10, LANGUAGES["en"], "radio", ui.language == "en"),
                 M(11, LANGUAGES["sk"], "radio", ui.language == "sk"),
                 M(12, LANGUAGES["auto"], "radio", ui.language == "auto"),
@@ -1778,6 +1839,15 @@ class TopBar:
                 M(5, kind="separator"),
                 M(30, "Open settings file"),
                 M(31, "Stop dictation")]
+
+    def key_label(self) -> str:
+        """The key as the desktop reported it when it bound the shortcut, else from the settings."""
+        with self.lock:
+            key = self.state["key"] or self.ui.trigger
+        try:
+            return keys.label(keys.parse(key), sys.platform)
+        except ValueError:
+            return key  # e.g. GNOME's own description of the shortcut the user approved
 
     def clicked(self, item_id: int) -> None:
         if item_id in (10, 11, 12):
@@ -1812,7 +1882,7 @@ class TopBar:
         elif s["busy"]:
             icon, tip = "working", "Transcribing…"
         else:
-            icon, tip = "ready", "Hold numpad Del to dictate, or tap it to start and stop"
+            icon, tip = "ready", f"Hold {self.key_label()} to dictate, or tap it to start and stop"
         code = language.upper()
         if s["recording"]:
             if language == "auto" and s["detected"]:
@@ -1917,8 +1987,8 @@ class Controller:
             if self.state in ("HOLD", "LATCHED"):
                 self.cues.play("start")
             log.debug("microphone live %.0f ms after the key press", (value - self.t_press) * 1000)
-        elif kind == "key_ready":
-            self.topbar.update(problem=None)
+        elif kind == "key_ready":  # value: the key, as the desktop or the config names it
+            self.topbar.update(problem=None, key=value)
         elif kind == "key_lost":
             if self.state in ("HOLD", "LATCHED", "TAIL"):
                 self._finish()
@@ -1935,6 +2005,11 @@ class Controller:
             if self.session:
                 self._discard()
             return 0
+        elif kind == "cancel":  # the key is a modifier (Right Ctrl) and was used in a shortcut
+            if self.state == "HOLD":
+                log.info("another key went down with the dictation key: cancelled")
+                self._discard()
+                self.state = "WAIT_RELEASE"
         return None
 
     def tick(self, now: float) -> None:
@@ -2041,6 +2116,8 @@ def run_daemon(cfg) -> int:
     topbar = TopBar(ui)
     topbar.start()
     cues = Cues(lambda: ui.sounds, cfg.sound_volume)
+    trigger = ui.trigger  # the menu's choice wins over config.toml's starting value
+    cfg.trigger, cfg.shortcut_id = trigger, shortcut_id(cfg, trigger)
     selection, keyboard, no_keyboard, Hotkey = make_io(cfg)
     if keyboard is None:
         log.error("cannot create the virtual keyboard: %s", no_keyboard)
