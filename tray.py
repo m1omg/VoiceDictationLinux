@@ -1,8 +1,8 @@
 """A small top-bar icon (StatusNotifierItem + DBusMenu) served with jeepney.
 
 GNOME shows it through the AppIndicator extension. It covers what dictate needs: a themed icon,
-a short text label next to it, a tooltip, and a flat menu of plain, radio and checkbox items.
-All D-Bus traffic runs on this thread; other threads call set() and refresh_menu().
+a short text label next to it, a tooltip, and a menu of plain, radio and checkbox items with one
+level of submenus. All D-Bus traffic runs on this thread; other threads call set() and refresh_menu().
 """
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ import os
 import queue
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from jeepney import (DBusAddress, HeaderFields, MatchRule, MessageType, new_error, new_method_call,
                      new_method_return, new_signal)
@@ -63,27 +63,39 @@ _MENU_XML = """<node><interface name="com.canonical.dbusmenu">
 
 @dataclass
 class MenuItem:
-    id: int
+    id: int  # unique in the whole menu, and stable
     label: str = ""
     kind: str = "normal"  # normal | separator | radio | check
     checked: bool = False
     enabled: bool = True
+    children: list = field(default_factory=list)  # a submenu
 
     def props(self) -> dict:
         if self.kind == "separator":
             return {"type": ("s", "separator")}
-        props = {"label": ("s", self.label), "enabled": ("b", self.enabled), "visible": ("b", True)}
+        props = {"label": ("s", self.label.replace("_", "__")),  # a single _ marks a mnemonic
+                 "enabled": ("b", self.enabled), "visible": ("b", True)}
         if self.kind in ("radio", "check"):
             props["toggle-type"] = ("s", "radio" if self.kind == "radio" else "checkmark")
             props["toggle-state"] = ("i", int(self.checked))
+        if self.children:  # KDE learns that an item has a submenu only from this
+            props["children-display"] = ("s", "submenu")
         return props
 
 
+def walk(items):
+    """Every item, submenus included."""
+    for item in items:
+        yield item
+        yield from walk(item.children)
+
+
 class TrayIcon(threading.Thread):
-    def __init__(self, item_id: str, title: str, build_menu, on_click):
+    def __init__(self, item_id: str, title: str, build_menu, on_click, on_activate=None):
         super().__init__(name="tray", daemon=True)
         self.item_id, self.title = item_id, title
         self.build_menu, self.on_click = build_menu, on_click  # build_menu() -> list[MenuItem]
+        self.on_activate = on_activate  # a primary click opens this instead of the menu (when set)
         self.icon, self.label, self.tooltip = "audio-input-microphone-symbolic", "", ""
         self.updates: queue.Queue = queue.Queue()
         self.revision = 1
@@ -187,6 +199,9 @@ class TrayIcon(threading.Thread):
             if msg.body[1] in props:
                 return new_method_return(msg, "v", (props[msg.body[1]],))
             return new_error(msg, "org.freedesktop.DBus.Error.UnknownProperty", "s", (msg.body[1],))
+        if path == ITEM_PATH and member == "Activate" and self.on_activate:
+            self._clicked(None)
+            return new_method_return(msg)
         if path == ITEM_PATH and member in ("Activate", "SecondaryActivate", "ContextMenu", "Scroll",
                                             "ProvideXdgActivationToken"):
             return new_method_return(msg)
@@ -194,19 +209,24 @@ class TrayIcon(threading.Thread):
             return None
         items = self.build_menu()
         if member == "GetLayout":
-            parent = msg.body[0]
+            parent, depth = msg.body[0], msg.body[1]
+
+            def node(item, depth):  # depth -1: everything below
+                children = [] if depth == 0 else [("(ia{sv}av)", node(c, depth - 1)) for c in item.children]
+                return item.id, item.props(), children
             if parent == 0:
-                children = [("(ia{sv}av)", (item.id, item.props(), [])) for item in items]
-                layout = (0, {"children-display": ("s", "submenu")}, children)
+                layout = (0, {"children-display": ("s", "submenu")},
+                          [] if depth == 0 else [("(ia{sv}av)", node(i, depth - 1)) for i in items])
             else:
-                item = next((i for i in items if i.id == parent), None)
-                layout = (parent, item.props() if item else {}, [])
+                item = next((i for i in walk(items) if i.id == parent), None)
+                layout = node(item, depth) if item else (parent, {}, [])
             return new_method_return(msg, "u(ia{sv}av)", (self.revision, layout))
         if member == "GetGroupProperties":
             ids = set(msg.body[0])
-            return new_method_return(msg, "a(ia{sv})", ([(i.id, i.props()) for i in items if not ids or i.id in ids],))
+            return new_method_return(msg, "a(ia{sv})", ([(i.id, i.props()) for i in walk(items)
+                                                         if not ids or i.id in ids],))
         if member == "GetProperty":
-            item = next((i for i in items if i.id == msg.body[0]), None)
+            item = next((i for i in walk(items) if i.id == msg.body[0]), None)
             return new_method_return(msg, "v", ((item.props() if item else {}).get(msg.body[1], ("s", "")),))
         if member == "Event":
             if msg.body[1] == "clicked":
@@ -223,9 +243,13 @@ class TrayIcon(threading.Thread):
             return new_method_return(msg, "aiai", ([], []))
         return None
 
-    def _clicked(self, item_id: int) -> None:
+    def _clicked(self, item_id: int | None) -> None:
+        """A menu item was clicked (None: the icon itself, when on_activate is set)."""
         try:
-            self.on_click(item_id)
+            if item_id is None:
+                self.on_activate()
+            elif not any(i.id == item_id and i.children for i in walk(self.build_menu())):  # not a submenu
+                self.on_click(item_id)
         except Exception:
             log.exception("tray: menu action %s failed", item_id)
 
@@ -235,7 +259,7 @@ class TrayIcon(threading.Thread):
             "Status": ("s", "Active"), "WindowId": ("i", 0), "IconName": ("s", self.icon),
             "IconPixmap": ("a(iiay)", []), "OverlayIconName": ("s", ""), "AttentionIconName": ("s", ""),
             "ToolTip": ("(sa(iiay)ss)", ("", [], self.title, self.tooltip)),
-            "ItemIsMenu": ("b", True), "Menu": ("o", MENU_PATH), "IconThemePath": ("s", ""),
+            "ItemIsMenu": ("b", self.on_activate is None), "Menu": ("o", MENU_PATH), "IconThemePath": ("s", ""),
             "XAyatanaLabel": ("s", self.label), "XAyatanaLabelGuide": ("s", self.label),
         }
 

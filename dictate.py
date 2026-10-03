@@ -1512,16 +1512,28 @@ class ModelSwitch:
         self.ui, self.worker, self.topbar = ui, worker, topbar
         self.downloading: set[str] = set()
         self.lock = threading.Lock()
+        # After a GPU hang the CPU is used until the user picks a model or device again.
+        self.held = (ui.device, ui.gpu_model, ui.cpu_model) if os.environ.get("DICTATE_FORCE_CPU") else None
 
     def on_gpu(self) -> bool:
         """Whether the choice in the menu means the GPU (as far as one can be used)."""
-        return self.ui.device != "cpu" and self.worker.transcriber.gpu_available is not False
+        return self.target((self.ui.device, self.ui.gpu_model, self.ui.cpu_model))[0]
+
+    def target(self, choice: tuple) -> tuple[bool, str]:
+        """What a choice means: (on the GPU?, the model that runs)."""
+        device, gpu_model, cpu_model = choice
+        on_gpu = device != "cpu" and self.worker.transcriber.gpu_available is not False
+        return on_gpu, gpu_model if on_gpu else cpu_model
 
     def changed(self) -> None:
         choice = (self.ui.device, self.ui.gpu_model, self.ui.cpu_model)
-        if choice in (self.worker.choice, self.worker.wanted):
-            return
-        name = self.ui.gpu_model if self.on_gpu() else self.ui.cpu_model
+        if self.held is not None:
+            if choice == self.held:
+                return
+            self.held = None
+        if self.target(choice) == self.target(self.worker.wanted or self.worker.choice):
+            return  # e.g. a language change, or "auto" -> "gpu" with a GPU already in use
+        name = self.target(choice)[1]
         if not models.installed(MODELS_DIR, name):
             if name in models.MODELS:
                 self.download(name)
@@ -1714,6 +1726,8 @@ class TopBar:
     def update(self, **changes) -> None:
         with self.lock:
             self.state.update(changes)
+        if {"download", "model"} & set(changes):  # the menu shows both
+            self.tray.refresh_menu()
         self.push()
 
     def busy(self, delta: int) -> None:
@@ -1725,8 +1739,32 @@ class TopBar:
         self.tray.refresh_menu()
         self.push()
 
+    MODEL_IDS = {name: 400 + i for i, name in enumerate(models.MODELS)}  # 499: a model of your own
+
+    def model_key(self) -> str:
+        """The menu choice the model submenu changes: the GPU's model, or the CPU's."""
+        return "gpu_model" if self.switch is None or self.switch.on_gpu() else "cpu_model"
+
     def menu(self) -> list:
         M, ui = self.MenuItem, self.ui
+        with self.lock:
+            downloading = self.state["download"] or ""
+        current = getattr(ui, self.model_key())
+        model_items = []
+        for name, item_id in self.MODEL_IDS.items():
+            if downloading.startswith(name + " "):
+                note = f" – downloading {downloading.split(' ', 1)[1]}"
+            elif not models.installed(MODELS_DIR, name):
+                note = f" – download {models.size_label(name)}"
+            else:
+                note = ""
+            model_items.append(M(item_id, f"{name} ({models.MODELS[name][2]}){note}", "radio", name == current))
+        if current not in self.MODEL_IDS:
+            model_items.append(M(499, current, "radio", True))
+        gpu = self.switch is None or self.switch.worker.transcriber.gpu_available is not False
+        on_gpu = self.model_key() == "gpu_model"
+        run_on = [M(410, "Graphics card (GPU)" if gpu else "Graphics card (none usable)", "radio", on_gpu, enabled=gpu),
+                  M(411, "Processor (CPU)", "radio", not on_gpu)]
         return [M(1, "Hold numpad Del to dictate, or tap it to start and stop", enabled=False), M(2, kind="separator"),
                 M(10, LANGUAGES["en"], "radio", ui.language == "en"),
                 M(11, LANGUAGES["sk"], "radio", ui.language == "sk"),
@@ -1735,6 +1773,9 @@ class TopBar:
                 M(20, "Type while speaking", "check", ui.live),
                 M(21, "Sounds", "check", ui.sounds),
                 M(4, kind="separator"),
+                M(40, f"Speech model: {current}", children=model_items),
+                M(41, f"Run on: {'graphics card' if on_gpu else 'processor'}", children=run_on),
+                M(5, kind="separator"),
                 M(30, "Open settings file"),
                 M(31, "Stop dictation")]
 
@@ -1745,6 +1786,11 @@ class TopBar:
             self.ui.set(live=not self.ui.live)
         elif item_id == 21:
             self.ui.set(sounds=not self.ui.sounds)
+        elif item_id in self.MODEL_IDS.values():
+            name = next(n for n, i in self.MODEL_IDS.items() if i == item_id)
+            self.ui.set(**{self.model_key(): name})
+        elif item_id in (410, 411):
+            self.ui.set(device="gpu" if item_id == 410 else "cpu")
         elif item_id == 30:
             open_text_file(CONFIG_PATH)
         elif item_id == 31:
