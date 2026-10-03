@@ -11,13 +11,11 @@ on:
         description: Speech models to measure on the CPU (space-separated, e.g. "tiny base small")
         type: string
         default: tiny
-  push:  # while this branch is being tested (it can't be started by hand before it is merged)
-    branches: [claude/admiring-volta-k5eqtk]
 
 permissions:
   contents: read
 
-concurrency:  # a newer push stops the run still going for an older one
+concurrency:  # a newer run for the same branch stops the one still going
   group: platforms-${{ github.ref }}
   cancel-in-progress: true
 
@@ -26,7 +24,7 @@ env:
   DICTATE_LANGUAGE: en
   DICTATE_MODEL: tiny
   DICTATE_LARGE_UI: "off"
-  MODELS: ${{ inputs.models || 'tiny base small' }}
+  MODELS: ${{ inputs.models || 'tiny' }}
 
 jobs:
   windows:

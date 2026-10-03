@@ -354,5 +354,6 @@ input, `windows_paste.py`, and `e2e_desktop.py` / `e2e_x11.py`. It is started by
   - `e2e_desktop.py` replaces sounddevice with a stand-in module through `PYTHONPATH`; it plays
     FLEURS files in real time.
   - Pillow deprecates `Image.getdata()`: count pixels with numpy.
-  - GitHub's runners have no microphone and no GPU; this session's GitHub access can't start or
-    cancel workflow runs, so a temporary `push` trigger for the working branch was used.
+  - GitHub's runners have no microphone and no GPU. A workflow can be started by hand only from
+    the default branch: to test another branch before it is merged, add a temporary `push`
+    trigger for it (and `[skip ci]` in a commit message pushes without a run).
