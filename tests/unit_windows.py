@@ -1,6 +1,7 @@
 """Windows code that can be checked anywhere: the Win32 structure sizes (a wrong INPUT size makes
 SendInput fail silently) and the keyboard hook's decisions for made-up key events: numpad Del with
-NumLock on and off, the Delete key, repeats, combinations, and Right Ctrl used in a shortcut.
+NumLock on and off, the Delete key, repeats, combinations, Right Ctrl used in a shortcut, and keys
+sent by programs (ours pass, others count).
 
     python3 tests/unit_windows.py        (any 64-bit Python 3.11+)
 """
@@ -66,6 +67,17 @@ check("Right Ctrl+C: cancelled, Ctrl and C replayed", (h._key(C, True), events, 
 check("C's release passes", h._key(C, False), False)
 check("Right Ctrl's release passes (the system saw its press)", (h._key(RCTRL, False), events[-1]), (False, "release"))
 check("next time it is taken again", h._key(RCTRL, True), True)
+
+# The hook itself: our own key events (marked) go on untouched; a key another program sends (a key
+# remapper, an on-screen keyboard) counts like a real one.
+w.user32 = lambda: SimpleNamespace(CallNextHookEx=lambda *args: 0)
+h, events = hook("KP_Delete")
+INJECTED = 0x10
+ours = w.KBDLLHOOKSTRUCT(vkCode=0x2E, scanCode=0x53, flags=INJECTED, dwExtraInfo=w.MARK)
+theirs = w.KBDLLHOOKSTRUCT(vkCode=0x2E, scanCode=0x53, flags=INJECTED, dwExtraInfo=0)
+check("our own numpad Del passes", (h._callback(0, w.WM_KEYDOWN, ctypes.addressof(ours)), events), (0, []))
+check("one sent by another program is taken", (h._callback(0, w.WM_KEYDOWN, ctypes.addressof(theirs)), events),
+      (1, ["press"]))
 
 for name, good, got, want in checks:
     print(f"{'ok  ' if good else 'FAIL'} {name}" + ("" if good else f": got {got!r}, want {want!r}"))

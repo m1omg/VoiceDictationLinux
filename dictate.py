@@ -2331,6 +2331,7 @@ def run_daemon(cfg) -> int:
         print("dictate is already running; opening its settings window")
         open_settings_window()
         return 0
+    RUNTIME_DIR.mkdir(parents=True, exist_ok=True)  # status.json, the sounds, the settings window's commands
     ui = UiState(cfg)
     topbar = TopBar(ui)
     topbar.start()

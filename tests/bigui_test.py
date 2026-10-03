@@ -33,6 +33,7 @@ env = {**os.environ, "XDG_STATE_HOME": str(TMP / "state"), "XDG_CONFIG_HOME": st
 STATE = TMP / "state/dictate/state.json"
 SHOTS.mkdir(parents=True, exist_ok=True)
 
+import numpy as np  # noqa: E402
 from PIL import ImageGrab  # noqa: E402
 from Xlib import X, XK, display  # noqa: E402
 from Xlib.ext import xtest  # noqa: E402
@@ -55,8 +56,8 @@ def shot(name: str):
 
 
 def yellow_pixels(image, box) -> int:
-    region = image.crop(box).convert("RGB")
-    return sum(1 for r, g, b in region.getdata() if r > 200 and g > 200 and b < 80)
+    px = np.asarray(image.crop(box).convert("RGB")).astype(int)
+    return int(((px[..., 0] > 200) & (px[..., 1] > 200) & (px[..., 2] < 80)).sum())
 
 
 def press(*names, hold=0.05):

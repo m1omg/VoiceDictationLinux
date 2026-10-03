@@ -36,7 +36,7 @@ WNDPROC = FUNCTYPE(LRESULT, HANDLE, UINT, WPARAM, LPARAM)
 ERROR_ALREADY_EXISTS = 183
 WH_KEYBOARD_LL, WM_KEYDOWN, WM_SYSKEYDOWN, WM_TIMER, WM_APP = 13, 0x0100, 0x0104, 0x0113, 0x8000
 WM_RENDERFORMAT, WM_RENDERALLFORMATS, WM_DESTROYCLIPBOARD = 0x0305, 0x0306, 0x0307
-LLKHF_EXTENDED, LLKHF_INJECTED = 0x01, 0x10
+LLKHF_EXTENDED = 0x01
 INPUT_KEYBOARD, KEYEVENTF_EXTENDEDKEY, KEYEVENTF_KEYUP = 1, 0x1, 0x2
 CF_UNICODETEXT, GMEM_MOVEABLE = 13, 0x0002
 MARK = 0x44494354  # "DICT" in dwExtraInfo: our own key events
@@ -248,7 +248,7 @@ class Hotkey(threading.Thread):
     def _callback(self, code, wparam, lparam):
         if code == 0:  # HC_ACTION
             kb = KBDLLHOOKSTRUCT.from_address(lparam)
-            if not kb.flags & LLKHF_INJECTED:
+            if kb.dwExtraInfo != MARK:  # keys sent by other programs count (key remappers, on-screen keyboards)
                 try:
                     if self._key(kb, wparam in (WM_KEYDOWN, WM_SYSKEYDOWN)):
                         return 1  # kept from the system and the apps

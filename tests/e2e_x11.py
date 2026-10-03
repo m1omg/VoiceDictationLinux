@@ -65,6 +65,8 @@ env = {**os.environ, "HOME": str(TMP / "home"), "XDG_STATE_HOME": str(TMP / "sta
        "PATH": f"{recorder.parent}{os.pathsep}{os.environ['PATH']}", "DBUS_SESSION_BUS_ADDRESS": "disabled:"}
 (TMP / "run").mkdir()
 
+import numpy as np  # noqa: E402
+from faster_whisper import decode_audio  # noqa: E402
 from PIL import ImageGrab  # noqa: E402
 from Xlib import X, XK, display  # noqa: E402
 from Xlib.ext import xtest  # noqa: E402
@@ -126,13 +128,13 @@ try:
     code = keys.keysym_to_keycode(XK.string_to_keysym("KP_Delete"))
     xtest.fake_input(keys, X.KeyPress, code)
     keys.sync()
-    seconds = len(open(FLEURS / item["file"], "rb").read()) / 32000 + 0.6  # 16-bit mono 16 kHz WAV
-    time.sleep(min(seconds, 12))
+    time.sleep(len(decode_audio(str(FLEURS / item["file"]), sampling_rate=16000)) / 16000 + 0.8)
     SHOTS.mkdir(parents=True, exist_ok=True)
     image = ImageGrab.grab(xdisplay=os.environ["DISPLAY"])
     image.save(SHOTS / "e2e_listening.png")
-    checks.append(("big panel shows while dictating", sum(1 for p in image.crop((0, 600, 1600, 1000)).getdata()
-                                                          if p[0] > 200 and p[1] > 200 and p[2] < 80) > 300))
+    px = np.asarray(image.crop((0, 600, 1600, 1000)).convert("RGB")).astype(int)
+    yellow = ((px[..., 0] > 200) & (px[..., 1] > 200) & (px[..., 2] < 80)).sum()
+    checks.append(("big panel shows while dictating", yellow > 300))
     xtest.fake_input(keys, X.KeyRelease, code)
     keys.sync()
     deadline = time.monotonic() + 30

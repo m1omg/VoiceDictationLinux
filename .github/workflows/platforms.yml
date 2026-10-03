@@ -1,0 +1,217 @@
+# Installs dictation on GitHub's Windows, macOS and Linux machines and tests it there: the installer
+# (non-interactive, tiny model), --check, the unit tests, accuracy and speed on FLEURS sentences, and
+# whole dictations with a stand-in microphone typing into a text field.
+# Started by hand: Actions > "Windows, macOS and Linux" > Run workflow.
+name: Windows, macOS and Linux
+
+on:
+  workflow_dispatch:
+    inputs:
+      models:
+        description: Speech models to measure on the CPU (space-separated, e.g. "tiny base small")
+        type: string
+        default: tiny
+
+permissions:
+  contents: read
+
+env:
+  DICTATE_NO_AUTOSTART: "1"
+  DICTATE_LANGUAGE: en
+  DICTATE_MODEL: tiny
+  DICTATE_LARGE_UI: "off"
+  MODELS: ${{ inputs.models }}
+
+jobs:
+  windows:
+    name: Windows
+    runs-on: windows-latest
+    timeout-minutes: 60
+    env:
+      DICTATE_KEY: KP_Delete
+    defaults:
+      run:
+        shell: powershell
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install (as install.cmd runs it)
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File install.ps1
+
+      - name: dictate.py --check
+        run: |
+          $D = "$env:LOCALAPPDATA\dictate"
+          $Out = & "$D\venv\Scripts\python.exe" -X utf8 "$D\dictate.py" --check
+          $Out
+          # This machine has no microphone.
+          if ($Out | Where-Object { $_ -like "FAIL*" -and $_ -notlike "FAIL microphone*" }) { exit 1 }
+          exit 0
+
+      - name: Unit tests
+        run: |
+          $Py = "$env:LOCALAPPDATA\dictate\venv\Scripts\python.exe"
+          foreach ($Test in "unit_keys", "unit_models", "unit_windows", "unit_audio", "unit_portability") {
+            Write-Host "== $Test"
+            & $Py -X utf8 "tests\$Test.py"
+            if ($LASTEXITCODE -ne 0) { exit 1 }
+          }
+
+      - name: The copy the installer started loads its model, then stops on "Stop dictation"
+        run: |
+          $D = "$env:LOCALAPPDATA\dictate"
+          $Log = "$D\dictate.log"
+          for ($i = 0; $i -lt 180; $i++) {
+            if ((Test-Path $Log) -and (Select-String -Path $Log -Pattern "model ready" -Quiet)) { break }
+            Start-Sleep -Seconds 1
+          }
+          Get-Content $Log
+          if (-not (Select-String -Path $Log -Pattern "model ready" -Quiet)) { Write-Host "no model loaded"; exit 1 }
+          if (Select-String -Path $Log -Pattern "Traceback" -Quiet) { Write-Host "an error in the log"; exit 1 }
+          New-Item -ItemType Directory -Force "$D\run" | Out-Null
+          Set-Content -Path "$D\run\command" -Value "quit"
+          for ($i = 0; $i -lt 20; $i++) {
+            $Running = @(Get-CimInstance Win32_Process -Filter "Name = 'pythonw.exe'" |
+              Where-Object { $_.CommandLine -like "*dictate.py*" })
+            if ($Running.Count -eq 0) { break }
+            Start-Sleep -Seconds 1
+          }
+          if ($Running.Count -ne 0) { Write-Host "still running"; exit 1 }
+          exit 0
+
+      - name: Accuracy and speed on the CPU (FLEURS)
+        run: |
+          $Py = "$env:LOCALAPPDATA\dictate\venv\Scripts\python.exe"
+          & $Py -X utf8 tests\fetch_fleurs.py
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          $Models = @($env:MODELS -split '\s+' | Where-Object { $_ })
+          & $Py -X utf8 "$env:LOCALAPPDATA\dictate\dictate.py" --download @Models
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          foreach ($Model in $Models) {
+            & $Py -X utf8 tests\bench_asr.py $Model --cpu
+            if ($LASTEXITCODE -ne 0) { exit 1 }
+          }
+
+      - name: Clipboard and Shift+Insert
+        run: |
+          & "$env:LOCALAPPDATA\dictate\venv\Scripts\python.exe" -X utf8 tests\windows_paste.py
+
+      - name: Whole dictations (stand-in microphone)
+        run: |
+          & "$env:LOCALAPPDATA\dictate\venv\Scripts\python.exe" -X utf8 tests\e2e_desktop.py
+
+      - name: Screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: screenshots-windows
+          path: tests/screenshots/
+          if-no-files-found: ignore
+
+  macos:
+    name: macOS (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-15-intel, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    env:
+      DICTATE_KEY: Alt_R
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install
+        run: bash install.sh
+
+      - name: dictate.py --check
+        run: |
+          D="$HOME/Library/Application Support/dictate"
+          "$D/venv/bin/python" "$D/dictate.py" --check | tee check.txt || true
+          # This machine has no microphone.
+          if grep '^FAIL' check.txt | grep -v '^FAIL microphone'; then exit 1; fi
+
+      - name: Unit tests
+        run: |
+          PY="$HOME/Library/Application Support/dictate/venv/bin/python"
+          for t in unit_keys unit_models unit_macos unit_audio unit_portability; do
+            echo "== $t"
+            "$PY" "tests/$t.py"
+          done
+
+      - name: The copy Dictate.app started loads its model, then quits with the app
+        run: |
+          LOG="$HOME/Library/Application Support/dictate/dictate.log"
+          for i in $(seq 180); do grep -q "model ready" "$LOG" 2>/dev/null && break; sleep 1; done
+          cat "$LOG"
+          grep -q "model ready" "$LOG"
+          if grep -q Traceback "$LOG"; then echo "an error in the log"; exit 1; fi
+          osascript -e 'quit app "Dictate"'
+          for i in $(seq 20); do pgrep -f "dictate.py" > /dev/null || break; sleep 1; done
+          if pgrep -fl "dictate.py"; then echo "still running"; exit 1; fi
+          tail -n 5 "$LOG"
+
+      - name: Accuracy and speed on the CPU (FLEURS)
+        run: |
+          D="$HOME/Library/Application Support/dictate"
+          "$D/venv/bin/python" tests/fetch_fleurs.py
+          "$D/venv/bin/python" "$D/dictate.py" --download $MODELS
+          for model in $MODELS; do "$D/venv/bin/python" tests/bench_asr.py "$model" --cpu; done
+
+      - name: Whole dictations (stand-in microphone)
+        run: |
+          "$HOME/Library/Application Support/dictate/venv/bin/python" tests/e2e_desktop.py
+
+      - name: Screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: screenshots-${{ matrix.os }}
+          path: tests/screenshots/
+          if-no-files-found: ignore
+
+  linux:
+    name: Linux (Ubuntu, X11 in Xvfb)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      DICTATE_KEY: KP_Delete
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Recorder, Xvfb and fonts
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends pipewire-bin xvfb fonts-dejavu-core
+
+      - name: Install
+        run: bash install.sh
+
+      - name: Unit tests
+        run: |
+          PY="$HOME/.local/share/dictate/venv/bin/python"
+          for t in unit_keys unit_models unit_windows unit_macos unit_audio unit_portability; do
+            echo "== $t"
+            "$PY" "tests/$t.py"
+          done
+          echo "== unit_tray"
+          dbus-run-session -- "$PY" tests/unit_tray.py
+
+      - name: Accuracy and speed on the CPU (FLEURS)
+        run: |
+          D="$HOME/.local/share/dictate"
+          "$D/venv/bin/python" tests/fetch_fleurs.py
+          "$D/venv/bin/python" "$D/dictate.py" --download $MODELS
+          for model in $MODELS; do "$D/venv/bin/python" tests/bench_asr.py "$model" --cpu; done
+
+      - name: X11 keys and paste, large-text windows, a whole dictation (in Xvfb)
+        run: |
+          PY="$HOME/.local/share/dictate/venv/bin/python"
+          "$PY" tests/x11_paste.py
+          "$PY" tests/bigui_test.py
+          "$PY" tests/e2e_x11.py
+
+      - name: Screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: screenshots-linux
+          path: tests/screenshots/
+          if-no-files-found: ignore
