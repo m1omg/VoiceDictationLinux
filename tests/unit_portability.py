@@ -48,8 +48,9 @@ checks = []
 sys.meta_path.insert(0, Block())
 for name in BLOCKED:
     sys.modules.pop(name, None)
-getuid = os.getuid
-del os.getuid
+getuid = getattr(os, "getuid", None)  # Windows has none
+if getuid:
+    del os.getuid
 os.environ.setdefault("LOCALAPPDATA", str(Path.home() / "AppData/Local"))
 try:
     for platform, app_dir, kind in [("win32", Path(os.environ["LOCALAPPDATA"]) / "dictate", "windows"),
@@ -65,7 +66,8 @@ try:
         spec.loader.exec_module(importlib.util.module_from_spec(spec))
         checks.append((f"{module}.py imports", True))
 finally:
-    os.getuid = getuid
+    if getuid:
+        os.getuid = getuid
 os.environ.setdefault("XDG_RUNTIME_DIR", "/tmp")
 d = load("linux")
 checks.append(("linux: paths unchanged", d.APP_DIR == Path.home() / ".local/share/dictate"

@@ -17,6 +17,10 @@ on:
 permissions:
   contents: read
 
+concurrency:  # a newer push stops the run still going for an older one
+  group: platforms-${{ github.ref }}
+  cancel-in-progress: true
+
 env:
   DICTATE_NO_AUTOSTART: "1"
   DICTATE_LANGUAGE: en
@@ -59,6 +63,7 @@ jobs:
           }
 
       - name: The copy the installer started loads its model, then stops on "Stop dictation"
+        timeout-minutes: 6
         run: |
           $D = "$env:LOCALAPPDATA\dictate"
           $Log = "$D\dictate.log"
@@ -94,10 +99,12 @@ jobs:
           }
 
       - name: Clipboard and Shift+Insert
+        timeout-minutes: 5
         run: |
           & "$env:LOCALAPPDATA\dictate\venv\Scripts\python.exe" -X utf8 tests\windows_paste.py
 
       - name: Whole dictations (stand-in microphone)
+        timeout-minutes: 10
         run: |
           & "$env:LOCALAPPDATA\dictate\venv\Scripts\python.exe" -X utf8 tests\e2e_desktop.py
 
@@ -140,16 +147,19 @@ jobs:
             "$PY" "tests/$t.py"
           done
 
-      - name: The copy Dictate.app started loads its model, then quits with the app
+      - name: The copy Dictate.app started loads its model, stops on SIGTERM, and the app quits with it
+        timeout-minutes: 6
         run: |
           LOG="$HOME/Library/Application Support/dictate/dictate.log"
           for i in $(seq 180); do grep -q "model ready" "$LOG" 2>/dev/null && break; sleep 1; done
           cat "$LOG"
           grep -q "model ready" "$LOG"
           if grep -q Traceback "$LOG"; then echo "an error in the log"; exit 1; fi
-          osascript -e 'quit app "Dictate"'
-          for i in $(seq 20); do pgrep -f "dictate.py" > /dev/null || break; sleep 1; done
-          if pgrep -fl "dictate.py"; then echo "still running"; exit 1; fi
+          pgrep -fl "Dictate.app" || { echo "Dictate.app is not running"; exit 1; }
+          # (Quitting the app through an Apple Event would need a permission nobody can grant here.)
+          pkill -TERM -f "venv/bin/python -X utf8 dictate.py"
+          for i in $(seq 30); do pgrep -f "dictate.py|Dictate.app" > /dev/null || break; sleep 1; done
+          if pgrep -fl "dictate.py|Dictate.app"; then echo "still running"; exit 1; fi
           tail -n 5 "$LOG"
 
       - name: Accuracy and speed on the CPU (FLEURS)
@@ -160,6 +170,7 @@ jobs:
           for model in $MODELS; do "$D/venv/bin/python" tests/bench_asr.py "$model" --cpu; done
 
       - name: Whole dictations (stand-in microphone)
+        timeout-minutes: 10
         run: |
           "$HOME/Library/Application Support/dictate/venv/bin/python" tests/e2e_desktop.py
 
@@ -204,6 +215,7 @@ jobs:
           for model in $MODELS; do "$D/venv/bin/python" tests/bench_asr.py "$model" --cpu; done
 
       - name: X11 keys and paste, large-text windows, a whole dictation (in Xvfb)
+        timeout-minutes: 10
         run: |
           PY="$HOME/.local/share/dictate/venv/bin/python"
           "$PY" tests/x11_paste.py
