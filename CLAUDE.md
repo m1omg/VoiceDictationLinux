@@ -133,6 +133,10 @@ On a CPU-only machine, use `bench_asr.py` to decide between `small` and `large-v
   - The window is the audio since the last committed sentence, re-transcribed every 0.4 s.
   - Commit the prefix that the last two passes agree on, minus its last word (unless that word
     ends a sentence and the speaker has paused for 0.8 s).
+  - After 2 s of silence (`Worker.QUIET`, Silero VAD) live passes wait for speech, and the final
+    pass skips the silence when nothing is pending. Whisper invents words for windows of silence,
+    and identical passes over silence agree with each other, so they used to get typed (worst in
+    tap mode, where people pause for long).
   - Auto-detect waits for 1.5 s of speech; `tests/bench_detect.py` shows Slovak is confidently
     misread as English below that.
   - No vocabulary hints on windows shorter than 2 s (Whisper echoes them).
@@ -156,6 +160,11 @@ On a CPU-only machine, use `bench_asr.py` to decide between `small` and `large-v
     interpreter exit. Keep GPU tensors inside the model's lifetime in test scripts.
   - RX 6700 XT, LMDE 7: one-shot WER en 3.9 % / sk 5.9 %, 0.40 s / 0.48 s per sentence,
     auto-detect 15/15 and 30/30; release -> typed about 0.8 s with live typing.
+- **Hangs.** `Watchdog` restarts the program (`os.execv`, same PID) when one model pass runs
+  longer than 30 s plus a quarter of its audio, after dumping all thread stacks to the log (at
+  most once per 10 minutes). A hang was seen once on ROCm (04:36, 2026-10-03), cause unknown; a
+  candidate is faster-whisper's seek loop, which doesn't advance when the model emits two
+  timestamps at 0.00 and the segment has no words. Read the stacks before changing anything.
 - **Packaging pitfalls already solved:**
   - A private uv Python, so a system Python upgrade can't break the venv.
   - ctranslate2 4.8.2 only needs `libcublas.so.12`; it comes from pip and is preloaded with

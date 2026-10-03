@@ -141,6 +141,8 @@ key ──► recorder ──► Whisper on the GPU ──► text ──► cli
   - A word is typed only once two consecutive passes agree on it *and* on the word that follows,
     so its punctuation is settled too. The last word of a sentence also goes out once you pause
     after it for 0.8 s.
+  - After 2 s of silence the passes wait for you to speak again: Whisper invents words ("Thank
+    you.", "Bye.") for windows of silence.
   - Finished text that has left the window is passed back as the prompt.
   - This is the method from [whisper-streaming](https://github.com/ufal/whisper_streaming)
     (Macháček et al.).
@@ -230,6 +232,9 @@ python3 tests/fetch_fleurs.py                                  # ~27 MB of test 
   Or join the group (`sudo usermod -aG render $USER`) and log in again. Then restart dictation.
 - **"Microphone is muted":** only silence was recorded. Check the headset mute switch and the
   input device in your sound settings.
+- **Stuck on "Transcribing…".** If a model pass hangs, dictation restarts itself after about
+  30 s (a notification says so) and writes every thread's stack to its log. That dictation is
+  lost. Keep the log lines starting at `a model pass has run for`; they show where it hung.
 - **Words appear late in live typing.** That's expected: words wait until they're stable. Pick
   the language instead of auto-detect.
 - **GPU memory.** About 2 GB stays reserved while it runs. Use *Stop dictation* before a heavy game.

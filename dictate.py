@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import argparse
 import ctypes
+import faulthandler
 import fcntl
 import functools
 import glob
@@ -980,6 +981,14 @@ def speech_seconds(audio: np.ndarray) -> float:
     return (len(audio) - stamps[0]["start"]) / RATE if stamps else 0.0
 
 
+def silence_seconds(audio: np.ndarray) -> float:
+    """How long the speaker has been quiet at the end of this audio (Silero VAD, which ends speech
+    only after 2 s of silence and pads it by 0.4 s, so this jumps from 0 to 1.6 s)."""
+    from faster_whisper.vad import VadOptions, get_speech_timestamps
+    stamps = get_speech_timestamps(audio, VadOptions())
+    return (len(audio) - stamps[-1]["end"]) / RATE if stamps else len(audio) / RATE
+
+
 def _norm(word: str) -> str:
     return re.sub(r"[^\w]", "", word.lower())
 
@@ -1078,6 +1087,9 @@ class PasteItem:
 class Worker(threading.Thread):
     """Runs every model pass: live passes while the key is held, the final pass after release."""
     STEP = 0.4  # seconds of new audio between live passes
+    # silence_seconds() above this: the speaker has been quiet for 2 s. Live passes then wait for
+    # speech, because whisper invents words ("Thank you.", "Bye.") for windows of silence.
+    QUIET = 1.0
 
     def __init__(self, cfg, transcriber: Transcriber, paster, cues: Cues, topbar):
         super().__init__(name="transcribe", daemon=True)
@@ -1085,6 +1097,7 @@ class Worker(threading.Thread):
         self.cond = threading.Condition()
         self.active: Session | None = None
         self.finished: deque = deque()
+        self.busy: tuple[float, float] | None = None  # (since, seconds of audio) while a pass runs
 
     def begin(self, session: Session) -> None:
         with self.cond:
@@ -1115,6 +1128,7 @@ class Worker(threading.Thread):
                 while not self.finished and not self._live_due():
                     self.cond.wait(0.1)
                 session, final = (self.finished.popleft(), True) if self.finished else (self.active, False)
+            self.busy = (time.monotonic(), len(session.audio) / RATE if final else session.rec.seconds())
             if final:
                 self.transcriber.ready.wait()
                 try:
@@ -1127,6 +1141,7 @@ class Worker(threading.Thread):
                 except Exception as e:
                     log.warning("live pass failed: %s", e)
                     session.live_ok = False
+            self.busy = None
 
     def _live_due(self) -> bool:
         s = self.active
@@ -1150,7 +1165,7 @@ class Worker(threading.Thread):
         st = s.streamer
         start = st.window_start
         window = audio[int(start * RATE):]
-        if len(window) < RATE:
+        if len(window) < RATE or silence_seconds(window[-30 * RATE:]) > self.QUIET:
             return
         segments = self.transcriber.run(window, s.language, words=True, prompt=st.prompt(),
                                         beam_size=None if s.live else 1, hotwords=len(window) >= 2 * RATE)
@@ -1174,7 +1189,8 @@ class Worker(threading.Thread):
             piece, problem = "", "transcription error"
         seconds = len(s.audio) / RATE
         if problem:
-            log.info("%s in %.1f s of audio", problem, seconds)
+            peak = float(np.abs(s.audio).max()) if s.audio.size else 0.0
+            log.info("%s in %.1f s of audio (peak %.0f dBFS)", problem, seconds, 20 * np.log10(max(peak, 1e-9)))
             self.cues.play("error")
             if problem == "muted":
                 log.info("default microphone: %s", microphone())
@@ -1198,7 +1214,7 @@ class Worker(threading.Thread):
             start = st.window_start
             window = audio[int(start * RATE):]
             words = []
-            if len(window) >= RATE // 4:
+            if len(window) >= RATE // 4 and (st.pending or silence_seconds(window[-30 * RATE:]) <= self.QUIET):
                 words = st.words_after_commit(self._run(window, s.language, words=True, prompt=st.prompt()), start)
             return s.text.add(words, s.language, final=True), None
         segments = self._run(audio, s.language)
@@ -1213,6 +1229,38 @@ class Worker(threading.Thread):
             log.warning("transcription failed (%s); reloading the model", e)
             self.transcriber.load()
             return self.transcriber.run(audio, language, **kw)
+
+
+class Watchdog(threading.Thread):
+    """Restarts dictate when a model pass hangs, instead of leaving it "Transcribing…" forever.
+
+    A pass normally takes 0.3-1.5 s. Once one has run for 30 s plus a quarter of its audio's
+    length, every thread's stack goes to the log (to find the cause) and the program starts over.
+    """
+
+    def __init__(self, worker: Worker):
+        super().__init__(name="watchdog", daemon=True)
+        self.worker = worker
+
+    def run(self):
+        while True:
+            time.sleep(2)
+            busy = self.worker.busy
+            if busy is None or time.monotonic() - busy[0] < 30 + busy[1] / 4:
+                continue
+            log.error("a model pass has run for %.0f s (%.1f s of audio); thread stacks follow",
+                      time.monotonic() - busy[0], busy[1])
+            faulthandler.dump_traceback(all_threads=True)  # to stderr: the log file or the journal
+            if time.time() - float(os.environ.get("DICTATE_RESTARTED", 0)) < 600:
+                notify("Dictation is stuck", "It already restarted itself recently. Restart the computer if "
+                       "it stays stuck.")
+                return
+            notify("Dictation restarted", "Transcribing got stuck, so dictation started over. The last "
+                   "dictation was lost.")
+            os.environ["DICTATE_RESTARTED"] = str(time.time())
+            for handler in logging.getLogger().handlers:
+                handler.flush()
+            os.execv(sys.executable, sys.orig_argv)
 
 
 class Paster(threading.Thread):
@@ -1600,6 +1648,7 @@ def run_daemon(cfg) -> int:
     paster.start()
     worker = Worker(cfg, transcriber, paster, cues, topbar)
     worker.start()
+    Watchdog(worker).start()
     ctl = Controller(cfg, ui, cues, worker, topbar)
     paster.on_inject = ctl.mark_injection
 
