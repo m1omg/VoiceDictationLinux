@@ -1,8 +1,9 @@
-# Python packages for dictate, installed into ./venv by install.sh.
+# Python packages for dictate, installed into ./venv by install.sh (plus requirements-cuda.txt, or
+# the ROCm packages on AMD GPUs).
 faster-whisper==1.2.1
-# Wheel built against CUDA 12.8 without cuDNN; only needs libcublas.so.12 (below).
+# PyPI wheel built against CUDA 12.8 without cuDNN; only needs libcublas.so.12 (requirements-cuda.txt).
+# On AMD GPUs install.sh puts CTranslate2's ROCm build of the same version in its place.
 ctranslate2==4.8.2
-nvidia-cublas-cu12>=12.8,<13
 # PyAV 19 breaks faster-whisper 1.2.1's file decoding (dictate passes arrays, but stay safe).
 av<19
 jeepney>=0.9,<1

@@ -8,6 +8,9 @@ seconds of audio), then runs the final pass, and reports:
 Reference (CachyOS, RTX 3060): first words ~1.9 s (en) / ~3.3 s (sk) after the recording starts,
 ~90-95% typed before release, auto mode +~1 s and 0/8 wrong language; live WER equal to one-shot
 (en 1.3% / 6.2%, sk 5.7% / 8.7% on two 6-sentence sets).
+LMDE 7, RX 6700 XT (ROCm), with words also typed at a pause after a sentence: first words 2.0 s
+(en) / 4.2 s (sk), 97-98% typed before release, auto mode 0/8 wrong; live WER en 2.7% / 6.2%
+(one-shot 1.3% / 6.2%), sk 6.8% / 10.4% (one-shot 6.8% / 7.8%).
 """
 import time
 

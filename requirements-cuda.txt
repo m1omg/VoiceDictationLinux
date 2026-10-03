@@ -1,0 +1,2 @@
+# NVIDIA GPUs (also installed on CPU-only machines): the cuBLAS that CTranslate2's PyPI wheel loads.
+nvidia-cublas-cu12>=12.8,<13

@@ -654,7 +654,8 @@ class X11Hotkey(threading.Thread):
     A passive grab on the root window catches the press and keeps it from apps. X11 then gives
     us the whole keyboard until the key is released, which would swallow our own Shift+Insert,
     so the grab is handed back at once and the release is found by polling the key state.
-    Auto-repeat is switched off for this one key so it can't leak into apps while held.
+    Auto-repeat is switched off for this one key (again whenever a keyboard is plugged in or
+    comes back after a suspend), because every repeat would grab the keyboard once more.
     """
 
     def __init__(self, cfg, emit):
@@ -663,6 +664,7 @@ class X11Hotkey(threading.Thread):
 
     def run(self):
         from Xlib import X, XK, display, error
+        from Xlib.ext import xinput
         try:
             d = display.Display()
             root = d.screen().root
@@ -673,6 +675,7 @@ class X11Hotkey(threading.Thread):
             for mods in (0, X.Mod2Mask, X.LockMask, X.Mod2Mask | X.LockMask):  # NumLock / CapsLock on or off
                 root.grab_key(code, mods, True, X.GrabModeAsync, X.GrabModeAsync, onerror=catch)
             d.change_keyboard_control(key=code, auto_repeat_mode=X.AutoRepeatModeOff)
+            root.xinput_select_events([(xinput.AllDevices, xinput.HierarchyChangedMask)])
             d.sync()
             if catch.get_error():
                 raise RuntimeError(f"another program already uses {self.cfg.trigger}")
@@ -681,16 +684,38 @@ class X11Hotkey(threading.Thread):
             return
         log.info("push-to-talk key grabbed: %s (X11)", self.cfg.trigger)
         self.emit("key_ready", self.cfg.trigger)
+        held = lambda: d.query_keymap()[code // 8] & (1 << (code % 8))
+        down = False
         while True:
-            e = d.next_event()
-            if e.type != X.KeyPress or e.detail != code:
+            if down and not d.pending_events():
+                select.select([d.fileno()], [], [], 0.02)  # a repeat wakes us at once; else poll the key
+                if not d.pending_events() and not held():
+                    down = False
+                    self.emit("release", time.monotonic())
                 continue
-            d.ungrab_keyboard(X.CurrentTime)  # let our Shift+Insert reach the app while the key is held
-            d.flush()
-            self.emit("press", time.monotonic())
-            while d.query_keymap()[code // 8] & (1 << (code % 8)):
-                time.sleep(0.02)
-            self.emit("release", time.monotonic())
+            e = d.next_event()
+            if e.type == X.KeyPress and e.detail == code:
+                d.ungrab_keyboard(X.CurrentTime)  # let our Shift+Insert reach the app while the key is held
+                if down:  # a repeat: some keyboard still repeats the key
+                    d.change_keyboard_control(key=code, auto_repeat_mode=X.AutoRepeatModeOff)
+                d.flush()
+                if not down and held():  # not a repeat, nor a press that is already over
+                    down = True
+                    self.emit("press", time.monotonic())
+            elif getattr(e, "evtype", None) == xinput.HierarchyChanged:  # a keyboard came (back)
+                d.change_keyboard_control(key=code, auto_repeat_mode=X.AutoRepeatModeOff)
+                d.flush()
+
+
+def microphone() -> str:
+    """The default input device and its volume, for the log when only silence came in (PipeWire)."""
+    try:
+        wpctl = lambda *args: subprocess.run(["wpctl", *args, "@DEFAULT_AUDIO_SOURCE@"], capture_output=True,
+                                             text=True, timeout=2).stdout
+        name = re.search(r'node\.description = "([^"]*)"', wpctl("inspect"))
+        return f"{name.group(1) if name else '?'}, {wpctl('get-volume').strip() or 'volume unknown'}"
+    except (OSError, subprocess.TimeoutExpired):
+        return "unknown (no wpctl)"
 
 
 class Recorder:
@@ -744,16 +769,52 @@ class Recorder:
         return self.snapshot()
 
 
-def preload_cublas() -> list[str]:
-    """Load the pip-installed cuBLAS so ctranslate2 finds it without LD_LIBRARY_PATH."""
+ROCM_LIBS = ("_rocm_sdk_core/lib/libamdhip64.so.7",  # what CTranslate2's ROCm build links against
+             "_rocm_sdk_libraries/lib/libhipblas.so.3", "_rocm_sdk_libraries/lib/libhiprand.so.1")
+
+
+def amd_gpu() -> tuple[str | None, str | None]:
+    """The AMD GPU's target (e.g. gfx1031) and the one whose ROCm device code is installed (e.g. gfx1030)."""
+    gpu = None
+    for props in sorted(glob.glob("/sys/class/kfd/kfd/topology/nodes/*/properties")):
+        try:
+            found = re.search(r"^gfx_target_version (\d+)$", Path(props).read_text(), re.MULTILINE)
+        except OSError:
+            continue
+        v = int(found.group(1)) if found else 0
+        if v:  # e.g. 100301 = gfx1031 (major 10, minor 3, stepping 1); CPU nodes have 0
+            gpu = f"gfx{v // 10000}{v // 100 % 100:x}{v % 100:x}"
+            break
     site = sysconfig.get_paths()["purelib"]
+    installed = sorted(p.name.split("-")[0].removeprefix("rocm_sdk_device_")
+                       for p in Path(site).glob("rocm_sdk_device_gfx*.dist-info"))
+    return gpu, (gpu if gpu in installed else installed[0] if installed else None)
+
+
+def preload_gpu_libraries() -> tuple[str, list[str]]:
+    """Load the pip-installed GPU libraries so ctranslate2 finds them without LD_LIBRARY_PATH:
+    cuBLAS for its CUDA build (NVIDIA), the ROCm runtime for its ROCm build (AMD).
+    Returns the platform ("cuda" or "rocm") and the libraries loaded."""
+    site = sysconfig.get_paths()["purelib"]
+    if not Path(site, ROCM_LIBS[0]).exists():
+        loaded = []
+        for lib in ("libcublasLt.so.12", "libcublas.so.12"):  # Lt first: libcublas depends on it
+            hits = glob.glob(f"{site}/nvidia/**/{lib}", recursive=True)
+            if hits:
+                ctypes.CDLL(hits[0], mode=ctypes.RTLD_GLOBAL)
+                loaded.append(hits[0])
+        return "cuda", loaded
+    gpu, code = amd_gpu()
+    if gpu and code and code != gpu:  # e.g. an RX 6700 XT (gfx1031) runs the gfx1030 code
+        os.environ.setdefault("HSA_OVERRIDE_GFX_VERSION", f"{int(code[3:-2])}.{int(code[-2], 16)}.{int(code[-1], 16)}")
+    # The default stream-ordered allocator (hipMallocAsync) hung on its first allocation on an
+    # RX 6700 XT (ROCm 7.14, kernel 6.12); CTranslate2's caching allocator works.
+    os.environ.setdefault("CT2_CUDA_ALLOCATOR", "cub_caching")
     loaded = []
-    for lib in ("libcublasLt.so.12", "libcublas.so.12"):  # Lt first: libcublas depends on it
-        hits = glob.glob(f"{site}/nvidia/**/{lib}", recursive=True)
-        if hits:
-            ctypes.CDLL(hits[0], mode=ctypes.RTLD_GLOBAL)
-            loaded.append(hits[0])
-    return loaded
+    for lib in ROCM_LIBS:
+        ctypes.CDLL(f"{site}/{lib}", mode=ctypes.RTLD_GLOBAL)
+        loaded.append(f"{site}/{lib}")
+    return "rocm", loaded
 
 
 class Transcriber:
@@ -767,7 +828,7 @@ class Transcriber:
 
     def load(self) -> None:
         self.ready.clear()
-        preload_cublas()
+        platform, _libs = preload_gpu_libraries()
         from faster_whisper import BatchedInferencePipeline, WhisperModel
         ladder = [("cuda", "float16", self.cfg.model), ("cuda", "int8_float16", self.cfg.model),
                   ("cpu", "int8", self.cfg.fallback_model)]
@@ -787,7 +848,7 @@ class Transcriber:
                 log.warning("loading %s on %s/%s failed: %s", name, device, compute_type, e)
                 continue
             self.model, self.batched = model, BatchedInferencePipeline(model)
-            self.desc = f"{name} on {device}/{compute_type}"
+            self.desc = f"{name} on {platform if device == 'cuda' else device}/{compute_type}"
             log.info("model ready: %s (%.1f s)", self.desc, time.monotonic() - started)
             if device == "cpu":
                 notify("Dictation is running on the CPU",
@@ -928,11 +989,13 @@ class Streamer:
 
     Each pass re-transcribes the current window: the audio since the last committed sentence, so
     whisper hears the whole sentence it is working on. A word is committed once two consecutive
-    passes agree on it and on the word after it, so its punctuation is settled too. Committed
-    text that has left the window is fed back as the prompt, for continuity.
+    passes agree on it and on the word after it, so its punctuation is settled too; the last word
+    of a sentence is also committed once the speaker pauses after it. Committed text that has
+    left the window is fed back as the prompt, for continuity.
     """
     TRIM_AFTER = 15.0  # once the window is this long, drop it up to the last committed sentence
     FORCE_AFTER = 10.0  # nothing settled for this long: commit everything but the last 3 s
+    PAUSE = 0.8  # silence after a sentence's last word that settles it without a next word
 
     def __init__(self):
         self.committed: list[tuple[float, float, str]] = []
@@ -966,12 +1029,19 @@ class Streamer:
         while agree < min(len(words), len(self.pending)) and _norm(words[agree][2]) == _norm(self.pending[agree][2]):
             agree += 1
         n = max(agree - 1, 0)  # the last agreed word waits until the word after it agrees too
+        last = words[-1][2].rstrip() if words else ""
+        if (agree == len(words) > 0 and audio_seconds - words[-1][1] >= self.PAUSE
+                and last.endswith((".", "?", "!")) and not last.endswith("..")):
+            n = agree  # ...unless it ends a sentence and the speaker paused ("..." trails off instead)
         if audio_seconds - self.commit_time > self.FORCE_AFTER:
             n = max(n, sum(1 for w in words if w[1] < audio_seconds - 3.0))
         new, self.pending = words[:n], words[n:]
         self.committed += new
         if audio_seconds - self.window_start > self.TRIM_AFTER:
-            ends = [w[1] for w in self.committed if w[1] > self.window_start and w[2].rstrip().endswith((".", "?", "!", "…"))]
+            # Not up to a sentence that nothing follows yet (a pause): whisper invents words on a
+            # window of silence.
+            settled = self.committed if self.pending else self.committed[:-1]
+            ends = [w[1] for w in settled if w[1] > self.window_start and w[2].rstrip().endswith((".", "?", "!", "…"))]
             if ends:
                 self.window_start = ends[-1]
             elif audio_seconds - self.window_start > self.TRIM_AFTER + 10 and self.committed:
@@ -1107,6 +1177,7 @@ class Worker(threading.Thread):
             log.info("%s in %.1f s of audio", problem, seconds)
             self.cues.play("error")
             if problem == "muted":
+                log.info("default microphone: %s", microphone())
                 notify("Microphone is muted", "Only silence was recorded. Check the headset's mute switch.")
         else:
             log.info("transcribed %.1f s of %s audio in %.2f s (%d chars%s)", seconds, s.language,
@@ -1276,7 +1347,7 @@ class TopBar:
 
     def menu(self) -> list:
         M, ui = self.MenuItem, self.ui
-        return [M(1, "Hold numpad Del to dictate", enabled=False), M(2, kind="separator"),
+        return [M(1, "Hold numpad Del to dictate, or tap it to start and stop", enabled=False), M(2, kind="separator"),
                 M(10, LANGUAGES["en"], "radio", ui.language == "en"),
                 M(11, LANGUAGES["sk"], "radio", ui.language == "sk"),
                 M(12, LANGUAGES["auto"], "radio", ui.language == "auto"),
@@ -1315,7 +1386,7 @@ class TopBar:
         elif s["busy"]:
             icon, tip = "working", "Transcribing…"
         else:
-            icon, tip = "ready", "Hold numpad Del to dictate"
+            icon, tip = "ready", "Hold numpad Del to dictate, or tap it to start and stop"
         code = language.upper()
         if s["recording"]:
             if language == "auto" and s["detected"]:
@@ -1332,22 +1403,28 @@ class TopBar:
 class Controller:
     """Push-to-talk state machine; runs on the main thread.
 
+    Hold the key to dictate while it is down, or tap it to dictate until the next press.
+
     GNOME repeats Activated while the key is held and drops Deactivated if a modifier changes
     mid-hold, so a missing release is inferred once repeats stop (only after repeats have
     actually been observed, and not after we typed during the hold, which ends the repeat).
     """
+    TAP = 0.4  # released this soon after the press: a tap
 
     def __init__(self, cfg, ui: UiState, cues: Cues, worker: Worker, topbar):
         self.cfg, self.ui, self.cues, self.worker, self.topbar = cfg, ui, cues, worker, topbar
         self.events: queue.Queue = queue.Queue()
         self.repeat_on, self.delay, self.interval = keyboard_repeat()
         self.gap = max(0.6, 10 * self.interval)  # no repeat for this long: the key is up
-        self.state = "IDLE"  # IDLE, HOLD, TAIL (released, recording the tail), WAIT_RELEASE
+        # IDLE, HOLD, LATCHED (tapped: recording until the next press), TAIL (released, recording the
+        # tail), WAIT_RELEASE
+        self.state = "IDLE"
         self.session: Session | None = None
         self.ids = itertools.count(1)
         self.t_press = self.last = self.t_release = 0.0
         self.reps = 0
         self.repeats_seen = False
+        self.stopping = False  # the press that ended a tapped dictation is still down
         self.last_injection = 0.0
 
     def emit(self, kind: str, value=None) -> None:
@@ -1373,8 +1450,13 @@ class Controller:
             t = value
             if self.state == "IDLE":
                 self._start(t)
+            elif self.state == "LATCHED":  # the press after a tap stops the dictation
+                self.state, self.t_release, self.last, self.stopping = "TAIL", t, t, True
+                self.cues.play("stop")
             elif self.state == "TAIL":
-                if t - self.t_release < 0.12:  # key bounce: keep the same recording
+                if self.stopping:  # that press is still down (repeating)
+                    self.last = t
+                elif t - self.t_release < 0.12:  # key bounce: keep the same recording
                     self.state, self.last = "HOLD", t
                 else:
                     self._finish()
@@ -1392,19 +1474,24 @@ class Controller:
             elif self.state == "WAIT_RELEASE":
                 self.last = t
         elif kind == "release":
-            if self.state == "HOLD":
+            if self.state == "HOLD" and not self.reps and value - self.t_press < self.TAP:
+                self.state = "LATCHED"  # a tap: keep dictating until the next press
+                log.info("tapped: dictating until the next press")
+            elif self.state == "HOLD":
                 self.state, self.t_release = "TAIL", value
                 self.cues.play("stop")
+            elif self.state == "TAIL":
+                self.stopping = False
             elif self.state == "WAIT_RELEASE":
                 self.state = "IDLE"
         elif kind == "first_audio":
-            if self.state == "HOLD":
+            if self.state in ("HOLD", "LATCHED"):
                 self.cues.play("start")
             log.debug("microphone live %.0f ms after the key press", (value - self.t_press) * 1000)
         elif kind == "key_ready":
             self.topbar.update(problem=None)
         elif kind == "key_lost":
-            if self.state in ("HOLD", "TAIL"):
+            if self.state in ("HOLD", "LATCHED", "TAIL"):
                 self._finish()
             self.state = "IDLE"
             self.topbar.update(problem="Waiting for the keyboard shortcut…")
@@ -1418,11 +1505,17 @@ class Controller:
         return None
 
     def tick(self, now: float) -> None:
-        if self.state in ("HOLD", "TAIL") and sleep_offset() - self.session.sleep_offset > 2:
+        if self.state in ("HOLD", "LATCHED", "TAIL") and sleep_offset() - self.session.sleep_offset > 2:
             log.info("the computer slept during a recording; discarding it")
             self._discard()
             self.state = "IDLE"
         elif self.state == "TAIL" and now - self.t_release >= self.cfg.tail_ms / 1000:
+            self._finish()
+            self.state, self.stopping = ("WAIT_RELEASE" if self.stopping else "IDLE"), False
+        elif self.state == "LATCHED" and now - self.t_press > self.cfg.max_seconds:
+            log.info("maximum recording length reached")
+            self.t_release = now
+            self.cues.play("stop")
             self._finish()
             self.state = "IDLE"
         elif self.state == "HOLD":
@@ -1540,43 +1633,64 @@ def run_check(cfg) -> int:
     report("config", True, f"{CONFIG_PATH} ({'found' if CONFIG_PATH.exists() else 'defaults'})")
     ui = UiState(cfg)
     report("menu choices", True, f"language={ui.language}, live typing={ui.live}, sounds={ui.sounds}")
-    libs = preload_cublas()
-    report("cuBLAS", len(libs) == 2, ", ".join(Path(p).name for p in libs) or "nvidia-cublas-cu12 not found")
+    try:
+        platform, libs = preload_gpu_libraries()
+    except OSError as e:
+        report("GPU libraries", False, str(e))
+        return 1
+    if platform == "rocm":
+        gpu, code = amd_gpu()
+        override = os.environ.get("HSA_OVERRIDE_GFX_VERSION")
+        report("ROCm libraries", True, ", ".join(Path(p).name for p in libs))
+        report("AMD GPU", bool(gpu and code), f"{gpu or 'not found'}, ROCm device code for {code or '?'}"
+               + (f" (HSA_OVERRIDE_GFX_VERSION={override})" if override else ""))
+        kfd = os.access("/dev/kfd", os.R_OK | os.W_OK)
+        report("/dev/kfd", kfd, "accessible" if kfd else "no access (README: Troubleshooting, AMD)")
+    else:
+        report("cuBLAS", len(libs) == 2, ", ".join(Path(p).name for p in libs) or "nvidia-cublas-cu12 not found")
     import ctranslate2
     count = ctranslate2.get_cuda_device_count()
-    report("CUDA devices", count > 0, f"{count} (ctranslate2 {ctranslate2.__version__})")
+    report("GPU devices", count > 0, f"{count} ({platform}, ctranslate2 {ctranslate2.__version__})")
     for name in (cfg.model, cfg.fallback_model):
         path = MODELS_DIR / name
         report(f"model {name}", (path / "model.bin").exists(), str(path))
+    wayland = backend(cfg) == "wayland"
     report("backend", True, f"{backend(cfg)} (session type {os.environ.get('XDG_SESSION_TYPE', '?')})")
     recorder = shutil.which("pw-record") or shutil.which("parecord")
     report("recorder", recorder is not None, recorder or "install pipewire-bin or pulseaudio-utils")
-    report("/dev/uinput", os.access("/dev/uinput", os.W_OK), "writable" if os.access("/dev/uinput", os.W_OK) else "not writable")
+    if wayland:
+        report("/dev/uinput", os.access("/dev/uinput", os.W_OK), "writable" if os.access("/dev/uinput", os.W_OK) else "not writable")
     try:
         from Xlib import display
         d = display.Display()
-        report("XWayland", True, f"{d.get_display_name()}, vendor {d.display.info.vendor}")
+        detail = f"{d.get_display_name()}, vendor {d.display.info.vendor}"
+        if wayland:
+            report("XWayland", True, detail)
+        else:  # X11 types with XTEST
+            report("X11", d.has_extension("XTEST"), detail + (", XTEST" if d.has_extension("XTEST") else ", no XTEST"))
         d.close()
     except Exception as e:
-        report("XWayland", False, repr(e))
+        report("XWayland" if wayland else "X11", False, repr(e))
     try:
         from jeepney import DBusAddress, Introspectable
         from jeepney.bus_messages import message_bus
         from jeepney.io.blocking import open_dbus_connection
         with open_dbus_connection("SESSION") as conn:
-            portal = DBusAddress("/org/freedesktop/portal/desktop", bus_name="org.freedesktop.portal.Desktop")
-            xml = dbus_call(conn, Introspectable(portal.object_path, portal.bus_name).Introspect())[0]
             tray_host = dbus_call(conn, message_bus.NameHasOwner("org.kde.StatusNotifierWatcher"))[0]
-        for iface in ("org.freedesktop.host.portal.Registry", "org.freedesktop.portal.GlobalShortcuts"):
-            report(f"portal {iface.rsplit('.', 1)[1]}", f'"{iface}"' in xml, "present" if f'"{iface}"' in xml else "missing")
-        report("top-bar icon host", tray_host, "AppIndicator extension active" if tray_host
-               else "enable the AppIndicator extension to get the menu")
+            if wayland:
+                portal = DBusAddress("/org/freedesktop/portal/desktop", bus_name="org.freedesktop.portal.Desktop")
+                xml = dbus_call(conn, Introspectable(portal.object_path, portal.bus_name).Introspect())[0]
+                for iface in ("org.freedesktop.host.portal.Registry", "org.freedesktop.portal.GlobalShortcuts"):
+                    report(f"portal {iface.rsplit('.', 1)[1]}", f'"{iface}"' in xml, "present" if f'"{iface}"' in xml else "missing")
+        report("top-bar icon host", tray_host, "present" if tray_host
+               else "missing; on GNOME, enable the AppIndicator extension to get the menu")
     except Exception as e:
         report("D-Bus", False, repr(e))
     desktop = Path.home() / f".local/share/applications/{APP_ID}.desktop"
     report("desktop file", desktop.exists(), str(desktop))
-    repeat_on, delay, interval = keyboard_repeat()
-    report("key repeat", True, f"{'on' if repeat_on else 'off'}, delay {delay * 1000:.0f} ms, interval {interval * 1000:.0f} ms")
+    if wayland:  # on X11 the key's auto-repeat is switched off while dictate runs
+        repeat_on, delay, interval = keyboard_repeat()
+        report("key repeat", True, f"{'on' if repeat_on else 'off'}, delay {delay * 1000:.0f} ms, interval {interval * 1000:.0f} ms")
     return 0 if ok else 1
 
 

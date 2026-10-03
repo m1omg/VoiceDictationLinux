@@ -2,6 +2,7 @@
 
 Reference (CachyOS, RTX 3060, large-v3-turbo fp16): English WER ~3.9%, Slovak ~7.0%,
 ~0.35 s per ~9 s sentence, auto-detect 15/15 and 30/30.
+LMDE 7, RX 6700 XT (ROCm): English 3.9%, Slovak 5.9%, 0.40 s / 0.48 s, auto-detect 15/15 and 30/30.
 """
 import time
 
