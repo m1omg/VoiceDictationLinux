@@ -1,23 +1,23 @@
 #!/usr/bin/env python3
 """dictate: hold numpad Del to talk; your words are typed into the focused app.
 
-Push-to-talk dictation for GNOME on Wayland:
-  hotkey  xdg-desktop-portal GlobalShortcuts (GNOME swallows the key and reports press/release)
-  audio   pw-record (PipeWire); the microphone is open only while the key is held
-  speech  faster-whisper large-v3-turbo kept loaded on the GPU; English, Slovak or auto-detect
+Push-to-talk dictation for Linux (GNOME/KDE on Wayland, X11 desktops), Windows and macOS:
+  hotkey  Wayland: xdg-desktop-portal GlobalShortcuts; X11: a key grab; Windows: a low-level
+          keyboard hook; macOS: an event tap. The key never reaches the focused app.
+  audio   pw-record (PipeWire) or PortAudio; the microphone is open only while the key is held
+  speech  faster-whisper kept loaded on the GPU or CPU; English, Slovak or auto-detect
   live    optionally types words while you speak, once two consecutive passes agree on them
-  output  X11 CLIPBOARD + PRIMARY via XWayland, then Shift+Insert from a uinput keyboard
-  menu    a top-bar icon (AppIndicator extension) to switch language, live typing and sounds
+  output  the clipboard (X11 CLIPBOARD + PRIMARY on Linux), then Shift+Insert (Cmd+V on macOS)
+  menu    a top-bar / tray icon to switch language, model, CPU/GPU, live typing and sounds
 
-Settings: ~/.config/dictate/config.toml. Menu choices: ~/.local/state/dictate/state.json.
-Run with --help for the test modes.
+Settings: config.toml (~/.config/dictate on Linux). Menu choices: state.json.
+Run with --help for the setup and test modes.
 """
 from __future__ import annotations
 
 import argparse
 import ctypes
 import faulthandler
-import fcntl
 import functools
 import glob
 import inspect
@@ -46,12 +46,22 @@ from types import SimpleNamespace
 
 import numpy as np
 
+WINDOWS, MACOS = sys.platform == "win32", sys.platform == "darwin"
+LINUX = not (WINDOWS or MACOS)
 APP_ID = "io.github.m1omg.VoiceDictationLinux"  # replaced by the app_id setting at start-up
-APP_DIR = Path.home() / ".local/share/dictate"
+if WINDOWS:  # one folder holds everything: program, models, settings, log
+    APP_DIR = Path(os.environ.get("LOCALAPPDATA") or Path.home() / "AppData/Local") / "dictate"
+    CONFIG_PATH, STATE_PATH, RUNTIME_DIR = APP_DIR / "config.toml", APP_DIR / "state.json", APP_DIR / "run"
+elif MACOS:
+    APP_DIR = Path.home() / "Library/Application Support/dictate"
+    CONFIG_PATH, STATE_PATH, RUNTIME_DIR = APP_DIR / "config.toml", APP_DIR / "state.json", APP_DIR / "run"
+else:
+    APP_DIR = Path.home() / ".local/share/dictate"
+    CONFIG_PATH = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config") / "dictate/config.toml"
+    STATE_PATH = Path(os.environ.get("XDG_STATE_HOME") or Path.home() / ".local/state") / "dictate/state.json"
+    RUNTIME_DIR = Path(os.environ.get("XDG_RUNTIME_DIR") or f"/run/user/{os.getuid()}")
 MODELS_DIR = APP_DIR / "models"
-CONFIG_PATH = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config") / "dictate/config.toml"
-STATE_PATH = Path(os.environ.get("XDG_STATE_HOME") or Path.home() / ".local/state") / "dictate/state.json"
-RUNTIME_DIR = Path(os.environ.get("XDG_RUNTIME_DIR") or f"/run/user/{os.getuid()}")
+LOG_PATH = APP_DIR / "dictate.log"  # used when there is no journal (autostart desktops, Windows, macOS)
 RATE = 16000
 STALE_SECONDS = 15
 C_LOCALE = {**os.environ, "LC_ALL": "C"}  # pw-cat parses numbers with the locale (sk uses ",")
@@ -117,7 +127,7 @@ class UiState:
         values = {"language": cfg.language if cfg.language in LANGUAGES else "en",
                   "live": cfg.live_typing, "sounds": cfg.sounds}
         try:
-            saved = json.loads(STATE_PATH.read_text())
+            saved = json.loads(STATE_PATH.read_text(encoding="utf-8"))
         except FileNotFoundError:
             saved = {}
         except (OSError, ValueError) as e:
@@ -149,7 +159,7 @@ class UiState:
         try:
             STATE_PATH.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
             tmp = STATE_PATH.with_suffix(".tmp")
-            tmp.write_text(data)
+            tmp.write_text(data, encoding="utf-8")
             tmp.replace(STATE_PATH)
         except OSError as e:
             log.warning("state: cannot save %s: %s", STATE_PATH, e)
@@ -158,23 +168,42 @@ class UiState:
             listener()
 
 
+NOTIFY_HOOK = None  # Windows: the tray icon shows notifications (set by the tray once it runs)
+
+
 def notify(summary: str, body: str = "") -> None:
     """Desktop notification, used only for problems the user should act on."""
     try:
-        subprocess.Popen(["notify-send", "--app-name=Dictate", "--icon=audio-input-microphone",
-                          f"--hint=string:desktop-entry:{APP_ID}", summary, body],
-                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    except OSError:
-        pass
+        if NOTIFY_HOOK is not None:
+            NOTIFY_HOOK(summary, body)
+        elif MACOS:  # the texts go in as arguments, never into the script
+            subprocess.Popen(["osascript", "-e", "on run argv", "-e", 'display notification (item 2 of argv) '
+                              'with title "Dictate" subtitle (item 1 of argv)', "-e", "end run", summary, body],
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        elif LINUX:
+            subprocess.Popen(["notify-send", "--app-name=Dictate", "--icon=audio-input-microphone",
+                              f"--hint=string:desktop-entry:{APP_ID}", summary, body],
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except Exception as e:
+        log.debug("notification failed: %s", e)
 
 
 def sleep_offset() -> float:
-    """Grows when the machine suspends (CLOCK_BOOTTIME keeps counting, CLOCK_MONOTONIC stops)."""
+    """Grows when the machine suspends: a clock that counts suspended time minus one that doesn't."""
+    if WINDOWS:
+        from windows import sleep_offset as windows_sleep_offset
+        return windows_sleep_offset()
+    if MACOS:  # there CLOCK_MONOTONIC keeps counting during sleep and CLOCK_UPTIME_RAW stops
+        return time.clock_gettime(time.CLOCK_MONOTONIC) - time.clock_gettime(time.CLOCK_UPTIME_RAW)
     return time.clock_gettime(time.CLOCK_BOOTTIME) - time.monotonic()
 
 
 def keyboard_repeat() -> tuple[bool, float, float]:
-    """GNOME's key-repeat settings: (enabled, delay s, interval s)."""
+    """GNOME's key-repeat settings: (enabled, delay s, interval s). Elsewhere our own key hook
+    ignores repeats and always sees the release, so there is nothing to infer from repeats."""
+    if not LINUX:
+        return False, 0.5, 0.03
+
     def get(key):
         out = subprocess.run(["gsettings", "get", "org.gnome.desktop.peripherals.keyboard", key],
                              capture_output=True, text=True, timeout=3).stdout.split()
@@ -185,13 +214,27 @@ def keyboard_repeat() -> tuple[bool, float, float]:
         return True, 0.5, 0.03
 
 
-def single_instance() -> int:
+def single_instance():
+    """Holds a lock for the life of the process; exits if another copy holds it."""
+    if WINDOWS:
+        from windows import single_instance as windows_single_instance
+        return windows_single_instance()
+    import fcntl
+    RUNTIME_DIR.mkdir(mode=0o700, parents=True, exist_ok=True)
     fd = os.open(RUNTIME_DIR / "dictate.lock", os.O_RDWR | os.O_CREAT | os.O_CLOEXEC, 0o600)
     try:
         fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except BlockingIOError:
-        sys.exit("dictate is already running (stop it with: systemctl --user stop dictate)")
+        os.close(fd)
+        return None
     return fd
+
+
+def lock_or_exit():
+    lock = single_instance()
+    if lock is None:
+        sys.exit("dictate is already running" + (" (stop it with: systemctl --user stop dictate)" if LINUX else ""))
+    return lock
 
 
 def dbus_call(conn, msg, timeout=30):
@@ -203,9 +246,15 @@ def dbus_call(conn, msg, timeout=30):
 
 
 def screen_locked() -> bool:
-    from jeepney import DBusAddress, new_method_call
-    from jeepney.io.blocking import open_dbus_connection
+    if WINDOWS:
+        from windows import screen_locked as windows_screen_locked
+        return windows_screen_locked()
+    if MACOS:
+        from macos import screen_locked as macos_screen_locked
+        return macos_screen_locked()
     try:
+        from jeepney import DBusAddress, new_method_call
+        from jeepney.io.blocking import open_dbus_connection
         with open_dbus_connection("SESSION") as conn:
             for name in ("org.gnome.ScreenSaver", "org.cinnamon.ScreenSaver", "org.freedesktop.ScreenSaver"):
                 path = "/" + name.replace(".", "/")
@@ -220,14 +269,15 @@ def screen_locked() -> bool:
 
 
 class Cues:
-    """Short generated tones, played with pw-play without blocking."""
+    """Short generated tones, played without blocking (pw-play or paplay, winsound, afplay)."""
     TONES = {"start": [(880, 0.07)], "stop": [(587, 0.07)],
              "error": [(220, 0.09), (0, 0.06), (220, 0.09)]}
 
     def __init__(self, enabled, volume: float):
         self.enabled = enabled  # a callable: sounds can be switched from the menu
         self.dir = RUNTIME_DIR / "dictate-sounds"
-        self.dir.mkdir(mode=0o700, exist_ok=True)
+        self.dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+        self.player = None if WINDOWS else "afplay" if MACOS else shutil.which("pw-play") or "paplay"
         for name, parts in self.TONES.items():
             self._write(self.dir / f"{name}.wav", parts, 0.35 * min(max(volume, 0.0), 1.0))
 
@@ -246,12 +296,18 @@ class Cues:
             w.writeframes(pcm.tobytes())
 
     def play(self, name: str) -> None:
-        if self.enabled():
-            try:
-                subprocess.Popen(["pw-play", str(self.dir / f"{name}.wav")], env=C_LOCALE,
-                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            except OSError:
-                pass
+        if not self.enabled():
+            return
+        path = str(self.dir / f"{name}.wav")
+        try:
+            if WINDOWS:
+                import winsound
+                winsound.PlaySound(path, winsound.SND_FILENAME | winsound.SND_ASYNC | winsound.SND_NODEFAULT)
+            else:
+                subprocess.Popen([self.player, path], env=C_LOCALE, stdout=subprocess.DEVNULL,
+                                 stderr=subprocess.DEVNULL)
+        except (OSError, RuntimeError):
+            pass
 
 
 class VirtualKeyboard:
@@ -261,6 +317,8 @@ class VirtualKeyboard:
     EV_SYN, EV_KEY, KEY_LEFTSHIFT, KEY_INSERT = 0, 1, 42, 110
 
     def __init__(self):
+        import fcntl
+        self.ioctl = fcntl.ioctl
         self.fd = os.open("/dev/uinput", os.O_WRONLY | os.O_NONBLOCK | os.O_CLOEXEC)
         fcntl.ioctl(self.fd, self.UI_SET_EVBIT, self.EV_KEY)
         for code in range(1, 120):  # ESC..D are what udev needs to call it a keyboard
@@ -283,7 +341,7 @@ class VirtualKeyboard:
 
     def close(self) -> None:
         try:
-            fcntl.ioctl(self.fd, self.UI_DEV_DESTROY)
+            self.ioctl(self.fd, self.UI_DEV_DESTROY)
             os.close(self.fd)
         except OSError:
             pass
@@ -709,7 +767,13 @@ class X11Hotkey(threading.Thread):
 
 
 def microphone() -> str:
-    """The default input device and its volume, for the log when only silence came in (PipeWire)."""
+    """The default input device and its volume, for the log when only silence came in."""
+    if not LINUX:
+        try:
+            import sounddevice as sd
+            return sd.query_devices(kind="input")["name"]
+        except Exception as e:
+            return f"unknown ({e})"
     try:
         wpctl = lambda *args: subprocess.run(["wpctl", *args, "@DEFAULT_AUDIO_SOURCE@"], capture_output=True,
                                              text=True, timeout=2).stdout
@@ -770,6 +834,69 @@ class Recorder:
         return self.snapshot()
 
 
+class PortAudioRecorder(Recorder):
+    """The same, through PortAudio (sounddevice) on Windows and macOS. If the device can't record
+    at 16 kHz itself, its own rate is converted by linear interpolation."""
+    lock = threading.Lock()  # PortAudio is re-initialized between recordings to see new devices
+
+    def start(self) -> None:
+        import sounddevice as sd
+        self.buf, self.t_first, self.carry, self.pos = bytearray(), None, np.zeros(0, np.float32), 0.0
+        with self.lock:
+            try:
+                self.rate = RATE
+                self.proc = sd.InputStream(samplerate=RATE, channels=1, dtype="float32", latency="low",
+                                           callback=self._callback)
+            except sd.PortAudioError:
+                self.rate = float(sd.query_devices(kind="input")["default_samplerate"])
+                self.proc = sd.InputStream(samplerate=self.rate, channels=1, dtype="float32", latency="low",
+                                           callback=self._callback)
+            self.proc.start()
+
+    def _callback(self, indata, frames, time_info, status) -> None:
+        if self.t_first is None:
+            self.t_first = time.monotonic()
+            self.emit("first_audio", self.t_first)
+        mono = indata[:, 0]
+        self.buf += (mono if self.rate == RATE else self._resample(mono)).astype("<f4").tobytes()
+
+    def _resample(self, x: np.ndarray) -> np.ndarray:
+        x = np.concatenate([self.carry, x])
+        step = self.rate / RATE
+        n = int((len(x) - 1 - self.pos) // step) + 1 if len(x) - 1 >= self.pos else 0
+        out = np.interp(self.pos + np.arange(n) * step, np.arange(len(x)), x)
+        end = self.pos + n * step
+        self.carry, self.pos = x[int(end):], end - int(end)
+        return out
+
+    def stop(self) -> np.ndarray:
+        stream, self.proc = self.proc, None
+        if stream is None:
+            return np.zeros(0, np.float32)
+        try:
+            stream.stop()
+            stream.close()
+        except Exception as e:
+            log.warning("closing the microphone stream failed: %s", e)
+        threading.Thread(target=self.refresh, name="audio-devices", daemon=True).start()
+        return self.snapshot()
+
+    @classmethod
+    def refresh(cls) -> None:
+        """Re-read the device list, so a headset plugged in since start-up becomes the default."""
+        import sounddevice as sd
+        with cls.lock:
+            try:
+                sd._terminate()
+                sd._initialize()
+            except Exception as e:
+                log.debug("PortAudio re-initialization failed: %s", e)
+
+
+def new_recorder(emit) -> Recorder:
+    return Recorder(emit) if LINUX else PortAudioRecorder(emit)
+
+
 ROCM_LIBS = ("_rocm_sdk_core/lib/libamdhip64.so.7",  # what CTranslate2's ROCm build links against
              "_rocm_sdk_libraries/lib/libhipblas.so.3", "_rocm_sdk_libraries/lib/libhiprand.so.1")
 
@@ -795,7 +922,12 @@ def amd_gpu() -> tuple[str | None, str | None]:
 def preload_gpu_libraries() -> tuple[str, list[str]]:
     """Load the pip-installed GPU libraries so ctranslate2 finds them without LD_LIBRARY_PATH:
     cuBLAS for its CUDA build (NVIDIA), the ROCm runtime for its ROCm build (AMD).
-    Returns the platform ("cuda" or "rocm") and the libraries loaded."""
+    Returns the platform ("cuda", "rocm", or "cpu" when neither is installed) and the libraries loaded."""
+    if WINDOWS:
+        from windows import preload_gpu_libraries as windows_preload
+        return windows_preload()
+    if MACOS:  # CTranslate2 has no GPU support on macOS
+        return "cpu", []
     site = sysconfig.get_paths()["purelib"]
     if not Path(site, ROCM_LIBS[0]).exists():
         loaded = []
@@ -804,7 +936,7 @@ def preload_gpu_libraries() -> tuple[str, list[str]]:
             if hits:
                 ctypes.CDLL(hits[0], mode=ctypes.RTLD_GLOBAL)
                 loaded.append(hits[0])
-        return "cuda", loaded
+        return ("cuda" if loaded else "cpu"), loaded
     gpu, code = amd_gpu()
     if gpu and code and code != gpu:  # e.g. an RX 6700 XT (gfx1031) runs the gfx1030 code
         os.environ.setdefault("HSA_OVERRIDE_GFX_VERSION", f"{int(code[3:-2])}.{int(code[-2], 16)}.{int(code[-1], 16)}")
@@ -1250,7 +1382,8 @@ class Watchdog(threading.Thread):
                 continue
             log.error("a model pass has run for %.0f s (%.1f s of audio); thread stacks follow",
                       time.monotonic() - busy[0], busy[1])
-            faulthandler.dump_traceback(all_threads=True)  # to stderr: the log file or the journal
+            if sys.stderr is not None:  # the log file or the journal
+                faulthandler.dump_traceback(file=sys.stderr, all_threads=True)
             if time.time() - float(os.environ.get("DICTATE_RESTARTED", 0)) < 600:
                 notify("Dictation is stuck", "It already restarted itself recently. Restart the computer if "
                        "it stays stuck.")
@@ -1258,17 +1391,31 @@ class Watchdog(threading.Thread):
             notify("Dictation restarted", "Transcribing got stuck, so dictation started over. The last "
                    "dictation was lost.")
             os.environ["DICTATE_RESTARTED"] = str(time.time())
-            for handler in logging.getLogger().handlers:
-                handler.flush()
-            os.execv(sys.executable, sys.orig_argv)
+            restart_self()
+
+
+def restart_self() -> None:
+    """Start this program over with the same arguments (systemd keeps seeing the same PID on Linux)."""
+    for handler in logging.getLogger().handlers:
+        handler.flush()
+    if not WINDOWS:
+        os.execv(sys.executable, sys.orig_argv)
+    # Windows' execv doesn't quote arguments with spaces and changes the PID anyway: start a new copy,
+    # which waits for our single-instance lock, then leave.
+    from windows import release_single_instance
+    release_single_instance()
+    subprocess.Popen([sys.executable, *sys.orig_argv[1:]], close_fds=True,
+                     creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP)
+    os._exit(0)
 
 
 class Paster(threading.Thread):
     """Types text into the focused app (clipboard + Shift+Insert) and restores the clipboard."""
 
-    def __init__(self, cfg, selection: SelectionOwner, keyboard: VirtualKeyboard | None):
+    def __init__(self, cfg, selection: SelectionOwner, keyboard: VirtualKeyboard | None, no_keyboard=None):
         super().__init__(name="paste", daemon=True)
         self.cfg, self.sel, self.kbd = cfg, selection, keyboard
+        self.no_keyboard = no_keyboard or "/dev/uinput is not available"  # why kbd is None
         self.jobs: queue.Queue = queue.Queue()
         self.on_inject = lambda: None  # set by the controller (our keystrokes stop the key's auto-repeat)
         self.saved: dict[int, bytes | None] = {}  # session id -> clipboard text from before it
@@ -1289,7 +1436,7 @@ class Paster(threading.Thread):
     def _problem(self, item: PasteItem) -> str | None:
         s = item.session
         if self.kbd is None:
-            return "/dev/uinput is not available"
+            return self.no_keyboard
         if screen_locked():
             return "the screen is locked"
         if sleep_offset() - s.sleep_offset > 2:
@@ -1349,6 +1496,16 @@ class Paster(threading.Thread):
         notify("Dictation copied to the clipboard", f"It was not typed because {why}. Paste it with Ctrl+V.")
 
 
+def open_text_file(path: Path) -> None:
+    """Open a settings file in a text editor (.toml often has no app associated with it)."""
+    command = (["notepad.exe", str(path)] if WINDOWS else ["open", "-t", str(path)] if MACOS
+               else ["gio", "open", str(path)])
+    try:
+        subprocess.Popen(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except OSError as e:
+        log.warning("cannot open %s: %s", path, e)
+
+
 class Quiet:
     """Stands in for the top-bar icon in the test modes."""
 
@@ -1373,6 +1530,7 @@ class TopBar:
         self.lock = threading.Lock()
         self.state = {"loading": True, "recording": False, "busy": 0, "problem": None, "detected": None,
                       "preview": ""}
+        self.on_quit = lambda: None  # set by the daemon: ends the program cleanly
         ui.listeners.append(self.changed)
 
     def start(self) -> None:
@@ -1414,12 +1572,12 @@ class TopBar:
         elif item_id == 21:
             self.ui.set(sounds=not self.ui.sounds)
         elif item_id == 30:
-            subprocess.Popen(["gio", "open", str(CONFIG_PATH)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            open_text_file(CONFIG_PATH)
         elif item_id == 31:
             if "INVOCATION_ID" in os.environ:  # running as the systemd service
                 subprocess.Popen(["systemctl", "--user", "stop", "dictate.service"])
-            else:  # started directly (e.g. from an autostart entry)
-                os.kill(os.getpid(), signal.SIGTERM)
+            else:  # started directly (an autostart entry, Windows, macOS)
+                self.on_quit()
 
     def push(self) -> None:
         with self.lock:
@@ -1550,6 +1708,10 @@ class Controller:
         elif kind == "fatal":
             notify("Dictation stopped", str(value))
             return 1
+        elif kind == "quit":
+            if self.session:
+                self._discard()
+            return 0
         return None
 
     def tick(self, now: float) -> None:
@@ -1584,11 +1746,11 @@ class Controller:
             self.state = "IDLE"
 
     def _start(self, t: float) -> None:
-        rec = Recorder(self.emit)
+        rec = new_recorder(self.emit)
         try:
             rec.start()
-        except OSError as e:
-            log.error("cannot start pw-record: %s", e)
+        except Exception as e:  # e.g. no pw-record, or no microphone (PortAudio)
+            log.error("cannot start recording: %s", e)
             self.cues.play("error")
             return
         mode = self.ui.language
@@ -1623,34 +1785,52 @@ class Controller:
 
 
 def backend(cfg) -> str:
+    if WINDOWS:
+        return "windows"
+    if MACOS:
+        return "macos"
     if cfg.backend in ("wayland", "x11"):
         return cfg.backend
     return "wayland" if os.environ.get("XDG_SESSION_TYPE") == "wayland" else "x11"
 
 
+def make_io(cfg):
+    """For this desktop: the clipboard owner, the keyboard that presses the paste keys (None, with
+    the reason, if it can't be created) and the thread class that reports the push-to-talk key."""
+    kind = backend(cfg)
+    if kind in ("windows", "macos"):
+        platform = __import__(kind)
+        selection, make_keyboard, hotkey = platform.Clipboard(), platform.Keyboard, platform.Hotkey
+    elif kind == "wayland":
+        selection, make_keyboard, hotkey = SelectionOwner(bridged=True), VirtualKeyboard, PortalShortcut
+    else:
+        selection, make_keyboard, hotkey = SelectionOwner(bridged=False), XTestKeyboard, X11Hotkey
+    selection.start()
+    try:
+        return selection, make_keyboard(), None, hotkey
+    except OSError as e:
+        return selection, None, str(e), hotkey
+
+
 def run_daemon(cfg) -> int:
-    lock = single_instance()  # noqa: F841 (held for the life of the process)
+    lock = lock_or_exit()  # noqa: F841 (held for the life of the process)
     ui = UiState(cfg)
     topbar = TopBar(ui)
     topbar.start()
     cues = Cues(lambda: ui.sounds, cfg.sound_volume)
-    wayland = backend(cfg) == "wayland"
-    selection = SelectionOwner(bridged=wayland)
-    selection.start()
-    try:
-        keyboard = VirtualKeyboard() if wayland else XTestKeyboard()
-    except OSError as e:
-        keyboard = None
-        log.error("cannot create the virtual keyboard: %s", e)
-        notify("Dictation can't type", f"{e}; text will only be copied.")
+    selection, keyboard, no_keyboard, Hotkey = make_io(cfg)
+    if keyboard is None:
+        log.error("cannot create the virtual keyboard: %s", no_keyboard)
+        notify("Dictation can't type", f"{no_keyboard}; text will only be copied.")
     transcriber = Transcriber(cfg)
-    paster = Paster(cfg, selection, keyboard)
+    paster = Paster(cfg, selection, keyboard, no_keyboard)
     paster.start()
     worker = Worker(cfg, transcriber, paster, cues, topbar)
     worker.start()
     Watchdog(worker).start()
     ctl = Controller(cfg, ui, cues, worker, topbar)
     paster.on_inject = ctl.mark_injection
+    topbar.on_quit = lambda: ctl.emit("quit")
 
     def load_model():
         try:
@@ -1660,7 +1840,7 @@ def run_daemon(cfg) -> int:
             log.exception("model loading failed")
             ctl.emit("fatal", f"The speech model could not be loaded: {e}")
     threading.Thread(target=load_model, name="model", daemon=True).start()
-    (PortalShortcut if wayland else X11Hotkey)(cfg, ctl.emit).start()
+    Hotkey(cfg, ctl.emit).start()
     try:
         return ctl.run()
     finally:
@@ -1673,10 +1853,10 @@ def run_daemon(cfg) -> int:
 def run_check(cfg) -> int:
     ok = True
 
-    def report(name, good, detail=""):
+    def report(name, good, detail="", required=True):
         nonlocal ok
-        ok = ok and bool(good)
-        print(f"{'ok  ' if good else 'FAIL'} {name}: {detail}")
+        ok = ok and (bool(good) or not required)
+        print(f"{'ok  ' if good else 'FAIL' if required else 'info'} {name}: {detail}", flush=True)
 
     report("python", True, f"{sys.version.split()[0]} ({sys.executable})")
     report("config", True, f"{CONFIG_PATH} ({'found' if CONFIG_PATH.exists() else 'defaults'})")
@@ -1695,14 +1875,25 @@ def run_check(cfg) -> int:
                + (f" (HSA_OVERRIDE_GFX_VERSION={override})" if override else ""))
         kfd = os.access("/dev/kfd", os.R_OK | os.W_OK)
         report("/dev/kfd", kfd, "accessible" if kfd else "no access (README: Troubleshooting, AMD)")
+    elif platform == "cuda":
+        report("cuBLAS", len(libs) == 2, ", ".join(Path(p).name for p in libs))
     else:
-        report("cuBLAS", len(libs) == 2, ", ".join(Path(p).name for p in libs) or "nvidia-cublas-cu12 not found")
+        report("GPU libraries", True, "none installed: the model runs on the CPU")
     import ctranslate2
     count = ctranslate2.get_cuda_device_count()
-    report("GPU devices", count > 0, f"{count} ({platform}, ctranslate2 {ctranslate2.__version__})")
+    report("GPU devices", count > 0, f"{count} ({platform}, ctranslate2 {ctranslate2.__version__})",
+           required=platform != "cpu")
     for name in (cfg.model, cfg.fallback_model):
         path = MODELS_DIR / name
         report(f"model {name}", (path / "model.bin").exists(), str(path))
+    if LINUX:
+        check_linux(cfg, report)
+    else:
+        __import__(backend(cfg)).check(cfg, report)
+    return 0 if ok else 1
+
+
+def check_linux(cfg, report) -> None:
     wayland = backend(cfg) == "wayland"
     report("backend", True, f"{backend(cfg)} (session type {os.environ.get('XDG_SESSION_TYPE', '?')})")
     recorder = shutil.which("pw-record") or shutil.which("parecord")
@@ -1740,11 +1931,10 @@ def run_check(cfg) -> int:
     if wayland:  # on X11 the key's auto-repeat is switched off while dictate runs
         repeat_on, delay, interval = keyboard_repeat()
         report("key repeat", True, f"{'on' if repeat_on else 'off'}, delay {delay * 1000:.0f} ms, interval {interval * 1000:.0f} ms")
-    return 0 if ok else 1
 
 
 def run_selftest(cfg, seconds: float, language: str) -> int:
-    rec = Recorder(lambda kind, value=None: None)
+    rec = new_recorder(lambda kind, value=None: None)
     print(f"Recording for {seconds:.0f} s: speak now...", flush=True)
     t_start = time.monotonic()
     rec.start()
@@ -1771,7 +1961,7 @@ def run_selftest(cfg, seconds: float, language: str) -> int:
 
 
 def run_paste_test(cfg, text: str) -> int:
-    lock = single_instance()  # noqa: F841
+    lock = lock_or_exit()  # noqa: F841
     selection = SelectionOwner()
     selection.start()
     keyboard = VirtualKeyboard()
@@ -1787,7 +1977,7 @@ def run_paste_test(cfg, text: str) -> int:
 
 
 def run_portal_test(cfg, seconds: float) -> int:
-    lock = single_instance()  # noqa: F841
+    lock = lock_or_exit()  # noqa: F841
     events: queue.Queue = queue.Queue()
     PortalShortcut(cfg, lambda kind, value=None: events.put((kind, value, time.monotonic()))).start()
     print(f"Binding {cfg.trigger!r}; click Add if GNOME asks. Then press, hold and release the key "
@@ -1806,6 +1996,17 @@ def run_portal_test(cfg, seconds: float) -> int:
     return 0
 
 
+def open_log():
+    """dictate.log for appending (UTF-8, line by line); the previous one is kept once it passes 5 MB."""
+    LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        if LOG_PATH.stat().st_size > 5_000_000:
+            LOG_PATH.replace(LOG_PATH.with_name(LOG_PATH.name + ".1"))
+    except OSError:
+        pass
+    return open(LOG_PATH, "a", encoding="utf-8", buffering=1)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Hold numpad Del to dictate (push-to-talk speech-to-text).")
     mode = parser.add_mutually_exclusive_group()
@@ -1818,6 +2019,8 @@ def main() -> int:
     parser.add_argument("-v", "--verbose", action="store_true", help="debug logging (includes transcripts)")
     args = parser.parse_args()
 
+    if sys.stderr is None:  # pythonw.exe on Windows has no console: log to a file
+        sys.stdout = sys.stderr = open_log()
     under_systemd = "INVOCATION_ID" in os.environ
     logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO,
                         format="%(levelname)s %(message)s" if under_systemd

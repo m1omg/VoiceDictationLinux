@@ -1,7 +1,8 @@
 """Shared helpers for the benchmark scripts. They need no microphone, no windows and no user.
 
 Run them with the app's own Python:  ~/.local/share/dictate/venv/bin/python tests/<script>.py
-(set DICTATE_DIR if the program is installed somewhere else).
+(macOS: ~/Library/Application Support/dictate/venv/bin/python; Windows:
+%LOCALAPPDATA%\\dictate\\venv\\Scripts\\python.exe; set DICTATE_DIR if it is installed elsewhere).
 """
 import importlib.util
 import json
@@ -11,7 +12,10 @@ import re
 import sys
 from pathlib import Path
 
-DICTATE_DIR = Path(os.environ.get("DICTATE_DIR", Path.home() / ".local/share/dictate"))
+DEFAULT_DIR = (Path(os.environ.get("LOCALAPPDATA", "")) / "dictate" if sys.platform == "win32"
+               else Path.home() / "Library/Application Support/dictate" if sys.platform == "darwin"
+               else Path.home() / ".local/share/dictate")
+DICTATE_DIR = Path(os.environ.get("DICTATE_DIR", DEFAULT_DIR))
 FLEURS = Path(__file__).resolve().parent / "fleurs"
 logging.basicConfig(level=logging.WARNING)
 
@@ -30,7 +34,7 @@ def load_dictate():
 def sentences(lang: str) -> list[dict]:
     """The downloaded test sentences for "en" or "sk" (run fetch_fleurs.py first)."""
     name = {"en": "eng_Latn", "sk": "slk_Latn"}[lang]
-    return json.load(open(FLEURS / f"{name}.json"))
+    return json.load(open(FLEURS / f"{name}.json", encoding="utf-8"))
 
 
 def audio(item):
