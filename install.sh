@@ -157,10 +157,13 @@ if [[ $OS == Darwin ]]; then
     mkdir -p "$HOME/Applications"
     osacompile -s -o "$APP" "$script"
     plist="$APP/Contents/Info.plist"
-    /usr/libexec/PlistBuddy -c "Set :CFBundleIdentifier $APP_ID" "$plist" 2>/dev/null \
-      || /usr/libexec/PlistBuddy -c "Add :CFBundleIdentifier string $APP_ID" "$plist"
-    /usr/libexec/PlistBuddy -c "Add :LSUIElement bool true" "$plist"
-    /usr/libexec/PlistBuddy -c "Add :NSMicrophoneUsageDescription string 'Dictate listens only while you hold the dictation key and transcribes on this Mac.'" "$plist"
+    plist_set() {  # key, type, value: changed if osacompile's template has it, else added
+      /usr/libexec/PlistBuddy -c "Set :$1 $3" "$plist" 2>/dev/null || /usr/libexec/PlistBuddy -c "Add :$1 $2 $3" "$plist"
+    }
+    plist_set CFBundleIdentifier string "$APP_ID"
+    plist_set LSUIElement bool true
+    plist_set NSMicrophoneUsageDescription string \
+      "'Dictate listens only while you hold the dictation key and transcribes on this Mac.'"
     echo "$stamp" > "$APP/Contents/Resources/dictate-applet.sha256"
     codesign --force --sign - "$APP"
   else

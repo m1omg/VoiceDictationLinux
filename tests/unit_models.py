@@ -12,8 +12,10 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 TMP = Path(tempfile.mkdtemp(prefix="dictate-test-"))
+# Settings and state in TMP on every OS (Linux: XDG folders, Windows: LOCALAPPDATA, macOS: HOME);
+# DICTATE_DIR: this checkout's dictate.py, not the installed one.
 os.environ.update(XDG_STATE_HOME=str(TMP / "state"), XDG_CONFIG_HOME=str(TMP / "config"), XDG_RUNTIME_DIR=str(TMP),
-                  DICTATE_DIR=str(ROOT))  # this checkout's dictate.py, not the installed one
+                  LOCALAPPDATA=str(TMP), HOME=str(TMP), DICTATE_DIR=str(ROOT))
 import models  # noqa: E402
 from _common import load_dictate  # noqa: E402
 
@@ -58,7 +60,8 @@ check("a model of your own needs model.bin", models.installed(md, "mine"), True)
 
 d = load_dictate()
 cfg = d.load_config()
-state = TMP / "state/dictate/state.json"
+state = d.STATE_PATH
+assert state.is_relative_to(TMP), state
 state.parent.mkdir(parents=True)
 state.write_text(json.dumps({"language": "sk", "live": False, "sounds": True}))  # written before models were choosable
 ui = d.UiState(cfg)
