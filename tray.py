@@ -13,17 +13,20 @@ import threading
 import time
 from dataclasses import dataclass, field
 
-from jeepney import (DBusAddress, HeaderFields, MatchRule, MessageType, new_error, new_method_call,
-                     new_method_return, new_signal)
-from jeepney.bus_messages import message_bus
-from jeepney.io.blocking import open_dbus_connection
+try:
+    from jeepney import (DBusAddress, HeaderFields, MatchRule, MessageType, new_error, new_method_call,
+                         new_method_return, new_signal)
+    from jeepney.bus_messages import message_bus
+    from jeepney.io.blocking import open_dbus_connection
+except ImportError:  # Windows and macOS use only MenuItem and walk from here (see tray_pystray.py)
+    DBusAddress = None
 
 log = logging.getLogger("dictate")
 
 ITEM_PATH, MENU_PATH = "/StatusNotifierItem", "/MenuBar"
 ITEM_IFACE, MENU_IFACE = "org.kde.StatusNotifierItem", "com.canonical.dbusmenu"
 WATCHER_NAME = "org.kde.StatusNotifierWatcher"
-WATCHER = DBusAddress("/StatusNotifierWatcher", WATCHER_NAME, WATCHER_NAME)
+WATCHER = DBusAddress("/StatusNotifierWatcher", WATCHER_NAME, WATCHER_NAME) if DBusAddress else None
 
 _ITEM_XML = """<node><interface name="org.kde.StatusNotifierItem">
 <property name="Category" type="s" access="read"/><property name="Id" type="s" access="read"/>

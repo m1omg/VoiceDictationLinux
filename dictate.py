@@ -485,8 +485,9 @@ class SelectionOwner(threading.Thread):
         done.wait(timeout)
         return box.get("value")
 
-    def publish(self, text: str) -> bool:
-        """Put text on CLIPBOARD and PRIMARY; True once mutter has taken over both offers."""
+    def publish(self, text: str, immediate: bool = False) -> bool:
+        """Put text on CLIPBOARD and PRIMARY; True once mutter has taken over both offers. (immediate
+        is for Windows: on X11 the text always needs this process to answer.)"""
         return bool(self.call(self._publish, text.encode()))
 
     def counts(self):
@@ -955,8 +956,9 @@ class PortAudioRecorder(Recorder):
         step = self.rate / RATE
         n = int((len(x) - 1 - self.pos) // step) + 1 if len(x) - 1 >= self.pos else 0
         out = np.interp(self.pos + np.arange(n) * step, np.arange(len(x)), x)
-        end = self.pos + n * step
-        self.carry, self.pos = x[int(end):], end - int(end)
+        end = self.pos + n * step  # where the next output sample falls, maybe past this block's end
+        start = min(int(end), len(x))
+        self.carry, self.pos = x[start:], end - start
         return out
 
     def stop(self) -> np.ndarray:
@@ -1729,10 +1731,23 @@ class Paster(threading.Thread):
                     self._give_up(s, *self.diverted.pop(s.id))
                 return
             base = self.sel.counts()
-            self.kbd.shift_insert()
-            self.on_inject()
-            if not self.sel.wait_served(base, 1.5 if item.final else 0.8):
-                log.info("no app fetched the pasted text")
+            why = None
+            try:
+                self.kbd.shift_insert()
+            except OSError as e:
+                why = f"the paste keys could not be pressed ({e})"
+            else:
+                self.on_inject()
+                if not self.sel.wait_served(base, 1.5 if item.final else 0.8):
+                    if WINDOWS:  # a paste always fetches there: the keys didn't arrive
+                        why = "the app didn't take it (it may run as administrator, or not paste with Shift+Insert)"
+                    else:
+                        log.info("no app fetched the pasted text")
+            if why:
+                self.diverted[s.id] = (why, "".join(chunks[i:]))
+                if item.final:
+                    self._give_up(s, *self.diverted.pop(s.id))
+                return
             if not item.final and s.id not in self.live_started:
                 self.live_started.add(s.id)
                 log.info("first live words typed %.1f s after the key went down", time.monotonic() - s.t_press)
@@ -1770,7 +1785,7 @@ class Paster(threading.Thread):
         if not text.strip():
             return
         log.info("left %d chars on the clipboard: %s", len(text), why)
-        self.sel.publish(text)
+        self.sel.publish(text, immediate=True)
         self.on_done("copied", why)
         notify("Dictation copied to the clipboard", f"It was not typed because {why}. Paste it with Ctrl+V.")
 
@@ -1892,11 +1907,17 @@ class TopBar:
              "working": "content-loading-symbolic", "problem": "microphone-disabled-symbolic"}
 
     def __init__(self, ui: UiState):
+        global NOTIFY_HOOK
         sys.path.insert(0, str(HERE))
-        from tray import MenuItem, TrayIcon
+        if LINUX:
+            from tray import MenuItem, TrayIcon
+        else:
+            from tray_pystray import MenuItem, TrayIcon
         self.ui, self.MenuItem = ui, MenuItem
         self.tray = TrayIcon("dictate", "Dictate", self.menu, self.clicked,
                              on_activate=self.open_settings if ui.big_settings else None)
+        if WINDOWS:  # notifications come from the tray icon there
+            NOTIFY_HOOK = self.tray.notify
         self.lock = threading.Lock()
         self.state = {"loading": True, "recording": False, "busy": 0, "problem": None, "detected": None,
                       "preview": "", "model": None, "download": None, "key": None}
@@ -2315,6 +2336,8 @@ def run_daemon(cfg) -> int:
     trigger = ui.trigger  # the menu's choice wins over config.toml's starting value
     cfg.trigger, cfg.shortcut_id = trigger, shortcut_id(cfg, trigger)
     selection, keyboard, no_keyboard, Hotkey = make_io(cfg)
+    if not LINUX:  # PortAudio lists the devices once, slowly on Windows: not on the first key press
+        threading.Thread(target=PortAudioRecorder.refresh, name="audio-devices", daemon=True).start()
     if keyboard is None:
         log.error("cannot create the virtual keyboard: %s", no_keyboard)
         notify("Dictation can't type", f"{no_keyboard}; text will only be copied.")
