@@ -28,6 +28,7 @@ NAMED = ["KP_Delete", "KP_Insert", "KP_Enter", "KP_Add", "KP_Subtract", "KP_Mult
          "Return", "Escape", "Control_L", "Control_R", "Alt_L", "Alt_R", "Shift_L", "Shift_R", "Super_L",
          "Super_R", "Fn"] + [f"F{n}" for n in range(1, 25)]
 LONE_MODIFIERS = {"Control_L", "Control_R", "Alt_L", "Alt_R", "Shift_L", "Shift_R", "Super_L", "Super_R", "Fn"}
+TYPING_KEYS = {"space", "Return", "Tab", "Escape", "Delete"}  # (and letters, digits) only with a modifier
 
 
 @dataclass(frozen=True)
@@ -67,6 +68,10 @@ def parse(text: str) -> Trigger:
         key = known[key.lower()]
     if mods and key in LONE_MODIFIERS:
         raise ValueError("a combination needs a key that isn't a modifier, like Ctrl+Alt+D")
+    if not mods and (len(key) == 1 or key in TYPING_KEYS):
+        raise ValueError(f"{key} on its own could no longer be typed; add a modifier, like Ctrl+Alt+{key.upper()}"
+                         if len(key) == 1 else f"{key} on its own could no longer be typed; add a modifier, "
+                         f"like Ctrl+{key}")
     return Trigger(frozenset(mods), key)
 
 

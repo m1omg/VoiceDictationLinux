@@ -90,6 +90,10 @@ def walk(items):
         yield from walk(item.children)
 
 
+class _Reregister(Exception):
+    """Leave the bus and register anew (hosts read ItemIsMenu only when an item appears)."""
+
+
 class TrayIcon(threading.Thread):
     def __init__(self, item_id: str, title: str, build_menu, on_click, on_activate=None):
         super().__init__(name="tray", daemon=True)
@@ -107,6 +111,11 @@ class TrayIcon(threading.Thread):
     def refresh_menu(self) -> None:
         self.updates.put(None)
 
+    def set_activate(self, on_activate) -> None:
+        """Switch between "a click opens the menu" and "a click calls on_activate"."""
+        self.on_activate = on_activate
+        self.updates.put("reregister")
+
     # --- tray thread -------------------------------------------------------------------
     def run(self):
         delay = 1.0
@@ -114,6 +123,9 @@ class TrayIcon(threading.Thread):
             started = time.monotonic()
             try:
                 self._serve()
+            except _Reregister:
+                time.sleep(0.2)
+                continue
             except Exception as e:
                 log.warning("tray: %s", e)
             delay = 1.0 if time.monotonic() - started > 60 else min(delay * 2, 30)
@@ -128,7 +140,8 @@ class TrayIcon(threading.Thread):
 
     def _serve(self):
         with open_dbus_connection("SESSION") as conn:
-            name = f"org.kde.StatusNotifierItem-{os.getpid()}-1"
+            self.registrations = getattr(self, "registrations", 0) + 1
+            name = f"org.kde.StatusNotifierItem-{os.getpid()}-{self.registrations}"
             self._call(conn, message_bus.RequestName(name, 4))  # 4 = don't queue
             rule = MatchRule(type="signal", sender="org.freedesktop.DBus", interface="org.freedesktop.DBus",
                              member="NameOwnerChanged", path="/org/freedesktop/DBus")
@@ -158,6 +171,8 @@ class TrayIcon(threading.Thread):
                 update = self.updates.get_nowait()
             except queue.Empty:
                 return
+            if update == "reregister":
+                raise _Reregister()
             if update is None:
                 self.revision += 1
                 conn.send(new_signal(DBusAddress(MENU_PATH, interface=MENU_IFACE), "LayoutUpdated", "ui",

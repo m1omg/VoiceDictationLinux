@@ -196,7 +196,7 @@ else
     START="sh -c 'exec \"$D/venv/bin/python\" \"$D/dictate.py\" >> \"$D/dictate.log\" 2>&1'"
   fi
 
-  say "Launcher ($APP_ID.desktop: also the identity the desktop stores the shortcut under)"
+  say "Launchers ($APP_ID.desktop: also the identity the desktop stores the shortcut under)"
   mkdir -p "$APPS"
   if [[ -e "$APPS/$APP_ID.desktop" ]]; then
     echo "    keeping $APPS/$APP_ID.desktop"
@@ -212,6 +212,16 @@ Terminal=false
 Categories=Utility;Accessibility;
 EOF
   fi
+  cat > "$APPS/$APP_ID.settings.desktop" <<EOF
+[Desktop Entry]
+Type=Application
+Name=Dictate Settings
+Comment=Dictation settings in large text: language, speech model, key, size and colours
+Exec="$D/venv/bin/python" "$D/bigui.py" settings
+Icon=preferences-desktop-accessibility
+Terminal=false
+Categories=Utility;Accessibility;Settings;
+EOF
 
   if [[ "${DICTATE_NO_AUTOSTART:-}" == 1 ]]; then
     say "Skipping start-at-login (DICTATE_NO_AUTOSTART=1)"

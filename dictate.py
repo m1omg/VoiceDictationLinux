@@ -101,7 +101,13 @@ DEFAULTS = {
     "paste_chunk_chars": 750,
     "tail_ms": 200,
     "max_seconds": 300,
+    "big_panel": False,  # large-text mode (low vision): a big status panel while dictating,
+    "big_settings": False,  # clicking the tray icon opens the big settings window,
+    "ui_scale": 2.0,  # their text size (1-3 times),
+    "ui_colors": "yellow-on-black",  # and colours (see COLOR_SCHEMES)
+    "panel_position": "bottom",
 }
+COLOR_SCHEMES = ("yellow-on-black", "white-on-black", "black-on-white", "black-on-yellow")
 
 
 def load_config() -> SimpleNamespace:
@@ -155,7 +161,11 @@ class UiState:
                           "live": cfg.live_typing, "sounds": cfg.sounds,
                           "device": cfg.device if cfg.device in DEVICES else "auto",
                           "gpu_model": cfg.model, "cpu_model": cfg.fallback_model,
-                          "trigger": cfg.trigger if valid_trigger(cfg.trigger) else DEFAULTS["trigger"]}
+                          "trigger": cfg.trigger if valid_trigger(cfg.trigger) else DEFAULTS["trigger"],
+                          "big_panel": cfg.big_panel, "big_settings": cfg.big_settings,
+                          "ui_scale": min(3.0, max(1.0, float(cfg.ui_scale))),
+                          "ui_colors": cfg.ui_colors if cfg.ui_colors in COLOR_SCHEMES else "yellow-on-black",
+                          "panel_position": cfg.panel_position if cfg.panel_position in ("bottom", "top") else "bottom"}
         self._lock = threading.Lock()
         self.listeners: list = []
         self._values = self._read()
@@ -170,9 +180,23 @@ class UiState:
             log.warning("state: %s is unreadable (%s); using defaults", STATE_PATH, e)
             saved = {}
         for key, value in saved.items() if isinstance(saved, dict) else ():
+            if key == "ui_scale" and type(value) is int:
+                value = float(value)
             if key in values and type(value) is type(values[key]) and self._valid(key, value):
                 values[key] = value
         return values
+
+    def reload(self) -> set[str]:
+        """Take over choices another process (the settings window) saved; returns what changed."""
+        with self._lock:
+            new = self._read()
+            changed = {k for k in new if new[k] != self._values.get(k)}
+            self._values = new
+        if changed:
+            log.info("settings window: %s", ", ".join(f"{k}={new[k]}" for k in sorted(changed)))
+            for listener in self.listeners:
+                listener()
+        return changed
 
     @staticmethod
     def _valid(key: str, value) -> bool:
@@ -184,6 +208,12 @@ class UiState:
             return bool(value) and not value.startswith(".") and not set("/\\:") & set(value)
         if key == "trigger":
             return valid_trigger(value)
+        if key == "ui_scale":
+            return 1.0 <= value <= 3.0
+        if key == "ui_colors":
+            return value in COLOR_SCHEMES
+        if key == "panel_position":
+            return value in ("bottom", "top")
         return True
 
     def __getattr__(self, name: str):
@@ -1379,6 +1409,7 @@ class Worker(threading.Thread):
                     else:  # the last load failed; the tray says why
                         log.info("no speech model is loaded; dictation dropped")
                         self.cues.play("error")
+                        self.topbar.event("error", "No speech model is loaded (the tray icon says why).")
                         if session.text and session.text.typed:  # let the paster restore the clipboard
                             self.paster.put(PasteItem("", session, final=True))
                 finally:
@@ -1462,6 +1493,7 @@ class Worker(threading.Thread):
             peak = float(np.abs(s.audio).max()) if s.audio.size else 0.0
             log.info("%s in %.1f s of audio (peak %.0f dBFS)", problem, seconds, 20 * np.log10(max(peak, 1e-9)))
             self.cues.play("error")
+            self.topbar.event({"muted": "muted", "no speech": "nothing"}.get(problem, "error"), problem)
             if problem == "muted":
                 log.info("default microphone: %s", microphone())
                 notify("Microphone is muted", "Only silence was recorded. Check the headset's mute switch.")
@@ -1595,10 +1627,9 @@ class ModelSwitch:
                "with the current model meanwhile.")
         log.info("downloading the %s model", name)
         env = {**os.environ, "HF_HUB_DISABLE_PROGRESS_BARS": "1"}
-        flags = subprocess.CREATE_NO_WINDOW if WINDOWS else 0
         try:
             proc = subprocess.Popen([sys.executable, str(Path(__file__).resolve()), "--download", name], env=env,
-                                    stdin=subprocess.DEVNULL, creationflags=flags)
+                                    stdin=subprocess.DEVNULL, creationflags=NO_WINDOW)
             expected = models.MODELS[name][1] * 1e6
             while proc.poll() is None:
                 done = models.partial_bytes(MODELS_DIR, name) / expected
@@ -1644,6 +1675,7 @@ class Paster(threading.Thread):
         self.no_keyboard = no_keyboard or "/dev/uinput is not available"  # why kbd is None
         self.jobs: queue.Queue = queue.Queue()
         self.on_inject = lambda: None  # set by the controller (our keystrokes stop the key's auto-repeat)
+        self.on_done = lambda kind, text: None  # "typed" (the whole text) or "copied" (why), for the panel
         self.saved: dict[int, bytes | None] = {}  # session id -> clipboard text from before it
         self.diverted: dict[int, tuple[str, str]] = {}  # session id -> (why not typed, text so far)
         self.live_started: set[int] = set()
@@ -1710,6 +1742,7 @@ class Paster(threading.Thread):
             return
         if s.t_release:
             log.info("typed; release -> done %.2f s", time.monotonic() - s.t_release)
+        self.on_done("typed", s.text.typed if s.text and s.text.typed else item.text)
         old = self.saved.pop(s.id, None)
         if old:  # nothing to restore if the clipboard was empty or held non-text (e.g. an image)
             time.sleep(0.3)
@@ -1738,6 +1771,7 @@ class Paster(threading.Thread):
             return
         log.info("left %d chars on the clipboard: %s", len(text), why)
         self.sel.publish(text)
+        self.on_done("copied", why)
         notify("Dictation copied to the clipboard", f"It was not typed because {why}. Paste it with Ctrl+V.")
 
 
@@ -1751,6 +1785,92 @@ def open_text_file(path: Path) -> None:
         log.warning("cannot open %s: %s", path, e)
 
 
+HERE = Path(__file__).resolve().parent
+NO_WINDOW = 0x08000000 if WINDOWS else 0  # CREATE_NO_WINDOW: child processes without a console window
+
+
+def open_settings_window():
+    """The big settings window (bigui.py settings), a process of its own."""
+    try:
+        return subprocess.Popen([sys.executable, str(HERE / "bigui.py"), "settings"], creationflags=NO_WINDOW,
+                                stdin=subprocess.DEVNULL, start_new_session=not WINDOWS)
+    except OSError as e:
+        log.warning("cannot open the settings window: %s", e)
+        return None
+
+
+class StateWatcher(threading.Thread):
+    """Applies what the big settings window changes (it saves state.json) and runs its commands."""
+
+    def __init__(self, ui: UiState, emit):
+        super().__init__(name="state", daemon=True)
+        self.ui, self.emit = ui, emit
+        self.mtime = self._mtime()
+
+    @staticmethod
+    def _mtime() -> int:
+        try:
+            return STATE_PATH.stat().st_mtime_ns
+        except OSError:
+            return 0
+
+    def run(self):
+        command = RUNTIME_DIR / "command"
+        while True:
+            time.sleep(0.5)
+            mtime = self._mtime()
+            if mtime != self.mtime:
+                self.mtime = mtime
+                self.ui.reload()  # our own saves come back here too: then nothing has changed
+            try:
+                text = command.read_text(encoding="utf-8").strip()
+                command.unlink()
+            except OSError:
+                continue
+            if text == "quit":
+                self.emit("quit")
+
+
+class PanelProcess:
+    """The big status panel (bigui.py panel): one JSON message per line on its stdin. It quits when
+    dictation ends (its stdin closes); if it crashes it is started again, at most every 30 s."""
+
+    def __init__(self, ui: UiState):
+        self.ui, self.proc, self.started = ui, None, -60.0
+        self.lock = threading.Lock()
+
+    def send(self, msg: dict) -> None:
+        with self.lock:
+            if not self.ui.big_panel:
+                self._stop()
+                return
+            msg = {**msg, "scale": self.ui.ui_scale, "colors": self.ui.ui_colors, "position": self.ui.panel_position}
+            if self.proc is None or self.proc.poll() is not None:
+                if time.monotonic() - self.started < 30:
+                    return
+                self.started = time.monotonic()
+                try:
+                    self.proc = subprocess.Popen([sys.executable, str(HERE / "bigui.py"), "panel"], text=True,
+                                                 encoding="utf-8", stdin=subprocess.PIPE, creationflags=NO_WINDOW)
+                except OSError as e:
+                    log.warning("cannot start the big status panel: %s", e)
+                    self.proc = None
+                    return
+            try:
+                self.proc.stdin.write(json.dumps(msg) + "\n")
+                self.proc.stdin.flush()
+            except (OSError, ValueError):
+                self.proc = None
+
+    def _stop(self) -> None:
+        if self.proc is not None:
+            try:
+                self.proc.stdin.close()
+            except OSError:
+                pass
+            self.proc = None
+
+
 class Quiet:
     """Stands in for the top-bar icon in the test modes."""
 
@@ -1760,24 +1880,50 @@ class Quiet:
     def busy(self, delta):
         pass
 
+    def event(self, kind, text=""):
+        pass
+
 
 class TopBar:
-    """The top-bar icon: shows ready / recording / working / problem plus the language; its menu
-    switches language, live typing and sounds."""
+    """The top-bar (tray) icon: shows ready / recording / working / problem plus the language; its
+    menu switches language, model, device, live typing, sounds and large text. It also feeds the
+    big status panel and status.json (read by the big settings window)."""
     ICONS = {"ready": "audio-input-microphone-symbolic", "recording": "media-record-symbolic",
              "working": "content-loading-symbolic", "problem": "microphone-disabled-symbolic"}
 
     def __init__(self, ui: UiState):
-        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        sys.path.insert(0, str(HERE))
         from tray import MenuItem, TrayIcon
         self.ui, self.MenuItem = ui, MenuItem
-        self.tray = TrayIcon("dictate", "Dictate", self.menu, self.clicked)
+        self.tray = TrayIcon("dictate", "Dictate", self.menu, self.clicked,
+                             on_activate=self.open_settings if ui.big_settings else None)
         self.lock = threading.Lock()
         self.state = {"loading": True, "recording": False, "busy": 0, "problem": None, "detected": None,
                       "preview": "", "model": None, "download": None, "key": None}
         self.on_quit = lambda: None  # set by the daemon: ends the program cleanly
         self.switch: ModelSwitch | None = None  # set by the daemon: applies model and device choices
+        self.panel = PanelProcess(ui)
+        self.panel_ongoing = False  # the panel shows "Listening" or "Transcribing" (no outcome yet)
+        self.settings_window = None
+        self.status_text = ""
         ui.listeners.append(self.changed)
+
+    def open_settings(self) -> None:
+        if self.settings_window is None or self.settings_window.poll() is not None:
+            self.settings_window = open_settings_window()
+
+    def event(self, kind: str, text: str = "") -> None:
+        """An outcome for the big panel: "typed" (text), "copied" (why), "muted", "nothing", "error"."""
+        paste = "Cmd+V" if MACOS else "Ctrl+V"
+        title, accent, seconds = {
+            "typed": ("✓ Typed", False, 3), "copied": (f"Not typed ({text}). It is on the clipboard: paste it with "
+                                                     f"{paste}.", True, 8),
+            "muted": ("Only silence was recorded: is the microphone muted?", True, 8),
+            "nothing": ("Nothing was heard.", False, 3), "error": (f"Dictation failed: {text}", True, 8),
+        }.get(kind, (text, False, 3))
+        self.panel_ongoing = False
+        self.panel.send({"show": True, "title": title, "text": text if kind == "typed" else "", "accent": accent,
+                         "hide_after": seconds})
 
     def start(self) -> None:
         self.tray.start()
@@ -1796,6 +1942,8 @@ class TopBar:
         self.push()
 
     def changed(self) -> None:
+        if (self.tray.on_activate is not None) != self.ui.big_settings:  # a click opens the window, or the menu
+            self.tray.set_activate(self.open_settings if self.ui.big_settings else None)
         self.tray.refresh_menu()
         self.push()
 
@@ -1836,7 +1984,12 @@ class TopBar:
                 M(4, kind="separator"),
                 M(40, f"Speech model: {current}", children=model_items),
                 M(41, f"Run on: {'graphics card' if on_gpu else 'processor'}", children=run_on),
+                M(42, "Large text", children=[
+                    M(420, "Big status panel while dictating", "check", ui.big_panel),
+                    M(421, "Clicking the icon opens the big settings window", "check", ui.big_settings),
+                    M(422, "Text size and colours…")]),
                 M(5, kind="separator"),
+                M(32, "Settings window…"),
                 M(30, "Open settings file"),
                 M(31, "Stop dictation")]
 
@@ -1861,6 +2014,12 @@ class TopBar:
             self.ui.set(**{self.model_key(): name})
         elif item_id in (410, 411):
             self.ui.set(device="gpu" if item_id == 410 else "cpu")
+        elif item_id == 420:
+            self.ui.set(big_panel=not self.ui.big_panel)
+        elif item_id == 421:
+            self.ui.set(big_settings=not self.ui.big_settings)
+        elif item_id in (32, 422):
+            self.open_settings()
         elif item_id == 30:
             open_text_file(CONFIG_PATH)
         elif item_id == 31:
@@ -1897,6 +2056,39 @@ class TopBar:
         if s["download"]:
             tooltip += f"\nDownloading {s['download']}"
         self.tray.set(icon=self.ICONS[icon], label=label, tooltip=tooltip)
+        self.push_panel(s, code)
+        self.write_status({"pid": os.getpid(), "tip": tip, "model": s["model"], "download": s["download"],
+                           "gpu_available": self.switch.worker.transcriber.gpu_available if self.switch else None,
+                           "key": self.key_label()})
+
+    def push_panel(self, s: dict, code: str) -> None:
+        """The big panel shows what is going on; event() shows how it ended."""
+        if s["recording"]:
+            note = " (the speech model is still loading)" if s["loading"] else ""
+            message = {"show": True, "title": f"● Listening — {code}{note}", "text": s["preview"], "accent": True}
+        elif s["busy"]:
+            message = {"show": True, "title": "Transcribing…", "text": s["preview"]}
+        elif self.panel_ongoing:  # ended without an outcome (e.g. a recording too short to use)
+            message = {"show": True, "title": "Transcribing…", "text": s["preview"], "hide_after": 2}
+        else:
+            return
+        self.panel_ongoing = "hide_after" not in message
+        if message != getattr(self, "panel_last", None):
+            self.panel_last = message
+            self.panel.send(message)
+
+    def write_status(self, status: dict) -> None:
+        """status.json: what the big settings window shows about the running dictation."""
+        text = json.dumps(status)
+        if text == self.status_text:
+            return
+        self.status_text = text
+        try:
+            tmp = RUNTIME_DIR / "status.tmp"
+            tmp.write_text(text, encoding="utf-8")
+            tmp.replace(RUNTIME_DIR / "status.json")
+        except OSError as e:
+            log.debug("cannot write status.json: %s", e)
 
 
 class Controller:
@@ -2111,7 +2303,11 @@ def make_io(cfg):
 
 
 def run_daemon(cfg) -> int:
-    lock = lock_or_exit()  # noqa: F841 (held for the life of the process)
+    lock = single_instance()  # noqa: F841 (held for the life of the process)
+    if lock is None:  # started again from the app menu: show the settings instead
+        print("dictate is already running; opening its settings window")
+        open_settings_window()
+        return 0
     ui = UiState(cfg)
     topbar = TopBar(ui)
     topbar.start()
@@ -2135,7 +2331,15 @@ def run_daemon(cfg) -> int:
     ui.listeners.append(switch.changed)
     ctl = Controller(cfg, ui, cues, worker, topbar)
     paster.on_inject = ctl.mark_injection
+    paster.on_done = topbar.event
     topbar.on_quit = lambda: ctl.emit("quit")
+
+    def key_changed():  # chosen in the settings window: the key's thread is set up anew
+        if ui.trigger != trigger:
+            log.info("the dictation key is now %s: restarting", ui.trigger)
+            restart_self()
+    ui.listeners.append(key_changed)
+    StateWatcher(ui, ctl.emit).start()
     Hotkey(cfg, ctl.emit).start()
     try:
         return ctl.run()
@@ -2144,6 +2348,7 @@ def run_daemon(cfg) -> int:
             ctl.session.rec.stop()
         if keyboard:
             keyboard.close()
+        (RUNTIME_DIR / "status.json").unlink(missing_ok=True)
 
 
 def run_check(cfg) -> int:
@@ -2406,9 +2611,14 @@ def run_setup(cfg, gpu: str) -> int:
     else:
         cpu_model = chosen
     trigger = ask_key(hw)
+    large = ask("Large text, for low vision? (Size and colours can be changed later in the settings window.)",
+                [("off", "no"), ("panel", "a big status panel while dictating"),
+                 ("both", "the big panel, and a big settings window when you click the tray icon")], "off",
+                "DICTATE_LARGE_UI")
     ensure_config(cpu_only=device == "cpu")
     ui = UiState(load_config())
-    ui.set(language=language, cpu_model=cpu_model, trigger=trigger, **({"gpu_model": gpu_model} if gpu_model else {}))
+    ui.set(language=language, cpu_model=cpu_model, trigger=trigger, big_panel=large != "off",
+           big_settings=large == "both", **({"gpu_model": gpu_model} if gpu_model else {}))
     return finish_setup(gpu_model, cpu_model)
 
 

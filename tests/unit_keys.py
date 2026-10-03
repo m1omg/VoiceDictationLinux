@@ -34,6 +34,9 @@ check("lone modifier", (T("Control_R").lone_modifier, T("Ctrl+D").lone_modifier,
       (True, False, False))
 check("bad spellings rejected", [fails(t) for t in ("", "Ctrl+", "Hyper+D", "Ctrl+Shift_R", "Ctrl+Dee", "+")],
       [True] * 6)
+check("typing keys only with a modifier", [fails(t) for t in ("d", "7", "space", "Return", "Delete", "Ctrl+space",
+                                                              "Ctrl+D", "Insert")],
+      [True, True, True, True, True, False, False, False])
 check("written back", [str(T(t)) for t in ("ctrl+alt+d", "KP_Delete", "shift+super+f13")],
       ["Ctrl+Alt+D", "KP_Delete", "Shift+Super+F13"])
 check("labels", [keys.label(T("KP_Delete")), keys.label(T("Control_R"), "win32"), keys.label(T("Alt_R"), "darwin"),
@@ -43,7 +46,7 @@ check("X11 masks", (keys.x11_mask(T("Ctrl+Alt+D")), keys.x11_mask(T("Super+Shift
 check("portal format", (keys.portal(T("KP_Delete")), keys.portal(T("Ctrl+Alt+D")), keys.portal(T("Super+space"))),
       ("KP_Delete", "CTRL+ALT+d", "LOGO+space"))
 check("Windows: numpad Del by scan code, not extended", keys.windows(T("KP_Delete")), (None, 0x53, False))
-check("Windows: Delete key is the extended one", keys.windows(T("Delete")), (0x2E, None, True))
+check("Windows: Delete key is the extended one", keys.windows(T("Ctrl+Delete")), (0x2E, None, True))
 check("Windows: letters, F13, Right Ctrl", (keys.windows(T("Ctrl+D")), keys.windows(T("F13")), keys.windows(T("Control_R"))),
       ((0x44, None, None), (0x7C, None, None), (0xA3, None, None)))
 check("Windows: every named key mapped", all(n in keys.WINDOWS_KEYS for n in keys.NAMED if n != "Fn"), True)

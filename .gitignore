@@ -2,3 +2,6 @@ __pycache__/
 *.pyc
 # downloaded by tests/fetch_fleurs.py
 tests/fleurs/
+
+# screenshots from tests/bigui_test.py and tests/e2e_x11.py
+tests/screenshots/
