@@ -36,6 +36,11 @@ check("MacBook Air 2017, English: base", models.recommend(H(None, cores=2, ram_g
 check("MacBook Air 2017, Slovak: small", models.recommend(H(None, cores=2, ram_gb=8), "sk")[2], "small")
 check("2 cores, auto-detect: small", models.recommend(H(None, cores=2), "auto")[2], "small")
 check("4-core laptop, English: small", models.recommend(H(None, cores=4, laptop=True), "en")[2], "small")
+check("4-core desktop, Slovak: large-v3-turbo on the CPU", models.recommend(H(None, cores=4, ram_gb=16), "sk"),
+      ("cpu", None, "large-v3-turbo"))
+check("4 cores but 4 GB, Slovak: small", models.recommend(H(None, cores=4, ram_gb=4), "sk")[2], "small")
+check("GPU, Slovak: turbo serves the CPU too (no second download)",
+      models.recommend(H("nvidia", vram_gb=8, cores=8, ram_gb=32), "sk"), ("gpu", "large-v3-turbo", "large-v3-turbo"))
 check("2 GB RAM: base", models.recommend(H(None, cores=4, ram_gb=2), "sk")[2], "base")
 check("1 GB RAM: tiny", models.recommend(H(None, cores=4, ram_gb=1), "en")[2], "tiny")
 check("medium is never recommended", any("medium" in str(models.recommend(H(g, vram_gb=v, cores=c), lang))

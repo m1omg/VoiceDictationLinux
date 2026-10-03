@@ -13,11 +13,11 @@ from pathlib import Path
 
 # name: (Hugging Face repository, download size in MB, what it is like). All multilingual.
 MODELS = {
-    "tiny": ("Systran/faster-whisper-tiny", 76, "fastest, least accurate"),
-    "base": ("Systran/faster-whisper-base", 145, "fast; fine for English, weak for Slovak"),
-    "small": ("Systran/faster-whisper-small", 484, "good English, fair Slovak"),
-    "medium": ("Systran/faster-whisper-medium", 1528, "very good, slow without a GPU"),
-    "large-v3-turbo": ("mobiuslabsgmbh/faster-whisper-large-v3-turbo", 1620, "best; needs a GPU to be quick"),
+    "tiny": ("Systran/faster-whisper-tiny", 76, "fastest; rough English, no Slovak"),
+    "base": ("Systran/faster-whisper-base", 145, "fast; good English, no Slovak"),
+    "small": ("Systran/faster-whisper-small", 484, "very good English, poor Slovak"),
+    "medium": ("Systran/faster-whisper-medium", 1528, "excellent English, fair Slovak; slow without a GPU"),
+    "large-v3-turbo": ("mobiuslabsgmbh/faster-whisper-large-v3-turbo", 1620, "best, also for Slovak; slow without a GPU"),
 }
 FILES = ["config.json", "preprocessor_config.json", "model.bin", "tokenizer.json", "vocabulary.*"]
 
@@ -111,16 +111,22 @@ def probe(gpu: str | None) -> Hardware:
 
 
 def cpu_model_for(hw: Hardware, language: str) -> str:
-    """Whisper always works on 30 s at a time, so a pass costs about the same for any short dictation:
-    on 4+ cores small takes ~1-2 s, on 2 cores ~4-6 s (base ~1-1.5 s). Slovak needs at least small."""
+    """Whisper always works on 30 s at a time, so a pass costs about the same for any short dictation.
+    Measured on 4 cores (FLEURS, int8): base 0.7 s, small ~2 s, large-v3-turbo ~4 s per sentence.
+    English is fine from base up (5.5 % word errors; small 4.5 %); in Slovak tiny and base are
+    unusable, small gets a third of the words wrong and large-v3-turbo 7 %, so with 4 cores and the
+    memory for it Slovak gets turbo, and small elsewhere (twice as slow on 2 cores)."""
     if hw.ram_gb < 2.5:
         return "base" if hw.ram_gb >= 1.5 else "tiny"
-    return "small" if hw.cores >= 4 or language in ("sk", "auto") else "base"
+    if language in ("sk", "auto"):
+        return "large-v3-turbo" if hw.cores >= 4 and hw.ram_gb >= 6 else "small"
+    return "small" if hw.cores >= 4 else "base"
 
 
 def recommend(hw: Hardware, language: str) -> tuple[str, str | None, str]:
-    """(device, model for the GPU or None, model for the CPU). medium is never suggested: on a GPU
-    large-v3-turbo is both better and faster (its decoder has 4 layers), on a CPU it is too slow."""
+    """(device, model for the GPU or None, model for the CPU). medium is never suggested:
+    large-v3-turbo is as fast on a processor, faster on a GPU (its decoder has 4 layers), and much
+    better in Slovak (7 % word errors against 15 %)."""
     cpu = cpu_model_for(hw, language)
     if hw.gpu and (hw.vram_gb == 0 or hw.vram_gb >= 2):  # 2-4 GB still fits turbo in int8_float16
         return "gpu", "large-v3-turbo", cpu
