@@ -1916,15 +1916,16 @@ class TopBar:
         else:
             from tray_pystray import MenuItem, TrayIcon
         self.ui, self.MenuItem = ui, MenuItem
-        self.tray = TrayIcon("dictate", "Dictate", self.menu, self.clicked,
-                             on_activate=self.open_settings if ui.big_settings else None)
-        if WINDOWS:  # notifications come from the tray icon there
-            NOTIFY_HOOK = self.tray.notify
         self.lock = threading.Lock()
         self.state = {"loading": True, "recording": False, "busy": 0, "problem": None, "detected": None,
                       "preview": "", "model": None, "download": None, "key": None}
         self.on_quit = lambda: None  # set by the daemon: ends the program cleanly
         self.switch: ModelSwitch | None = None  # set by the daemon: applies model and device choices
+        # After the state above: pystray builds the menu right away (Linux's tray builds it on request).
+        self.tray = TrayIcon("dictate", "Dictate", self.menu, self.clicked,
+                             on_activate=self.open_settings if ui.big_settings else None)
+        if WINDOWS:  # notifications come from the tray icon there
+            NOTIFY_HOOK = self.tray.notify
         self.panel = PanelProcess(ui)
         self.panel_ongoing = False  # the panel shows "Listening" or "Transcribing" (no outcome yet)
         self.settings_window = None
@@ -2513,10 +2514,11 @@ def run_selftest(cfg, seconds: float, language: str) -> int:
 
 def run_paste_test(cfg, text: str) -> int:
     lock = lock_or_exit()  # noqa: F841
-    selection = SelectionOwner()
-    selection.start()
-    keyboard = VirtualKeyboard()
-    paster = Paster(cfg, selection, keyboard)
+    selection, keyboard, no_keyboard, _ = make_io(cfg)
+    if keyboard is None:
+        print(f"cannot press the paste keys: {no_keyboard}")
+        return 1
+    paster = Paster(cfg, selection, keyboard, no_keyboard)
     for i in range(5, 0, -1):
         print(f"Pasting into the focused window in {i}...", flush=True)
         time.sleep(1)

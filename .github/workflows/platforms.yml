@@ -56,7 +56,7 @@ jobs:
       - name: Unit tests
         run: |
           $Py = "$env:LOCALAPPDATA\dictate\venv\Scripts\python.exe"
-          foreach ($Test in "unit_keys", "unit_models", "unit_windows", "unit_audio", "unit_portability") {
+          foreach ($Test in "unit_keys", "unit_models", "unit_topbar", "unit_windows", "unit_audio", "unit_portability") {
             Write-Host "== $Test"
             & $Py -X utf8 "tests\$Test.py"
             if ($LASTEXITCODE -ne 0) { exit 1 }
@@ -68,7 +68,7 @@ jobs:
           $D = "$env:LOCALAPPDATA\dictate"
           $Log = "$D\dictate.log"
           for ($i = 0; $i -lt 180; $i++) {
-            if ((Test-Path $Log) -and (Select-String -Path $Log -Pattern "model ready" -Quiet)) { break }
+            if ((Test-Path $Log) -and (Select-String -Path $Log -Pattern "model ready", "Traceback" -Quiet)) { break }
             Start-Sleep -Seconds 1
           }
           Get-Content $Log
@@ -142,7 +142,7 @@ jobs:
       - name: Unit tests
         run: |
           PY="$HOME/Library/Application Support/dictate/venv/bin/python"
-          for t in unit_keys unit_models unit_macos unit_audio unit_portability; do
+          for t in unit_keys unit_models unit_topbar unit_macos unit_audio unit_portability; do
             echo "== $t"
             "$PY" "tests/$t.py"
           done
@@ -151,7 +151,7 @@ jobs:
         timeout-minutes: 6
         run: |
           LOG="$HOME/Library/Application Support/dictate/dictate.log"
-          for i in $(seq 180); do grep -q "model ready" "$LOG" 2>/dev/null && break; sleep 1; done
+          for i in $(seq 180); do grep -q -e "model ready" -e Traceback "$LOG" 2>/dev/null && break; sleep 1; done
           cat "$LOG"
           grep -q "model ready" "$LOG"
           if grep -q Traceback "$LOG"; then echo "an error in the log"; exit 1; fi
@@ -200,7 +200,7 @@ jobs:
       - name: Unit tests
         run: |
           PY="$HOME/.local/share/dictate/venv/bin/python"
-          for t in unit_keys unit_models unit_windows unit_macos unit_audio unit_portability; do
+          for t in unit_keys unit_models unit_topbar unit_windows unit_macos unit_audio unit_portability; do
             echo "== $t"
             "$PY" "tests/$t.py"
           done
