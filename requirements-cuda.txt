@@ -1,2 +1,2 @@
-# NVIDIA GPUs (also installed on CPU-only machines): the cuBLAS that CTranslate2's PyPI wheel loads.
+# NVIDIA GPUs only: the cuBLAS that CTranslate2's PyPI wheel loads (about 650 MB with its nvrtc).
 nvidia-cublas-cu12>=12.8,<13

@@ -2338,6 +2338,46 @@ def ensure_config(cpu_only: bool) -> None:
     print(f"Created the settings file {CONFIG_PATH}")
 
 
+def previous_setup() -> bool:
+    """Whether choices were saved before (an earlier --setup or the menu), so an update can keep them."""
+    try:
+        return "trigger" in json.loads(STATE_PATH.read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+        return False
+
+
+def ask_key(hw) -> str:
+    """The push-to-talk key: suggested for this keyboard, or any key or combination typed in."""
+    if MACOS:  # MacBooks have no numpad; Left Option still types @ # { } on Slovak layouts
+        options = [("Alt_R", "Right Option (⌥)"), ("Super_R", "Right Command (⌘)"),
+                   ("KP_Delete", "numpad . (a keyboard with a numpad)")]
+        default = "Alt_R"
+    elif LINUX and os.environ.get("XDG_SESSION_TYPE") == "wayland":  # the desktop's dialog can change it
+        options, default = [("KP_Delete", "numpad Del / .   (keyboards with a numpad)")], "KP_Delete"
+    else:
+        options = [("KP_Delete", "numpad Del / .   (keyboards with a numpad)"),
+                   ("Control_R", "Right Ctrl        (laptops; it still works in shortcuts)")]
+        default = "Control_R" if hw.laptop else "KP_Delete"
+    options.append(("other", "another key or a combination, typed in (e.g. F13, Ctrl+Alt+D)"))
+    question = "Which key do you hold to dictate?" + (" (On Wayland the desktop then shows its own dialog "
+                                                      "to approve or change it.)" if LINUX else "")
+    preset = os.environ.get("DICTATE_KEY", "").strip()
+    if preset and valid_trigger(preset):
+        print(f"{question} {keys.parse(preset)} (DICTATE_KEY)")
+        return str(keys.parse(preset))
+    choice = ask(question, options, default)
+    if choice != "other":
+        return choice
+    while True:
+        text = input("Type the key or combination (Enter for the suggestion): ").strip()
+        if not text:
+            return default
+        try:
+            return str(keys.parse(text))
+        except ValueError as e:
+            print(f"  {e}")
+
+
 def run_setup(cfg, gpu: str) -> int:
     """The installers' shared part: questions with recommendations for this computer, the model
     downloads, the settings file and the menu choices. Ends by loading the model once."""
@@ -2345,6 +2385,15 @@ def run_setup(cfg, gpu: str) -> int:
         gpu = {"cuda": "nvidia", "rocm": "amd"}.get(preload_gpu_libraries()[0], "none")
     hw = models.probe(None if gpu == "none" else gpu)
     print(f"This computer: {hw.describe()}")
+    ui = UiState(cfg)
+    if previous_setup():
+        current = (f"language {LANGUAGES[ui.language]}, model {ui.gpu_model if gpu != 'none' else ui.cpu_model}, "
+                   f"key {keys.label(keys.parse(ui.trigger), sys.platform)}")
+        if ask(f"Your current choices: {current}.", [("keep", "keep them"), ("change", "choose again")],
+               "keep", "DICTATE_KEEP") == "keep" and not any(os.environ.get(v) for v in
+                                                             ("DICTATE_LANGUAGE", "DICTATE_MODEL", "DICTATE_KEY")):
+            ensure_config(cpu_only=gpu == "none")
+            return finish_setup(ui.gpu_model if gpu != "none" else None, ui.cpu_model)
     language = ask("Which language will you dictate?", [("en", "English"), ("sk", "Slovak (Slovenčina)"),
                    ("auto", "Both: English or Slovak, detected each time")], "en", "DICTATE_LANGUAGE")
     device, gpu_model, cpu_model = models.recommend(hw, language)
@@ -2356,15 +2405,20 @@ def run_setup(cfg, gpu: str) -> int:
         gpu_model = chosen
     else:
         cpu_model = chosen
+    trigger = ask_key(hw)
     ensure_config(cpu_only=device == "cpu")
+    ui = UiState(load_config())
+    ui.set(language=language, cpu_model=cpu_model, trigger=trigger, **({"gpu_model": gpu_model} if gpu_model else {}))
+    return finish_setup(gpu_model, cpu_model)
+
+
+def finish_setup(gpu_model: str | None, cpu_model: str) -> int:
     for name in dict.fromkeys(m for m in (gpu_model, cpu_model) if m):
         if models.installed(MODELS_DIR, name):
             print(f"The {name} model is already downloaded")
-            continue
-        print(f"Downloading the {name} model ({models.size_label(name)})…", flush=True)
-        models.download(MODELS_DIR, name)
-    ui = UiState(load_config())
-    ui.set(language=language, cpu_model=cpu_model, **({"gpu_model": gpu_model} if gpu_model else {}))
+        elif name in models.MODELS:
+            print(f"Downloading the {name} model ({models.size_label(name)})…", flush=True)
+            models.download(MODELS_DIR, name)
     print("\nLoading the model once to check it:", flush=True)
     return subprocess.run([sys.executable, str(Path(__file__).resolve()), "--check-model"]).returncode
 
@@ -2436,8 +2490,7 @@ def main() -> int:
         sys.stdout = sys.stderr = open_log()
     if args.setup or args.download:  # set before anything imports huggingface_hub
         os.environ["HF_HUB_OFFLINE"] = "0"
-        import warnings
-        warnings.filterwarnings("ignore", message=".*unauthenticated requests.*")
+        os.environ["HF_HUB_VERBOSITY"] = "error"  # not "unauthenticated requests" warnings
     under_systemd = "INVOCATION_ID" in os.environ
     logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO,
                         format="%(levelname)s %(message)s" if under_systemd

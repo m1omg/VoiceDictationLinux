@@ -1,3 +1,5 @@
+# Exact versions of a Linux x86_64 install with an NVIDIA GPU (Python 3.14), for reference.
+# Regenerate: uv pip compile --python-platform x86_64-unknown-linux-gnu --python-version 3.14 --no-header --no-annotate requirements.txt requirements-cuda.txt
 anyio==4.15.1
 av==18.1.0
 certifi==2026.7.22
@@ -19,7 +21,9 @@ nvidia-cublas-cu12==12.9.2.10
 nvidia-cuda-nvrtc-cu12==12.9.86
 onnxruntime==1.30.0
 packaging==26.3
+pillow==12.3.0
 protobuf==7.36.2
+psutil==7.2.2
 python-xlib==0.33
 pyyaml==6.0.3
 six==1.17.0
