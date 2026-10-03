@@ -644,6 +644,7 @@ class Settings:
         height = min(self.frame.winfo_reqheight(), int(sh * 0.9))
         self.canvas.configure(width=self.frame.winfo_reqwidth(), height=height,
                               scrollregion=(0, 0, self.frame.winfo_reqwidth(), self.frame.winfo_reqheight()))
+        self.root.update_idletasks()  # (the view's new size, before a focus change scrolls it)
         if self.capturing:  # keys go to the capture, not to a button (Space or Enter would press it)
             self.canvas.focus_set()
             self._scroll_to(None, next((b for b in self.buttons if b.row_id == "key:change"), None))
@@ -678,8 +679,8 @@ class Settings:
     def _scroll_to(self, event, widget=None) -> None:
         """Keep the focused button (and the message just above it) in view."""
         widget = widget or (event.widget if event is not None else None)
-        if widget is None:
-            return
+        if widget is None or not self.canvas.winfo_viewable():  # macOS Tk focuses before the window
+            return  # shows, when the view isn't its real size yet (it starts at the top anyway)
         total = max(1, self.frame.winfo_reqheight())
         top, bottom = widget.winfo_y(), widget.winfo_y() + widget.winfo_height()
         view_top, view_bottom = (f * total for f in self.canvas.yview())

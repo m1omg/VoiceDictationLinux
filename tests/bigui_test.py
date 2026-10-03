@@ -162,6 +162,11 @@ try:
     shot("settings_white")
     press("Escape")
     checks.append(("Esc closes the window", settings.wait(timeout=5) == 0))
+    # macOS Tk delivers the first button's focus before the window shows: the view must stay at the top
+    scrolled = subprocess.run([sys.executable, "-c", "import bigui\ns = bigui.Settings()\n"
+                               "s._scroll_to(None, s.buttons[0])\nprint(s.canvas.canvasy(0))\ns.root.destroy()"],
+                              env=env, cwd=ROOT, capture_output=True, text=True, timeout=30).stdout.strip()
+    checks.append(("a focus before the window shows doesn't scroll it", scrolled == "0.0"))
 finally:
     xvfb.terminate()
 for name, good in checks:
