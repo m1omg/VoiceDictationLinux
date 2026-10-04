@@ -1,8 +1,8 @@
 """A small top-bar icon (StatusNotifierItem + DBusMenu) served with jeepney.
 
 GNOME shows it through the AppIndicator extension. It covers what dictate needs: a themed icon,
-a short text label next to it, a tooltip, and a flat menu of plain, radio and checkbox items.
-All D-Bus traffic runs on this thread; other threads call set() and refresh_menu().
+a short text label next to it, a tooltip, and a menu of plain, radio and checkbox items with one
+level of submenus. All D-Bus traffic runs on this thread; other threads call set() and refresh_menu().
 """
 from __future__ import annotations
 
@@ -11,19 +11,22 @@ import os
 import queue
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
-from jeepney import (DBusAddress, HeaderFields, MatchRule, MessageType, new_error, new_method_call,
-                     new_method_return, new_signal)
-from jeepney.bus_messages import message_bus
-from jeepney.io.blocking import open_dbus_connection
+try:
+    from jeepney import (DBusAddress, HeaderFields, MatchRule, MessageType, new_error, new_method_call,
+                         new_method_return, new_signal)
+    from jeepney.bus_messages import message_bus
+    from jeepney.io.blocking import open_dbus_connection
+except ImportError:  # Windows and macOS use only MenuItem and walk from here (see tray_pystray.py)
+    DBusAddress = None
 
 log = logging.getLogger("dictate")
 
 ITEM_PATH, MENU_PATH = "/StatusNotifierItem", "/MenuBar"
 ITEM_IFACE, MENU_IFACE = "org.kde.StatusNotifierItem", "com.canonical.dbusmenu"
 WATCHER_NAME = "org.kde.StatusNotifierWatcher"
-WATCHER = DBusAddress("/StatusNotifierWatcher", WATCHER_NAME, WATCHER_NAME)
+WATCHER = DBusAddress("/StatusNotifierWatcher", WATCHER_NAME, WATCHER_NAME) if DBusAddress else None
 
 _ITEM_XML = """<node><interface name="org.kde.StatusNotifierItem">
 <property name="Category" type="s" access="read"/><property name="Id" type="s" access="read"/>
@@ -63,27 +66,43 @@ _MENU_XML = """<node><interface name="com.canonical.dbusmenu">
 
 @dataclass
 class MenuItem:
-    id: int
+    id: int  # unique in the whole menu, and stable
     label: str = ""
     kind: str = "normal"  # normal | separator | radio | check
     checked: bool = False
     enabled: bool = True
+    children: list = field(default_factory=list)  # a submenu
 
     def props(self) -> dict:
         if self.kind == "separator":
             return {"type": ("s", "separator")}
-        props = {"label": ("s", self.label), "enabled": ("b", self.enabled), "visible": ("b", True)}
+        props = {"label": ("s", self.label.replace("_", "__")),  # a single _ marks a mnemonic
+                 "enabled": ("b", self.enabled), "visible": ("b", True)}
         if self.kind in ("radio", "check"):
             props["toggle-type"] = ("s", "radio" if self.kind == "radio" else "checkmark")
             props["toggle-state"] = ("i", int(self.checked))
+        if self.children:  # KDE learns that an item has a submenu only from this
+            props["children-display"] = ("s", "submenu")
         return props
 
 
+def walk(items):
+    """Every item, submenus included."""
+    for item in items:
+        yield item
+        yield from walk(item.children)
+
+
+class _Reregister(Exception):
+    """Leave the bus and register anew (hosts read ItemIsMenu only when an item appears)."""
+
+
 class TrayIcon(threading.Thread):
-    def __init__(self, item_id: str, title: str, build_menu, on_click):
+    def __init__(self, item_id: str, title: str, build_menu, on_click, on_activate=None):
         super().__init__(name="tray", daemon=True)
         self.item_id, self.title = item_id, title
         self.build_menu, self.on_click = build_menu, on_click  # build_menu() -> list[MenuItem]
+        self.on_activate = on_activate  # a primary click opens this instead of the menu (when set)
         self.icon, self.label, self.tooltip = "audio-input-microphone-symbolic", "", ""
         self.updates: queue.Queue = queue.Queue()
         self.revision = 1
@@ -95,6 +114,11 @@ class TrayIcon(threading.Thread):
     def refresh_menu(self) -> None:
         self.updates.put(None)
 
+    def set_activate(self, on_activate) -> None:
+        """Switch between "a click opens the menu" and "a click calls on_activate"."""
+        self.on_activate = on_activate
+        self.updates.put("reregister")
+
     # --- tray thread -------------------------------------------------------------------
     def run(self):
         delay = 1.0
@@ -102,6 +126,9 @@ class TrayIcon(threading.Thread):
             started = time.monotonic()
             try:
                 self._serve()
+            except _Reregister:
+                time.sleep(0.2)
+                continue
             except Exception as e:
                 log.warning("tray: %s", e)
             delay = 1.0 if time.monotonic() - started > 60 else min(delay * 2, 30)
@@ -116,7 +143,8 @@ class TrayIcon(threading.Thread):
 
     def _serve(self):
         with open_dbus_connection("SESSION") as conn:
-            name = f"org.kde.StatusNotifierItem-{os.getpid()}-1"
+            self.registrations = getattr(self, "registrations", 0) + 1
+            name = f"org.kde.StatusNotifierItem-{os.getpid()}-{self.registrations}"
             self._call(conn, message_bus.RequestName(name, 4))  # 4 = don't queue
             rule = MatchRule(type="signal", sender="org.freedesktop.DBus", interface="org.freedesktop.DBus",
                              member="NameOwnerChanged", path="/org/freedesktop/DBus")
@@ -146,6 +174,8 @@ class TrayIcon(threading.Thread):
                 update = self.updates.get_nowait()
             except queue.Empty:
                 return
+            if update == "reregister":
+                raise _Reregister()
             if update is None:
                 self.revision += 1
                 conn.send(new_signal(DBusAddress(MENU_PATH, interface=MENU_IFACE), "LayoutUpdated", "ui",
@@ -187,6 +217,9 @@ class TrayIcon(threading.Thread):
             if msg.body[1] in props:
                 return new_method_return(msg, "v", (props[msg.body[1]],))
             return new_error(msg, "org.freedesktop.DBus.Error.UnknownProperty", "s", (msg.body[1],))
+        if path == ITEM_PATH and member == "Activate" and self.on_activate:
+            self._clicked(None)
+            return new_method_return(msg)
         if path == ITEM_PATH and member in ("Activate", "SecondaryActivate", "ContextMenu", "Scroll",
                                             "ProvideXdgActivationToken"):
             return new_method_return(msg)
@@ -194,19 +227,24 @@ class TrayIcon(threading.Thread):
             return None
         items = self.build_menu()
         if member == "GetLayout":
-            parent = msg.body[0]
+            parent, depth = msg.body[0], msg.body[1]
+
+            def node(item, depth):  # depth -1: everything below
+                children = [] if depth == 0 else [("(ia{sv}av)", node(c, depth - 1)) for c in item.children]
+                return item.id, item.props(), children
             if parent == 0:
-                children = [("(ia{sv}av)", (item.id, item.props(), [])) for item in items]
-                layout = (0, {"children-display": ("s", "submenu")}, children)
+                layout = (0, {"children-display": ("s", "submenu")},
+                          [] if depth == 0 else [("(ia{sv}av)", node(i, depth - 1)) for i in items])
             else:
-                item = next((i for i in items if i.id == parent), None)
-                layout = (parent, item.props() if item else {}, [])
+                item = next((i for i in walk(items) if i.id == parent), None)
+                layout = node(item, depth) if item else (parent, {}, [])
             return new_method_return(msg, "u(ia{sv}av)", (self.revision, layout))
         if member == "GetGroupProperties":
             ids = set(msg.body[0])
-            return new_method_return(msg, "a(ia{sv})", ([(i.id, i.props()) for i in items if not ids or i.id in ids],))
+            return new_method_return(msg, "a(ia{sv})", ([(i.id, i.props()) for i in walk(items)
+                                                         if not ids or i.id in ids],))
         if member == "GetProperty":
-            item = next((i for i in items if i.id == msg.body[0]), None)
+            item = next((i for i in walk(items) if i.id == msg.body[0]), None)
             return new_method_return(msg, "v", ((item.props() if item else {}).get(msg.body[1], ("s", "")),))
         if member == "Event":
             if msg.body[1] == "clicked":
@@ -223,9 +261,13 @@ class TrayIcon(threading.Thread):
             return new_method_return(msg, "aiai", ([], []))
         return None
 
-    def _clicked(self, item_id: int) -> None:
+    def _clicked(self, item_id: int | None) -> None:
+        """A menu item was clicked (None: the icon itself, when on_activate is set)."""
         try:
-            self.on_click(item_id)
+            if item_id is None:
+                self.on_activate()
+            elif not any(i.id == item_id and i.children for i in walk(self.build_menu())):  # not a submenu
+                self.on_click(item_id)
         except Exception:
             log.exception("tray: menu action %s failed", item_id)
 
@@ -235,7 +277,7 @@ class TrayIcon(threading.Thread):
             "Status": ("s", "Active"), "WindowId": ("i", 0), "IconName": ("s", self.icon),
             "IconPixmap": ("a(iiay)", []), "OverlayIconName": ("s", ""), "AttentionIconName": ("s", ""),
             "ToolTip": ("(sa(iiay)ss)", ("", [], self.title, self.tooltip)),
-            "ItemIsMenu": ("b", True), "Menu": ("o", MENU_PATH), "IconThemePath": ("s", ""),
+            "ItemIsMenu": ("b", self.on_activate is None), "Menu": ("o", MENU_PATH), "IconThemePath": ("s", ""),
             "XAyatanaLabel": ("s", self.label), "XAyatanaLabelGuide": ("s", self.label),
         }
 

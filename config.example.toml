@@ -1,17 +1,13 @@
-# Settings for Voice Dictation for Linux: hold numpad Del, speak, release, and the text is typed.
-# Language, "Type while speaking" and sounds are switched from the microphone icon in the top bar.
-# Apply changes to this file with:  systemctl --user restart dictate   (or log out and in)
+# Settings for Voice Dictation: hold the dictation key, speak, release, and the text is typed.
+# Restart dictation after editing this file: "Stop dictation" in the menu of the microphone icon,
+# then start Dictate again (Linux with systemd: systemctl --user restart dictate).
 # Every setting is optional; deleting a line restores its default.
-
-# Speech models in ~/.local/share/dictate/models/: `model` runs on an NVIDIA GPU, `fallback_model`
-# on the CPU when no GPU can be used.
-model = "large-v3-turbo"
-fallback_model = "small"
-beam_size = 5                 # 1 = fastest, 5 = most accurate
 
 # Words Whisper should spell exactly like this (names, jargon). Keep the list short.
 vocabulary = ["Claude", "Claude Code", "GNOME", "Wayland", "Python", "Git", "GitHub", "Linux"]
 
+beam_size = 5                 # on a graphics card: 1 = fastest, 5 = most accurate
+cpu_beam_size = 2             # on the processor, where a narrower search saves time
 remove_fillers = true         # drop "um", "uh", "erm" (and "ehm", "eee" in Slovak)
 trailing_space = true         # end each dictation with a space so the next one doesn't stick to it
 restore_clipboard = true      # put back whatever you had copied after the text is typed
@@ -21,12 +17,32 @@ sound_volume = 0.5            # 0.0 - 1.0 (sounds themselves are switched on/off
 tail_ms = 200                 # keep recording this long after you let go, so the last word isn't cut off
 max_seconds = 300             # safety limit for a single dictation
 
-# "auto" picks "wayland" (GNOME, KDE: global-shortcut portal + /dev/uinput) or "x11" (Cinnamon,
-# XFCE, MATE: X11 key grab + XTEST) from the session type.
+# Linux: "auto" picks "wayland" (GNOME, KDE: global-shortcut portal + /dev/uinput) or "x11"
+# (Cinnamon, XFCE, MATE: X11 key grab + XTEST) from the session type.
 backend = "auto"
 
-# The key. On Wayland it is registered through the desktop's global-shortcut portal: to use a
-# different key change `trigger` (a key name such as "KP_Insert" or "F13") AND give `shortcut_id`
-# a new value (e.g. "push-to-talk-2") so the desktop asks you to approve the new key.
-trigger = "KP_Delete"
-shortcut_id = "push-to-talk"
+# Starting values for what the menu and the settings window choose. Once a choice is made there (or
+# by the installer's questions), it is kept in state.json and the value here no longer applies.
+#
+# The dictation key: a key or a combination, e.g. "KP_Delete" (numpad Del), "Control_R" (Right Ctrl),
+# "Alt_R" (Right Option on a Mac), "F13", "Ctrl+Alt+D". The settings window can capture a new one.
+# trigger = "KP_Delete"
+#
+# Speech models: `model` runs on a graphics card, `fallback_model` on the processor (tiny, base,
+# small, medium or large-v3-turbo); device = "auto" (the graphics card when one works), "gpu" or "cpu".
+# model = "large-v3-turbo"
+# fallback_model = "small"
+# device = "auto"
+#
+# language = "en"             # "en", "sk" or "auto"
+# live_typing = true          # type while speaking
+# sounds = true
+#
+# Large text, for low vision: a big status panel while dictating, and the big settings window when
+# the tray icon is clicked; their size (1.0 - 3.0) and colours ("yellow-on-black", "white-on-black",
+# "black-on-white" or "black-on-yellow"), and where the panel shows ("bottom" or "top").
+# big_panel = false
+# big_settings = false
+# ui_scale = 2.0
+# ui_colors = "yellow-on-black"
+# panel_position = "bottom"

@@ -1,0 +1,81 @@
+"""The push-to-talk key's spelling and what it maps to on X11, the Wayland portal, Windows and macOS.
+
+    python3 tests/unit_keys.py        (any Python 3.11+)
+"""
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+import keys  # noqa: E402
+
+checks = []
+
+
+def check(name, got, want):
+    checks.append((name, got == want, got, want))
+
+
+def fails(text):
+    try:
+        keys.parse(text)
+    except ValueError:
+        return True
+    return False
+
+
+T = keys.parse
+check("default key", T("KP_Delete"), keys.Trigger(frozenset(), "KP_Delete"))
+check("combination", T("Ctrl+Alt+D"), keys.Trigger(frozenset({"ctrl", "alt"}), "d"))
+check("spaces and case", T("ctrl + shift + Space"), keys.Trigger(frozenset({"ctrl", "shift"}), "space"))
+check("aliases", [T(a).key for a in ("RightCtrl", "Right Option", "rightcommand", "NumpadDel", "PageUp", "fn")],
+      ["Control_R", "Alt_R", "Super_R", "KP_Delete", "Prior", "Fn"])
+check("Cmd/Win/Option are modifiers", T("Cmd+Option+K").mods, frozenset({"super", "alt"}))
+check("lone modifier", (T("Control_R").lone_modifier, T("Ctrl+D").lone_modifier, T("F13").lone_modifier),
+      (True, False, False))
+check("bad spellings rejected", [fails(t) for t in ("", "Ctrl+", "Hyper+D", "Ctrl+Shift_R", "Ctrl+Dee", "+")],
+      [True] * 6)
+keys.ANY_KEYSYM = True  # Linux: any X11 key name on its own, as older settings files may have
+check("Linux: any X11 key name alone", (str(keys.parse("Caps_Lock")), fails("Ctrl+Caps_Lock"), fails("Caps Lock")),
+      ("Caps_Lock", True, True))
+keys.ANY_KEYSYM = False  # Windows, macOS: only keys they have codes for
+check("elsewhere: only the named keys", fails("Caps_Lock"), True)
+keys.ANY_KEYSYM = sys.platform.startswith("linux")
+check("Windows key codes (AltGr turns Ctrl+Alt+D into đ; numpad keys)",
+      [keys.from_windows_vk(vk) for vk in (0x44, 0x37, 0x7C, 0x6E, 0x60, 0x0D)], ["d", "7", "F13", "KP_Delete", "KP_Insert", None])
+check("Windows: the numpad with NumLock off (Delete, Insert, Enter told apart by the extended flag)",
+      [keys.from_windows_vk(vk, ext) for vk, ext in ((0x2E, False), (0x2E, True), (0x2D, False), (0x0D, True))],
+      ["KP_Delete", None, "KP_Insert", "KP_Enter"])
+keys.ANY_KEYSYM = True
+check("Linux: AltGr and XF86 keys can be captured, characters can't",
+      ([keys.from_tk(k) for k in ("ISO_Level3_Shift", "XF86Launch5", "semicolon", "scaron")],
+       keys.label(T("ISO_Level3_Shift"))), (["ISO_Level3_Shift", "XF86Launch5", None, None], "AltGr"))
+keys.ANY_KEYSYM = sys.platform.startswith("linux")
+check("Mac keycodes (Option turns D into ∂; fn)", [keys.from_mac_keycode(c) for c in (0x02, 0x3D, 0x3F, 0x7F)],
+      ["d", "Alt_R", "Fn", None])
+check("typing keys only with a modifier", [fails(t) for t in ("d", "7", "space", "Return", "Delete", "Ctrl+space",
+                                                              "Ctrl+D", "Insert")],
+      [True, True, True, True, True, False, False, False])
+check("written back", [str(T(t)) for t in ("ctrl+alt+d", "KP_Delete", "shift+super+f13")],
+      ["Ctrl+Alt+D", "KP_Delete", "Shift+Super+F13"])
+check("labels", [keys.label(T("KP_Delete")), keys.label(T("Control_R"), "win32"), keys.label(T("Alt_R"), "darwin"),
+                 keys.label(T("Ctrl+Alt+D"), "darwin"), keys.label(T("Super+H"), "win32")],
+      ["numpad Del", "Right Ctrl", "Right Option", "Control+Option+D", "Win+H"])
+check("X11 masks", (keys.x11_mask(T("Ctrl+Alt+D")), keys.x11_mask(T("Super+Shift+F1"))), (12, 65))
+check("portal format", (keys.portal(T("KP_Delete")), keys.portal(T("Ctrl+Alt+D")), keys.portal(T("Super+space"))),
+      ("KP_Delete", "CTRL+ALT+d", "LOGO+space"))
+check("Windows: numpad Del by scan code, not extended", keys.windows(T("KP_Delete")), (None, 0x53, False))
+check("Windows: Delete key is the extended one", keys.windows(T("Ctrl+Delete")), (0x2E, None, True))
+check("Windows: letters, F13, Right Ctrl", (keys.windows(T("Ctrl+D")), keys.windows(T("F13")), keys.windows(T("Control_R"))),
+      ((0x44, None, None), (0x7C, None, None), (0xA3, None, None)))
+check("Windows: every named key mapped", all(n in keys.WINDOWS_KEYS for n in keys.NAMED if n != "Fn"), True)
+check("macOS keycodes", (keys.mac(T("Alt_R")), keys.mac(T("KP_Delete")), keys.mac(T("Cmd+V")), keys.mac(T("F5"))),
+      (0x3D, 0x41, 0x09, 0x60))
+check("macOS: right Option's device bit", keys.MAC_DEVICE_BITS["Alt_R"], 0x40)
+check("macOS flags", keys.mac_flags(T("Ctrl+Alt+D")), 0x40000 | 0x80000)
+check("macOS: every letter and digit", all(c in keys.MAC_LETTERS for c in "abcdefghijklmnopqrstuvwxyz0123456789"), True)
+check("Tk keysyms", [keys.from_tk(k) for k in ("KP_Decimal", "Control_R", "Option_R", "D", "F13", "comma", "ž", "Meta_L")],
+      ["KP_Delete", "Control_R", "Alt_R", "d", "F13", None, None, "Alt_L"])
+
+for name, good, got, want in checks:
+    print(f"{'ok  ' if good else 'FAIL'} {name}" + ("" if good else f": got {got!r}, want {want!r}"))
+sys.exit(0 if all(c[1] for c in checks) else 1)

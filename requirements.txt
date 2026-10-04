@@ -1,12 +1,22 @@
-# Python packages for dictate, installed into ./venv by install.sh (plus requirements-cuda.txt, or
-# the ROCm packages on AMD GPUs).
+# Python packages for dictate, installed into ./venv by install.sh / install.ps1 (plus
+# requirements-cuda.txt on NVIDIA GPUs, or the ROCm packages on AMD GPUs).
 faster-whisper==1.2.1
 # PyPI wheel built against CUDA 12.8 without cuDNN; only needs libcublas.so.12 (requirements-cuda.txt).
-# On AMD GPUs install.sh puts CTranslate2's ROCm build of the same version in its place.
+# On AMD GPUs the installers put CTranslate2's ROCm build of the same version in its place.
 ctranslate2==4.8.2
 # PyAV 19 breaks faster-whisper 1.2.1's file decoding (dictate passes arrays, but stay safe).
 av<19
-jeepney>=0.9,<1
-python-xlib>=0.33,<1
+# The voice-activity detector's runtime has no newer builds for Intel Macs; 1.19 also runs on macOS 11-12.
+onnxruntime<1.20; sys_platform == "darwin" and platform_machine == "x86_64"
 huggingface-hub>=0.30
 numpy>=2
+psutil>=5.9
+Pillow>=10
+# Linux: D-Bus (tray, portal) and X11 (clipboard, keys)
+jeepney>=0.9,<1; sys_platform == "linux"
+python-xlib>=0.33,<1; sys_platform == "linux"
+# Windows and macOS: the microphone (PortAudio) and the tray icon
+sounddevice>=0.5; sys_platform != "linux"
+pystray>=0.19; sys_platform != "linux"
+pyobjc-framework-Quartz>=10; sys_platform == "darwin"
+pyobjc-framework-ApplicationServices>=10; sys_platform == "darwin"

@@ -1,7 +1,8 @@
 """Shared helpers for the benchmark scripts. They need no microphone, no windows and no user.
 
 Run them with the app's own Python:  ~/.local/share/dictate/venv/bin/python tests/<script>.py
-(set DICTATE_DIR if the program is installed somewhere else).
+(macOS: ~/Library/Application Support/dictate/venv/bin/python; Windows:
+%LOCALAPPDATA%\\dictate\\venv\\Scripts\\python.exe; set DICTATE_DIR if it is installed elsewhere).
 """
 import importlib.util
 import json
@@ -11,7 +12,10 @@ import re
 import sys
 from pathlib import Path
 
-DICTATE_DIR = Path(os.environ.get("DICTATE_DIR", Path.home() / ".local/share/dictate"))
+DEFAULT_DIR = (Path(os.environ.get("LOCALAPPDATA", "")) / "dictate" if sys.platform == "win32"
+               else Path.home() / "Library/Application Support/dictate" if sys.platform == "darwin"
+               else Path.home() / ".local/share/dictate")
+DICTATE_DIR = Path(os.environ.get("DICTATE_DIR", DEFAULT_DIR))
 FLEURS = Path(__file__).resolve().parent / "fleurs"
 logging.basicConfig(level=logging.WARNING)
 
@@ -27,10 +31,20 @@ def load_dictate():
     return module
 
 
+def load_model(d, cfg):
+    """The model dictation would use (the menu's choice), or the one named on the command line, e.g.
+    `bench_asr.py small` (add --cpu to run it on the CPU)."""
+    ui = d.UiState(cfg)
+    names = [a for a in sys.argv[1:] if not a.startswith("--")]
+    tr = d.Transcriber(cfg)
+    tr.load("cpu" if "--cpu" in sys.argv else ui.device, *(names[:1] * 2 or (ui.gpu_model, ui.cpu_model)))
+    return tr
+
+
 def sentences(lang: str) -> list[dict]:
     """The downloaded test sentences for "en" or "sk" (run fetch_fleurs.py first)."""
     name = {"en": "eng_Latn", "sk": "slk_Latn"}[lang]
-    return json.load(open(FLEURS / f"{name}.json"))
+    return json.load(open(FLEURS / f"{name}.json", encoding="utf-8"))
 
 
 def audio(item):

@@ -7,12 +7,11 @@ LMDE 7, RX 6700 XT (ROCm): English 3.9%, Slovak 5.9%, 0.40 s / 0.48 s, auto-dete
 import time
 
 import numpy as np
-from _common import audio, errors, load_dictate, sentences
+from _common import audio, errors, load_dictate, load_model, sentences
 
 d = load_dictate()
 cfg = d.load_config()
-tr = d.Transcriber(cfg)
-tr.load()
+tr = load_model(d, cfg)
 print("model:", tr.desc)
 for lang in ("en", "sk"):
     items = sentences(lang)

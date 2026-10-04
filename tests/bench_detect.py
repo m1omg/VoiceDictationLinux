@@ -4,11 +4,10 @@ Reference result: English is recognised from 0.5 s of speech; Slovak is confiden
 for English below ~1.5 s and always right from 1.5 s on. That is why auto mode waits for 1.5 s
 of speech (dictate.py, Worker._live).
 """
-from _common import audio, load_dictate, sentences
+from _common import audio, load_dictate, load_model, sentences
 
 d = load_dictate()
-tr = d.Transcriber(d.load_config())
-tr.load()
+tr = load_model(d, d.load_config())
 from faster_whisper.vad import VadOptions, get_speech_timestamps  # noqa: E402 (AMD: only after load() preloads ROCm)
 for lang in ("en", "sk"):
     results = {s: [] for s in (0.5, 1.0, 1.5, 2.0, 3.0)}

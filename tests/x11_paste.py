@@ -8,7 +8,7 @@ XVFB=/tmp/xvfb/usr/bin/Xvfb). A stand-in app window has the focus, owns an earli
 pastes CLIPBOARD on Shift+Insert. XTEST plays the key: pressed, held (the server repeats it, as it
 does for a keyboard plugged in after start-up), released.
 
-Reference result (LMDE 7): every check ok.
+Reference result (LMDE 7; combinations: Xvfb in a container): every check ok.
 """
 import os
 import queue
@@ -127,6 +127,56 @@ try:
     checks.append(("key kept from the app", not {XK.XK_KP_Delete, XK.XK_KP_Decimal} & set(app.keys)))
     checks.append(("text pasted, accents intact", app.pasted == [d.clean_text(TEXT, cfg)]))
     checks.append(("earlier clipboard restored", clipboard() == EARLIER))
+
+    def hotkey(trigger):
+        """Another key grabbed by its own X11Hotkey thread; returns its event queue."""
+        q: queue.Queue = queue.Queue()
+        d.X11Hotkey(d.SimpleNamespace(**{**vars(cfg), "trigger": trigger}), lambda kind, value=None: q.put(kind)).start()
+        return q
+
+    def tap(*names, release=True):
+        codes = [keys.keysym_to_keycode(XK.string_to_keysym(n)) for n in names]
+        for c in codes:
+            xtest.fake_input(keys, X.KeyPress, c)
+        if release:
+            for c in reversed(codes):
+                xtest.fake_input(keys, X.KeyRelease, c)
+        keys.sync()
+
+    combo = hotkey("Ctrl+Alt+D")
+    checks.append(("combination Ctrl+Alt+D grabbed", combo.get(timeout=5) == "key_ready"))
+    d_code = keys.keysym_to_keycode(XK.string_to_keysym("d"))
+    checks.append(("D keeps its auto-repeat for typing",
+                   bool(keys.get_keyboard_control().auto_repeats[d_code // 8] & (1 << (d_code % 8)))))
+    app.keys.clear()
+    tap("Control_L", "Alt_L", "d", release=False)
+    checks.append(("combination press reported", combo.get(timeout=2) == "press"))
+    second = "Typed once Ctrl and Alt are up."
+    session = d.Session(2, None, "en", False, d.sleep_offset(), language="en", t_release=time.monotonic())
+    typing = threading.Thread(target=paster.paste, args=(d.PasteItem(d.clean_text(second, cfg), session, final=True),))
+    typing.start()
+    time.sleep(0.8)
+    checks.append(("typing waits while Ctrl/Alt are held", len(app.pasted) == 1))
+    for name in ("d", "Alt_L", "Control_L"):
+        xtest.fake_input(keys, X.KeyRelease, keys.keysym_to_keycode(XK.string_to_keysym(name)))
+    keys.sync()
+    checks.append(("combination release reported", combo.get(timeout=2) == "release"))
+    typing.join(10)
+    checks.append(("then typed", app.pasted[-1:] == [d.clean_text(second, cfg)]))
+    checks.append(("D kept from the app", XK.XK_d not in app.keys))
+
+    lone = hotkey("Control_R")
+    checks.append(("Right Ctrl alone grabbed", lone.get(timeout=5) == "key_ready"))
+    tap("Control_R", release=False)
+    checks.append(("Right Ctrl press reported", lone.get(timeout=2) == "press"))
+    tap("c", release=False)  # Right Ctrl+C: a shortcut, not dictation (held as long as a person would)
+    time.sleep(0.1)
+    xtest.fake_input(keys, X.KeyRelease, keys.keysym_to_keycode(XK.string_to_keysym("c")))
+    keys.sync()
+    checks.append(("another key cancels it", lone.get(timeout=2) == "cancel"))
+    xtest.fake_input(keys, X.KeyRelease, keys.keysym_to_keycode(XK.string_to_keysym("Control_R")))
+    keys.sync()
+    checks.append(("Right Ctrl release reported", lone.get(timeout=2) == "release"))
 
     if shutil.which("xinput"):  # a keyboard plugged in starts out repeating every key
         keys.change_keyboard_control(key=code, auto_repeat_mode=X.AutoRepeatModeOn)
