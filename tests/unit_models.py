@@ -35,6 +35,23 @@ check("1.5 GB GPU: CPU", models.recommend(H("nvidia", vram_gb=1.5, cores=8), "en
 check("MacBook Air 2017, English: base", models.recommend(H(None, cores=2, ram_gb=8), "en"), ("cpu", None, "base"))
 check("MacBook Air 2017, Slovak: small", models.recommend(H(None, cores=2, ram_gb=8), "sk")[2], "small")
 check("2 cores, auto-detect: small", models.recommend(H(None, cores=2), "auto")[2], "small")
+
+
+def power_supply(**supplies):  # name -> (type, scope), as in /sys/class/power_supply
+    folder = Path(tempfile.mkdtemp(dir=TMP))
+    for name, (kind, scope) in supplies.items():
+        (folder / name).mkdir()
+        (folder / name / "type").write_text(kind + "\n")
+        if scope:
+            (folder / name / "scope").write_text(scope + "\n")
+    return folder
+
+
+check("desktop with a wireless mouse: no laptop", models.has_system_battery(power_supply(
+    hidpp_battery_0=("Battery", "Device"), AC=("Mains", None))), False)
+check("laptop battery: laptop", models.has_system_battery(power_supply(BAT0=("Battery", "System"), AC=("Mains", None))),
+      True)
+check("battery without a scope: laptop", models.has_system_battery(power_supply(BAT1=("Battery", None))), True)
 check("4-core laptop, English: small", models.recommend(H(None, cores=4, laptop=True), "en")[2], "small")
 check("4-core desktop, Slovak: large-v3-turbo on the CPU", models.recommend(H(None, cores=4, ram_gb=16), "sk"),
       ("cpu", None, "large-v3-turbo"))

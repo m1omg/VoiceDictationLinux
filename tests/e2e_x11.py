@@ -50,9 +50,8 @@ recorder.parent.mkdir()
 recorder.write_text(f"""#!{sys.executable}
 import signal, sys, time
 import numpy as np
-from faster_whisper import decode_audio
 signal.signal(signal.SIGINT, lambda *_: sys.exit(0))
-audio = decode_audio({str(FLEURS / item["file"])!r}, sampling_rate=16000)
+audio = np.fromfile({str(TMP / "sentence.f32")!r}, "<f4")
 audio = np.concatenate([np.zeros(3200, np.float32), audio, np.zeros(16000 * 30, np.float32)])
 for i in range(0, len(audio), 320):
     sys.stdout.buffer.write(audio[i:i + 320].astype("<f4").tobytes())
@@ -66,11 +65,17 @@ env = {**os.environ, "HOME": str(TMP / "home"), "XDG_STATE_HOME": str(TMP / "sta
 (TMP / "run").mkdir()
 
 import numpy as np  # noqa: E402
+from _common import load_dictate  # noqa: E402
+
+load_dictate().preload_gpu_libraries()  # AMD: ctranslate2, which faster_whisper imports, needs ROCm first
 from faster_whisper import decode_audio  # noqa: E402
 from PIL import ImageGrab  # noqa: E402
 from Xlib import X, XK, display  # noqa: E402
 from Xlib.ext import xtest  # noqa: E402
 from Xlib.protocol import event  # noqa: E402
+
+sentence = decode_audio(str(FLEURS / item["file"]), sampling_rate=16000)
+(TMP / "sentence.f32").write_bytes(sentence.astype("<f4").tobytes())  # what the stand-in recorder plays
 
 
 class App(threading.Thread):
@@ -128,7 +133,7 @@ try:
     code = keys.keysym_to_keycode(XK.string_to_keysym("KP_Delete"))
     xtest.fake_input(keys, X.KeyPress, code)
     keys.sync()
-    time.sleep(len(decode_audio(str(FLEURS / item["file"]), sampling_rate=16000)) / 16000 + 0.8)
+    time.sleep(len(sentence) / 16000 + 0.8)
     SHOTS.mkdir(parents=True, exist_ok=True)
     image = ImageGrab.grab(xdisplay=os.environ["DISPLAY"])
     image.save(SHOTS / "e2e_listening.png")

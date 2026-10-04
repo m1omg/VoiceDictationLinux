@@ -83,13 +83,24 @@ class Hardware:
         return f"{gpu}; {self.cores}-core CPU; {self.ram_gb:.0f} GB RAM" + ("; laptop" if self.laptop else "")
 
 
+def has_system_battery(power_supply: Path = Path("/sys/class/power_supply")) -> bool:
+    """Linux: a battery that powers the computer. psutil also counts a wireless mouse's or headset's
+    ("hidpp_battery_0"), which the kernel marks with scope "Device"."""
+    def read(path: Path) -> str:
+        try:
+            return path.read_text().strip()
+        except OSError:
+            return ""
+    return any(read(p / "type") == "Battery" and read(p / "scope") != "Device" for p in power_supply.iterdir())
+
+
 def probe(gpu: str | None) -> Hardware:
     """This computer. `gpu` is what the installer found ("nvidia", "amd" or None)."""
     try:
         import psutil
         cores = psutil.cpu_count(logical=False) or 0
         ram = psutil.virtual_memory().total / 2**30
-        laptop = psutil.sensors_battery() is not None
+        laptop = has_system_battery() if Path("/sys/class/power_supply").is_dir() else psutil.sensors_battery() is not None
     except Exception:
         cores, ram, laptop = 0, 8.0, False
     hw = Hardware(gpu, cores=cores or max(1, (os.cpu_count() or 2) // 2), ram_gb=ram, laptop=laptop)
