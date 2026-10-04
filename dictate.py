@@ -1573,8 +1573,13 @@ class Worker(threading.Thread):
         audio = s.audio
         if not typed_live and (not audio.size or float(np.abs(audio).max()) < 1e-4):
             return "", "muted"
-        if s.language is None:
-            s.language = self.transcriber.detect(audio)[0] if s.mode == "auto" else s.mode
+        if s.mode == "auto" and not typed_live:  # nothing typed yet: the whole recording decides
+            first = s.language  # guessed from the first ~2 s of speech, if the live passes got that far
+            s.language, share = self.transcriber.detect(audio)
+            if first and first != s.language:
+                log.info("language: %s after all (%.0f%% sure on the whole recording)", s.language, share * 100)
+        elif s.language is None:
+            s.language = s.mode
         if typed_live:  # only the part after the last typed word is left
             st = s.streamer
             start = st.window_start

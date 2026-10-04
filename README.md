@@ -135,8 +135,9 @@ Set the answers beforehand, for example to install on many computers:
   language: **EN**, **SK** or **AUTO**, and a filled circle while it records. Its menu:
   - **English / Slovenčina / Auto-detect (English / Slovak).** Auto-detect decides per dictation
     and only chooses between those two (plain Whisper might pick Czech or Polish). It waits for
-    about 1.5 s of speech before deciding; Slovak can be mistaken for English below that. For
-    the fastest start, pick the language yourself.
+    about 1.5 s of speech before deciding; Slovak can be mistaken for English below that. With
+    *Type while speaking* off, or before anything has been typed, the whole recording decides
+    again at the end. For the fastest start, pick the language yourself.
   - **Type while speaking.** Words are typed while you talk, about 1–2 s behind your voice; when
     you pause after a sentence, its last word follows within about a second, and the rest lands
     when you let go. Accuracy is the same as waiting for the whole sentence (see

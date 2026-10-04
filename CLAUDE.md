@@ -304,7 +304,9 @@ input, `windows_paste.py`, and `e2e_desktop.py` / `e2e_x11.py`. It is started by
     tap mode, where people pause for long).
   - On the processor with live typing off, no preview passes run (they would delay the final one).
   - Auto-detect waits for 1.5 s of speech; `tests/bench_detect.py` shows Slovak is confidently
-    misread as English below that.
+    misread as English below that. Real Slovak dictation was still read as English at 95-100 %
+    after ~2 s, and whisper then translates. So when nothing was typed live, the final pass
+    detects again on the whole recording (log: `language: sk after all`).
   - No vocabulary hints on windows shorter than 2 s (Whisper echoes them).
   - Earlier, simpler variants were clearly worse (Slovak WER 15.9 %, invented words). Re-run
     `tests/bench_live.py` after any change.
