@@ -87,6 +87,12 @@ def blob_sha(data: bytes) -> str:
     return hashlib.sha1(b"blob %d\0" % len(data) + data).hexdigest()
 
 
+def same_content(data: bytes, want: str) -> bool:
+    """A file is the version's: the same bytes, or only Windows line endings instead (a git checkout
+    with autocrlf; GitHub's ZIP has the repository's own)."""
+    return blob_sha(data) == want or (b"\r\n" in data and blob_sha(data.replace(b"\r\n", b"\n")) == want)
+
+
 def is_program(name: str) -> bool:
     return "/" not in name and any(fnmatch.fnmatch(name, pattern) for pattern in PROGRAM)
 
@@ -104,7 +110,7 @@ def check(app_dir: Path = APP_DIR) -> Check:
                  if entry.get("type") == "blob" and is_program(entry["path"])}
         if "dictate.py" not in files:
             raise ValueError("the newest version has no dictate.py")
-        same = all((app_dir / name).is_file() and blob_sha((app_dir / name).read_bytes()) == want
+        same = all((app_dir / name).is_file() and same_content((app_dir / name).read_bytes(), want)
                    for name, want in files.items())
         return Check("current" if same else "available", sha, date, summary)
     except urllib.error.HTTPError as e:

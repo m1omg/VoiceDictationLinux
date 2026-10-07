@@ -98,7 +98,7 @@ def install(files: dict, where: Path = update.APP_DIR):
         if path.is_file() and update.is_program(path.name):
             path.unlink()
     for name, text in files.items():
-        (where / name).write_text(text, encoding="utf-8")
+        (where / name).write_text(text, encoding="utf-8", newline="")  # (as the ZIP has it: \n on Windows too)
 
 
 def installed(where: Path = update.APP_DIR) -> dict:
@@ -116,6 +116,10 @@ install(NEW, current)
 check("the newest program files: up to date", update.check(current).state, "current")
 (current / "local-extra.py").write_text("# only here\n")
 check("a file GitHub doesn't have changes nothing", update.check(current).state, "current")
+(current / "dictate.py").write_bytes(NEW["dictate.py"].replace("\n", "\r\n").encode())
+check("Windows line endings (a git checkout with autocrlf) count as the same", update.check(current).state, "current")
+(current / "dictate.py").write_bytes(b"print('changed')\r\n")
+check("but other changes don't", update.check(current).state, "available")
 routes["/api/repos/test/dictate/commits/main"] = (403, b"rate limit")
 result = update.check()
 check("GitHub's hourly limit is reported as such", (result.state, result.error), ("error", "limit"))
