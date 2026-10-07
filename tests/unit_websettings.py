@@ -151,6 +151,7 @@ check("a change from the tray shows on the next refresh",
 check("in use: it keeps running", server.idle(), False)
 server.last_seen = time.monotonic() - websettings.IDLE_LIMIT - 1
 check("30 s without the page asking: it ends", server.idle(), True)
+d.RUNTIME_DIR.mkdir(parents=True, exist_ok=True)  # (on Windows and macOS a folder in the program's, made on first use)
 (d.RUNTIME_DIR / "dictate-web.json").write_text(json.dumps({"pid": os.getpid(), "url": server.url}), encoding="utf-8")
 check("a second start finds the page that is open", websettings.running_page(), server.url)
 server.shutdown()
