@@ -373,6 +373,9 @@ input, `windows_paste.py`, and `e2e_desktop.py` / `e2e_x11.py`. It is started by
   installer has to replace their files. The venv itself isn't rolled back. GitHub's API allows
   60 checks an hour per address. CI updates the Windows and macOS installs to the version under
   test (`update.py --run $GITHUB_SHA`); `tests/unit_update.py` stands in for GitHub on 127.0.0.1.
+  The Linux/systemd path was tested live on the CachyOS PC (2026-10-07): the tray's clicks sent
+  over D-Bus (dbusmenu `Event` 34, then 35) ran the update in `dictate-update.service`, which
+  outlived the service's restart; new version ready 11 s after the click.
 - **Interface language** (`i18n.py`): English is the source; `t("Sounds")` looks it up in `SK` while
   `state.json` "ui_language" is "sk". Values go in through placeholders (`t("Hold {key} to dictate",
   key=…)`, positional-only, so a placeholder may be called `text`), never f-strings: the table
