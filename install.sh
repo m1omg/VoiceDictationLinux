@@ -4,6 +4,7 @@
 #
 #   bash install.sh                 install or update, set up start-at-login, start it
 #   DICTATE_NO_AUTOSTART=1 bash install.sh    the same, without start-at-login (e.g. for testing)
+# Otherwise start-at-login stays as it was last switched in the menu (Start at login); on at first.
 #
 # It asks a few questions (language, speech model, key, large text), each with a suggestion for this
 # computer that Enter accepts. Without a terminal it takes the suggestions; these answer them too:
@@ -147,6 +148,8 @@ say "Language, speech model and key (Enter takes the suggestion)"
 "$UV" cache clean >/dev/null 2>&1 || true
 APP_ID=$(sed -n 's/^app_id *= *"\([^"]*\)".*/\1/p' "$CONF/config.toml" | head -n 1)
 APP_ID=${APP_ID:-io.github.m1omg.VoiceDictationLinux}
+if [[ "${DICTATE_NO_AUTOSTART:-}" == 1 ]]; then LOGIN=off; else LOGIN=saved; fi
+start_at_login() { "$D/venv/bin/python" "$D/dictate.py" --start-at-login=$LOGIN || true; }
 
 if [[ $OS == Darwin ]]; then
   say "Dictate.app (in ~/Applications; macOS asks for permissions in its name)"
@@ -178,28 +181,9 @@ if [[ $OS == Darwin ]]; then
   else
     echo "    keeping $APP"
   fi
-  AGENT="$HOME/Library/LaunchAgents/$APP_ID.plist"
-  started=0
-  if [[ "${DICTATE_NO_AUTOSTART:-}" == 1 ]]; then
-    say "Skipping start-at-login (DICTATE_NO_AUTOSTART=1)"
-  else
-    say "Start at login: LaunchAgent"
-    mkdir -p "$HOME/Library/LaunchAgents"
-    cat > "$AGENT" <<EOF
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-  <key>Label</key><string>$APP_ID</string>
-  <key>ProgramArguments</key><array><string>/usr/bin/open</string><string>-g</string><string>-a</string><string>$APP</string></array>
-  <key>RunAtLoad</key><true/>
-</dict>
-</plist>
-EOF
-    launchctl bootout "gui/$(id -u)/$APP_ID" 2>/dev/null || true
-    launchctl bootstrap "gui/$(id -u)" "$AGENT" 2>/dev/null && started=1 || true  # RunAtLoad opens the app
-  fi
-  [[ $started == 1 ]] || open -g -a "$APP"
+  say "Start at login: LaunchAgent (it opens Dictate.app)"
+  start_at_login
+  open -g -a "$APP"
 else
   if [[ $MODE == systemd ]]; then
     START="systemctl --user restart dictate.service"
@@ -234,28 +218,20 @@ Terminal=false
 Categories=Utility;Accessibility;Settings;
 EOF
 
-  if [[ "${DICTATE_NO_AUTOSTART:-}" == 1 ]]; then
-    say "Skipping start-at-login (DICTATE_NO_AUTOSTART=1)"
-  elif [[ $MODE == systemd ]]; then
+  if [[ $MODE == systemd ]]; then
     say "Start at login: systemd user service"
     mkdir -p "$HOME/.config/systemd/user"
     install -m 644 "$SRC/packaging/dictate.service" "$HOME/.config/systemd/user/dictate.service"
     systemctl --user daemon-reload
-    systemctl --user enable dictate.service
-    systemctl --user restart dictate.service
   else
     say "Start at login: autostart entry (this desktop doesn't use a systemd graphical session)"
-    mkdir -p "$HOME/.config/autostart"
-    cat > "$HOME/.config/autostart/dictate.desktop" <<EOF
-[Desktop Entry]
-Type=Application
-Name=Dictate
-Comment=Push-to-talk dictation
-Exec=$START
-Icon=audio-input-microphone
-NoDisplay=true
-X-GNOME-Autostart-enabled=true
-EOF
+  fi
+  start_at_login  # enables or disables the service, or writes or removes the autostart entry
+  if [[ "${DICTATE_NO_AUTOSTART:-}" == 1 ]]; then
+    :  # testing: not started either
+  elif [[ $MODE == systemd ]]; then
+    systemctl --user restart dictate.service
+  else
     pkill -f "$D/dictate.py" 2>/dev/null || true  # restart a copy started by an earlier install
     sleep 1
     setsid sh -c "exec \"$D/venv/bin/python\" \"$D/dictate.py\" >> \"$D/dictate.log\" 2>&1" < /dev/null &

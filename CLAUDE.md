@@ -110,7 +110,9 @@ powershell -NoProfile -ExecutionPolicy Bypass -File install.ps1
 ```
 - It's safe to re-run: it keeps the settings file, the choices (`DICTATE_KEEP=keep` skips the
   "keep your choices?" question) and the models.
-- `DICTATE_NO_AUTOSTART=1` skips start-at-login while testing.
+- `DICTATE_NO_AUTOSTART=1` skips start-at-login while testing. Otherwise the installers run
+  `dictate.py --start-at-login=saved`: on, unless the menu's *Start at login* was switched off
+  (`state.json` "autostart").
 - It ends by starting dictation and printing `--check`.
 
 ## 4. Verify without the user
@@ -122,7 +124,7 @@ python3 tests/fetch_fleurs.py
 $D/venv/bin/python tests/bench_asr.py           # GPU targets: en ~4 % WER, sk ~6-7 %, ~0.35-0.5 s per sentence
 $D/venv/bin/python tests/bench_live.py          # GPU targets: live WER ≈ one-shot; first words ~2 s (en)
 for t in unit_keys unit_models unit_audio unit_portability unit_windows unit_macos unit_topbar unit_setup unit_paster unit_switch \
-         unit_capture
+         unit_capture unit_login
 do $D/venv/bin/python tests/$t.py; done
 dbus-run-session -- $D/venv/bin/python tests/unit_tray.py
 XVFB=… $D/venv/bin/python tests/x11_paste.py   # X11 desktops: key grab, combinations, repeats, paste, clipboard
@@ -313,6 +315,13 @@ input, `windows_paste.py`, and `e2e_desktop.py` / `e2e_x11.py`. It is started by
   - A tap (shorter than `Controller.TAP`) latches the dictation only while the menu's *Tap to start
     and stop* is on (`state.json` "tap", config `tap_to_toggle`); off, a short press is just a
     short hold.
+  - Start at login (menu, settings window, installers): `login_item()` picks the systemd unit's
+    enable link (when `~/.config/systemd/user/dictate.service` exists), the XDG autostart entry,
+    the LaunchAgent, or the Startup-folder shortcut (a copy of the Start menu's `Dictate.lnk`);
+    `starts_at_login()` reads the system every time (also the desktop's `Hidden=` /
+    `X-GNOME-Autostart-enabled=false` and Windows' StartupApproved switch), so it can't drift
+    from what the system does. Switching never stops or starts the running copy
+    (`tests/unit_login.py`).
   - Instant typing (`state.json` "instant", config `instant_typing`; needs a keyboard with
     `backspace()`, i.e. uinput or XTEST, so not yet Windows/macOS): every live pass renders the
     whole text (committed + pending words, `render_words`) and `Worker._show` deletes only the end

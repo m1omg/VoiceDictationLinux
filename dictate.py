@@ -182,7 +182,7 @@ class UiState:
     def __init__(self, cfg):
         self._defaults = {"language": cfg.language if cfg.language in LANGUAGES else "en",
                           "live": cfg.live_typing, "instant": cfg.instant_typing, "tap": cfg.tap_to_toggle,
-                          "sounds": cfg.sounds,
+                          "sounds": cfg.sounds, "autostart": True,  # (what the system does is the truth)
                           "device": cfg.device if cfg.device in DEVICES else "auto",
                           "gpu_model": cfg.model, "cpu_model": cfg.fallback_model,
                           "trigger": cfg.trigger if valid_trigger(cfg.trigger) else DEFAULTS["trigger"],
@@ -2039,6 +2039,94 @@ def open_text_file(path: Path) -> None:
         log.warning("cannot open %s: %s", path, e)
 
 
+LOGIN_KINDS = {"systemd": "systemd user service", "autostart": "autostart entry", "launchagent": "LaunchAgent",
+               "startup": "shortcut in the Startup folder"}
+
+
+def login_item(app_id: str) -> tuple[str, Path]:
+    """How dictation starts at login here (a key of LOGIN_KINDS), and the file that makes it start."""
+    if WINDOWS:
+        from windows import known_folder
+        return "startup", known_folder("Startup") / "Dictate.lnk"
+    if MACOS:
+        return "launchagent", Path.home() / f"Library/LaunchAgents/{app_id}.plist"
+    config = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config")
+    if (config / "systemd/user/dictate.service").exists():  # installed where the session runs on systemd
+        return "systemd", config / "systemd/user/graphical-session.target.wants/dictate.service"  # = enabled
+    return "autostart", config / "autostart/dictate.desktop"
+
+
+def starts_at_login(app_id: str) -> bool:
+    """Whether dictation starts at the next login. Read from the system every time, so a switch made
+    elsewhere (the desktop's startup settings, systemctl) shows too."""
+    try:
+        kind, path = login_item(app_id)
+        if not path.exists():
+            return False
+        if kind == "autostart":  # the desktop's own startup settings switch an entry off like this
+            text = path.read_text(encoding="utf-8", errors="replace")
+            return not re.search(r"^\s*(Hidden\s*=\s*true|X-GNOME-Autostart-enabled\s*=\s*false)\s*$", text, re.M | re.I)
+        if kind == "startup":
+            from windows import startup_disabled
+            return not startup_disabled(path.name)
+        return True
+    except OSError as e:
+        log.debug("start at login: %s", e)
+        return False
+
+
+def set_start_at_login(on: bool, app_id: str) -> None:
+    """Switch starting at login on or off; the program keeps running. Raises OSError, with a message
+    for the user, when it can't."""
+    kind, path = login_item(app_id)
+    if kind == "systemd":
+        try:
+            done = subprocess.run(["systemctl", "--user", "enable" if on else "disable", "dictate.service"],
+                                  capture_output=True, text=True, timeout=30)
+        except subprocess.TimeoutExpired:
+            raise OSError("systemctl did not answer") from None
+        if done.returncode != 0:
+            raise OSError(done.stderr.strip() or f"systemctl failed ({done.returncode})")
+        return
+    if not on:
+        path.unlink(missing_ok=True)
+        return
+    if kind == "startup":  # the same shortcut as the Start menu's (made by install.ps1)
+        from windows import allow_startup, known_folder
+        source = known_folder("Programs") / "Dictate.lnk"
+        if not source.exists():
+            raise OSError(f"{source} is missing; run the installer again")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(source, path)
+        allow_startup(path.name)
+        return
+    if kind == "launchagent":  # opens Dictate.app, which macOS gave the permissions to
+        import plistlib
+        app = Path.home() / "Applications/Dictate.app"
+        data = plistlib.dumps({"Label": app_id, "ProgramArguments": ["/usr/bin/open", "-g", "-a", str(app)],
+                               "RunAtLoad": True})
+    else:
+        start = f"sh -c 'exec \"{APP_DIR}/venv/bin/python\" \"{APP_DIR}/dictate.py\" >> \"{LOG_PATH}\" 2>&1'"
+        data = ("[Desktop Entry]\nType=Application\nName=Dictate\nComment=Push-to-talk dictation\n"
+                f"Exec={start}\nIcon=audio-input-microphone\nNoDisplay=true\nX-GNOME-Autostart-enabled=true\n").encode()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f".{path.name}.tmp")
+    tmp.write_bytes(data)
+    tmp.replace(path)
+
+
+def run_start_at_login(cfg, on: bool) -> int:
+    """--start-at-login (the installers): set it up as last chosen in the menu, or off."""
+    try:
+        kind, _path = login_item(cfg.app_id)
+        set_start_at_login(on, cfg.app_id)
+    except OSError as e:
+        print(f"    could not set up start-at-login: {e}")
+        return 1
+    print(f"    {'on' if on else 'off'} ({LOGIN_KINDS[kind]})" + ("" if on else "; the menu's Start at login switches it on"))
+    return 0
+
+
 HERE = Path(__file__).resolve().parent
 NO_WINDOW = 0x08000000 if WINDOWS else 0  # CREATE_NO_WINDOW: child processes without a console window
 
@@ -2152,7 +2240,7 @@ class Quiet:
 
 class TopBar:
     """The top-bar (tray) icon: shows ready / recording / working / problem plus the language; its
-    menu switches language, model, device, live typing, sounds and large text. It also feeds the
+    menu switches language, model, device, live typing, sounds, large text and start at login. It also feeds the
     big status panel and STATUS_PATH (read by the big settings window)."""
     ICONS = {"ready": "audio-input-microphone-symbolic", "recording": "media-record-symbolic",
              "working": "content-loading-symbolic", "problem": "microphone-disabled-symbolic"}
@@ -2267,6 +2355,7 @@ class TopBar:
                     *([] if MACOS else  # the menu bar item always opens its menu there
                       [M(421, "Clicking the icon opens the big settings window", "check", ui.big_settings)]),
                     M(422, "Text size and colours…")]),
+                M(24, "Start at login", "check", starts_at_login(APP_ID)),
                 M(5, kind="separator"),
                 M(32, "Settings window…"),
                 M(30, "Open settings file"),
@@ -2295,6 +2384,8 @@ class TopBar:
             self.ui.set(tap=not self.ui.tap)
         elif item_id == 23:
             self.ui.set(instant=not self.ui.instant)
+        elif item_id == 24:
+            self.toggle_start_at_login()
         elif item_id in self.MODEL_IDS.values():
             name = next(n for n, i in self.MODEL_IDS.items() if i == item_id)
             self.ui.set(**{self.model_key(): name})
@@ -2313,6 +2404,16 @@ class TopBar:
                 subprocess.Popen(["systemctl", "--user", "stop", "dictate.service"])
             else:  # started directly (an autostart entry, Windows, macOS)
                 self.on_quit()
+
+    def toggle_start_at_login(self) -> None:
+        on = not starts_at_login(APP_ID)
+        try:
+            set_start_at_login(on, APP_ID)
+        except OSError as e:
+            log.warning("start at login: %s", e)
+            notify("Could not change starting at login", str(e))
+            return
+        self.ui.set(autostart=on)  # (the installers keep this choice; it also refreshes the menu)
 
     def push(self) -> None:
         with self.lock:
@@ -3049,6 +3150,8 @@ def main() -> int:
     mode.add_argument("--setup", action="store_true", help="choose language and model, download it (installers)")
     mode.add_argument("--download", nargs="+", metavar="MODEL", help=f"download models: {', '.join(models.MODELS)}")
     mode.add_argument("--check-model", action="store_true", help="load the chosen model and time one pass")
+    mode.add_argument("--start-at-login", choices=("saved", "off"),
+                      help="installers: start at login as last chosen in the menu (on at first), or not")
     parser.add_argument("--gpu", choices=("auto", "nvidia", "amd", "none"), default="auto",
                         help="the GPU the installer found, for --setup")
     parser.add_argument("--language", choices=sorted(LANGUAGES), default="en", help="language for --selftest")
@@ -3084,6 +3187,8 @@ def main() -> int:
         return run_download(args.download)
     if args.check_model:
         return run_check_model(cfg)
+    if args.start_at_login:
+        return run_start_at_login(cfg, args.start_at_login == "saved" and UiState(cfg).autostart)
     return run_daemon(cfg)
 
 

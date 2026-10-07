@@ -83,7 +83,8 @@ bash install.sh
 - Everything goes into `~/.local/share/dictate`: a private Python 3.14 (so distro upgrades can't
   break it), the Python packages and the models. Settings go to `~/.config/dictate/config.toml`.
 - It adds **Dictate** and **Dictate Settings** to your app menu and starts dictation at every login
-  (a systemd user service on GNOME and KDE, an autostart entry on other desktops).
+  (a systemd user service on GNOME and KDE, an autostart entry on other desktops; the menu's
+  *Start at login* switches that off).
 - **Wayland, first start only:** your desktop asks you to approve the keyboard shortcut. Click
   *Add* (or *Allow*); the approval is permanent.
 - **Update:** `git pull && bash install.sh`.
@@ -96,7 +97,7 @@ bash install.sh
 - Everything goes into `%LOCALAPPDATA%\dictate`: a private Python, the packages, the models,
   settings (`config.toml`) and the log. Nothing is installed system-wide.
 - It adds **Dictate** and **Dictate Settings** to the Start menu and a shortcut to the Startup
-  folder, so dictation starts at every login.
+  folder, so dictation starts at every login (the menu's *Start at login* switches that off).
 - The microphone icon appears in the taskbar's notification area. Windows may tuck it under the
   **^** arrow; drag it next to the clock to keep it in sight.
 - **Update:** download the ZIP again and run `install.cmd` again.
@@ -113,7 +114,8 @@ bash install.sh
    older: System Preferences → Security & Privacy → Privacy). Allow all three; dictation works as
    soon as they are on.
 - Everything goes into `~/Library/Application Support/dictate`, plus the small **Dictate** app in
-  `~/Applications` (the permissions are given to it) and a login item that starts it.
+  `~/Applications` (the permissions are given to it) and a login item that starts it (the menu's
+  *Start at login* switches that off).
 - The microphone icon appears in the menu bar.
 - **Update:** download the ZIP again and run `bash install.sh` again. The permissions stay.
 
@@ -121,7 +123,8 @@ bash install.sh
 Set the answers beforehand, for example to install on many computers:
 `DICTATE_LANGUAGE=en|sk|auto`, `DICTATE_MODEL=tiny|base|small|medium|large-v3-turbo`,
 `DICTATE_KEY=KP_Delete|Control_R|Alt_R|"Ctrl+Alt+D"|…`, `DICTATE_LARGE_UI=off|panel|both`;
-`DICTATE_NO_AUTOSTART=1` skips start-at-login. On Linux and macOS:
+`DICTATE_NO_AUTOSTART=1` skips start-at-login (otherwise it stays as the menu's *Start at login*
+last left it). On Linux and macOS:
 `DICTATE_MODEL=small bash install.sh`; on Windows, in PowerShell:
 `$env:DICTATE_MODEL = "small"; .\install.cmd`.
 
@@ -160,6 +163,12 @@ Set the answers beforehand, for example to install on many computers:
     can run the model.
   - **Large text:** the big status panel, and whether clicking the icon opens the big settings
     window; see [Large text](#large-text-for-low-vision).
+  - **Start at login:** whether dictation starts when you log in. Switching it doesn't stop or
+    start the copy that is running, and updates keep your choice. It reads the system's own
+    setting, so a switch made in the desktop's startup settings, Windows' *Settings → Apps →
+    Startup* or `systemctl --user disable dictate` shows here too. (On macOS 13 and newer, the
+    *Allow in the Background* switch in System Settings → General → Login Items is a separate
+    one: if you turned Dictate off there, turn it on there again.)
   - **Settings window…:** every choice above, plus the dictation key, in large print.
   - **Open settings file** ([Settings](#settings)).
   - **Stop dictation.** Frees the memory the model uses. Start it again with **Dictate** from your

@@ -511,6 +511,17 @@ class Settings:
         self.state_mtime = self._mtime()
         self.build()
 
+    def toggle_login(self) -> None:
+        on = not self.d.starts_at_login(self.cfg.app_id)
+        try:
+            self.d.set_start_at_login(on, self.cfg.app_id)
+        except OSError as e:
+            self.message = f"Could not change starting at login: {e}"
+            self.build()
+            return
+        self.message = ""
+        self.set(autostart=on)  # (the installers keep this choice)
+
     def _watch(self):
         """Show what changed elsewhere: a choice made in the tray menu, what dictation is doing, a
         finished download."""
@@ -592,6 +603,9 @@ class Settings:
         for scheme, name in SCHEME_LABELS.items():
             rows.append(("button", f"colours:{scheme}", name, f"radio:{on(ui.ui_colors == scheme)}", True,
                          lambda c=scheme: self.set(ui_colors=c), scheme))
+        rows.append(("heading", "Starting"))
+        rows.append(("button", "login", "Start dictation at login", f"check:{on(self.d.starts_at_login(self.cfg.app_id))}",
+                     True, self.toggle_login))
         rows.append(("heading", ""))
         rows.append(("button", "open", "Open the settings file", "", True, lambda: self.d.open_text_file(self.d.CONFIG_PATH)))
         if status:

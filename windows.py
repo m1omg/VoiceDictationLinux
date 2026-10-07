@@ -177,6 +177,53 @@ def screen_locked() -> bool:
         u.CloseDesktop(desk)
 
 
+class GUID(ctypes.Structure):
+    _fields_ = [("Data1", DWORD), ("Data2", WORD), ("Data3", WORD), ("Data4", ctypes.c_ubyte * 8)]
+
+
+FOLDER_IDS = {"Programs": "a77f5d77-2e2b-44c3-a6a2-aba601054a51", "Startup": "b97d20bb-f46a-4c97-ba10-5e3608430854"}
+# Where Settings > Apps > Startup and Task Manager record a Startup-folder shortcut they switched off.
+STARTUP_APPROVED = r"Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\StartupFolder"
+
+
+def known_folder(name: str) -> Path:
+    """The Start menu's "Programs" or "Startup" folder (a policy can move them, so ask the shell)."""
+    import uuid
+    shell32, ole32 = ctypes.WinDLL("shell32"), ctypes.WinDLL("ole32")
+    shell32.SHGetKnownFolderPath.restype = LONG
+    shell32.SHGetKnownFolderPath.argtypes = [ctypes.POINTER(GUID), DWORD, HANDLE, ctypes.POINTER(ctypes.c_wchar_p)]
+    ole32.CoTaskMemFree.restype, ole32.CoTaskMemFree.argtypes = None, [ctypes.c_void_p]
+    guid = GUID.from_buffer_copy(uuid.UUID(FOLDER_IDS[name]).bytes_le)
+    path = ctypes.c_wchar_p()
+    result = shell32.SHGetKnownFolderPath(ctypes.byref(guid), 0, None, ctypes.byref(path))
+    try:
+        if result != 0:
+            raise OSError(f"Windows didn't say where the {name} folder is (error {result & 0xFFFFFFFF:#x})")
+        return Path(path.value)
+    finally:
+        ole32.CoTaskMemFree(ctypes.cast(path, ctypes.c_void_p))
+
+
+def startup_disabled(name: str) -> bool:
+    """Whether the Startup apps settings or Task Manager switched off the Startup-folder shortcut name
+    (the first byte of its value is odd then; no value means it runs)."""
+    import winreg
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, STARTUP_APPROVED) as key:
+            data, _kind = winreg.QueryValueEx(key, name)
+    except OSError:
+        return False
+    return isinstance(data, bytes) and bool(data) and data[0] & 1 == 1
+
+
+def allow_startup(name: str) -> None:
+    """Undo that switch, so the shortcut runs at the next login."""
+    import winreg
+    if startup_disabled(name):
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, STARTUP_APPROVED, 0, winreg.KEY_SET_VALUE) as key:
+            winreg.DeleteValue(key, name)
+
+
 def _add_dll_dirs(dirs) -> None:
     """For DLLs loaded by path (os.add_dll_directory) and for plain LoadLibrary calls (PATH)."""
     for d in dirs:

@@ -183,14 +183,10 @@ function New-Shortcut([string]$Path, [string]$Arguments, [string]$Description) {
 $Programs = [Environment]::GetFolderPath("Programs")
 New-Shortcut "$Programs\Dictate.lnk" "-X utf8 `"$D\dictate.py`"" "Start push-to-talk dictation"
 New-Shortcut "$Programs\Dictate Settings.lnk" "-X utf8 `"$D\bigui.py`" settings" "Dictation settings in large text"
-$Startup = [Environment]::GetFolderPath("Startup")
-if ($env:DICTATE_NO_AUTOSTART -eq "1") {
-    Say "Skipping start-at-login (DICTATE_NO_AUTOSTART=1)"
-    Remove-Item -Force "$Startup\Dictate.lnk" -ErrorAction SilentlyContinue
-} else {
-    Say "Start at login: a shortcut in the Startup folder"
-    New-Shortcut "$Startup\Dictate.lnk" "-X utf8 `"$D\dictate.py`"" "Push-to-talk dictation"
-}
+# A copy of the Start menu's Dictate shortcut in the Startup folder, as last switched in the menu (on at first)
+Say "Start at login: a shortcut in the Startup folder"
+$Login = if ($env:DICTATE_NO_AUTOSTART -eq "1") { "off" } else { "saved" }
+& $Py -X utf8 "$D\dictate.py" "--start-at-login=$Login"
 
 Say "Starting dictation"
 Start-Process -FilePath $Pyw -ArgumentList @("-X", "utf8", "`"$D\dictate.py`"") -WorkingDirectory $D
