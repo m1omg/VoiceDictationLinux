@@ -26,7 +26,6 @@ sys.path.insert(0, str(ROOT))
 TMP = Path(tempfile.mkdtemp(prefix="dictate-test-"))
 os.environ.update(XDG_STATE_HOME=str(TMP / "state"), XDG_CONFIG_HOME=str(TMP / "config"), XDG_RUNTIME_DIR=str(TMP / "run"),
                   LOCALAPPDATA=str(TMP), HOME=str(TMP), USERPROFILE=str(TMP))
-(TMP / "run").mkdir()
 
 checks = []
 
@@ -64,6 +63,7 @@ import dictate as d  # noqa: E402
 import update  # noqa: E402
 
 REAL = {name: getattr(update, name) for name in ("run_installer", "wait_ready", "restart_dictation")}
+update.RUNTIME_DIR.mkdir(parents=True, exist_ok=True)  # (Windows and macOS keep it in the program's folder)
 check("the same folders as dictate's", (update.APP_DIR, update.STATE_PATH, update.RUNTIME_DIR, update.STATUS_PATH),
       (d.APP_DIR, d.STATE_PATH, d.RUNTIME_DIR, d.STATUS_PATH))
 check("git's name for a file's content", update.blob_sha(b"hello\n"), "ce013625030ba8dba906f756967f9e9ca394464a")
