@@ -66,6 +66,38 @@ ps1_pairs = [(decode(en), decode(sk)) for en, sk in
 for en, _sk in sh_pairs + ps1_pairs:
     used.setdefault(en, "(installer)")
 check("no t() call with an f-string or expression", bad, [])
+
+
+def local_names(fn):
+    """Names bound in a function's own scope (a local t would hide t() in the whole function)."""
+    names = {a.arg for a in fn.args.args + fn.args.kwonlyargs + fn.args.posonlyargs}
+    stack = list(fn.body)
+    while stack:
+        node = stack.pop()
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            names.add(node.name)
+            continue
+        if isinstance(node, (ast.Lambda, ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)):
+            continue
+        if isinstance(node, ast.Name) and isinstance(node.ctx, (ast.Store, ast.Del)):
+            names.add(node.id)
+        elif isinstance(node, ast.ExceptHandler) and node.name:
+            names.add(node.name)
+        elif isinstance(node, (ast.Import, ast.ImportFrom)):
+            names.update((a.asname or a.name).split(".")[0] for a in node.names)
+        stack.extend(ast.iter_child_nodes(node))
+    return names
+
+
+hidden = []
+for name in SOURCES:
+    for fn in ast.walk(ast.parse((ROOT / name).read_text(encoding="utf-8"))):
+        if isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)) and "t" in local_names(fn):
+            calls = [n for n in ast.walk(fn) if isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id == "t"]
+            if calls:
+                hidden.append(f"{name}:{fn.lineno} {fn.name}()")
+# (A timestamp called t in Controller.handle() made t("Waiting for the keyboard shortcut…") raise there.)
+check("no function calls t() while a local t hides it", hidden, [])
 missing = [f"{where}: {text!r}" for text, where in used.items() if text not in i18n.SK]
 check("every text has a Slovak translation", missing, [])
 mismatched = [text for text in used if text in i18n.SK and fields(text) != fields(i18n.SK[text])]

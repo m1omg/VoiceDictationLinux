@@ -2627,33 +2627,33 @@ class Controller:
 
     def handle(self, kind: str, value):
         if kind == "press":
-            t = value
+            now = value
             if self.state == "IDLE":
-                self._start(t)
+                self._start(now)
             elif self.state == "LATCHED":  # the press after a tap stops the dictation
-                self.state, self.t_release, self.last, self.stopping = "TAIL", t, t, True
+                self.state, self.t_release, self.last, self.stopping = "TAIL", now, now, True
                 self.cues.play("stop")
             elif self.state == "TAIL":
                 if self.stopping:  # that press is still down (repeating)
-                    self.last = t
-                elif t - self.t_release < 0.12:  # key bounce: keep the same recording
-                    self.state, self.last = "HOLD", t
+                    self.last = now
+                elif now - self.t_release < 0.12:  # key bounce: keep the same recording
+                    self.state, self.last = "HOLD", now
                     self.session.key_up_at = 0.0
                 else:
                     self._finish()
-                    self._start(t)
+                    self._start(now)
             elif self.state == "HOLD":
                 limit = self.gap if self.reps else self.delay + 0.25
-                if self.repeat_on and t - self.last > limit and self.last_injection < self.t_press:
+                if self.repeat_on and now - self.last > limit and self.last_injection < self.t_press:
                     log.info("key release was not reported; stopping")  # this is a new press
                     self._finish()
                     self.state = "WAIT_RELEASE"
                 else:
                     self.reps += 1
                     self.repeats_seen = True
-                self.last = t
+                self.last = now
             elif self.state == "WAIT_RELEASE":
-                self.last = t
+                self.last = now
         elif kind == "release":
             if self.state == "HOLD" and self.session is not None:
                 self.session.key_up_at = value

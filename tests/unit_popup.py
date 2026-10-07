@@ -146,24 +146,39 @@ class Recorder:
         pass
 
 
-rec, pasted = Recorder(), []
+class Clock:  # dictate's time module, with a monotonic clock the stand-in transcription moves on
+    def __init__(self):
+        self.now = 1000.0
+
+    def monotonic(self):
+        return self.now
+
+    def __getattr__(self, name):
+        return getattr(time, name)
+
+
+rec, pasted, clock = Recorder(), [], Clock()
 worker = d.Worker(d.load_config(), None, types.SimpleNamespace(put=pasted.append), d.Cues(lambda: False, 0.5), rec)
 
 
-def slow_text(s, typed_live):
-    time.sleep(0.3)
+def slow_text(s, typed_live):  # takes 0.3 s on the clock
+    clock.now += 0.3
     return "Hello there.", None
 
 
 worker._final_text = slow_text
 cfg = d.load_config()
-for n in (1, 2):
-    s = d.Session(n, None, "en", False, d.sleep_offset(), language="en", text=d.LiveText(cfg))
-    s.audio = np.zeros(d.RATE * 4, dtype=np.float32)
-    worker._final(s)
+real_time, d.time = d.time, clock
+try:
+    for n in (1, 2):
+        s = d.Session(n, None, "en", False, d.sleep_offset(), language="en", text=d.LiveText(cfg))
+        s.audio = np.zeros(d.RATE * 4, dtype=np.float32)
+        worker._final(s)
+finally:
+    d.time = real_time
 first, second = [u["working"] for u in rec.updates if u.get("working")]
 check("the first dictation after a model load has no estimate yet", first["expected"], None)
-check("the next one is estimated from it (0.3 s for 4 s of audio)", round(second["expected"], 1), 0.3)
+check("the next one is estimated from it (0.3 s for 4 s of audio)", round(second["expected"], 6), 0.3)
 check("the count ends with each dictation", rec.updates[-1], {"working": None})
 check("the text still goes out", [item.text for item in pasted], ["Hello there.", "Hello there."])
 worker.transcriber = types.SimpleNamespace(load=lambda *a: None, desc="stand-in")  # (loads nothing)

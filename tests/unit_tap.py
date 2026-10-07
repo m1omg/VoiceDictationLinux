@@ -97,6 +97,29 @@ for tap in (True, False):
     c.tick(22.4 + c.cfg.tail_ms / 1000 + 0.05)
     check(f"tap on={tap}: a hold records until release", (c.state, worker.ended), ("IDLE", [1]))
 
+# The desktop's other news about the key: lost (GNOME's portal restarted), back, not approved, fatal.
+class Bar(Quiet):
+    def __init__(self):
+        self.updates = []
+
+    def update(self, **changes):
+        self.updates.append(changes)
+
+
+notes = []
+d.notify = lambda summary, body="": notes.append(summary)
+bar, worker = Bar(), Worker()
+c = d.Controller(d.load_config(), d.UiState(d.load_config()), Quiet(), worker, bar)
+c.handle("press", 30.0)
+check("the key is lost mid-dictation: the dictation ends", (c.handle("key_lost", None), c.state, worker.ended),
+      (None, "IDLE", [1]))
+check("and the icon says it waits for the shortcut", bar.updates[-1], {"key_problem": "Waiting for the keyboard shortcut…"})
+c.handle("key_ready", "Press KP_Delete")
+check("the key is back", bar.updates[-1], {"key_problem": None, "key": "Press KP_Delete"})
+check("not approved: it stops for good (exit 3), with a notification", (c.handle("not_approved", None), notes[-1]),
+      (3, "Dictation shortcut was not approved"))
+check("a fatal problem: it stops (exit 1), saying why", (c.handle("fatal", "no portal"), notes[-1]), (1, "Dictation stopped"))
+
 failed = [c for c in checks if not c[1]]
 for name, ok, got, want in checks:
     print(f"{'ok  ' if ok else 'FAIL'} {name}" + ("" if ok else f": got {got!r}, want {want!r}"))
