@@ -128,7 +128,7 @@ python3 tests/fetch_fleurs.py
 $D/venv/bin/python tests/bench_asr.py           # GPU targets: en ~4 % WER, sk ~6-7 %, ~0.35-0.5 s per sentence
 $D/venv/bin/python tests/bench_live.py          # GPU targets: live WER ≈ one-shot; first words ~2 s (en)
 for t in unit_keys unit_models unit_audio unit_portability unit_windows unit_macos unit_topbar unit_setup unit_paster unit_switch \
-         unit_capture unit_login unit_i18n unit_popup unit_websettings
+         unit_capture unit_login unit_i18n unit_popup unit_websettings unit_update
 do $D/venv/bin/python tests/$t.py; done
 dbus-run-session -- $D/venv/bin/python tests/unit_tray.py
 XVFB=… $D/venv/bin/python tests/x11_paste.py   # X11 desktops: key grab, combinations, repeats, paste, clipboard
@@ -354,6 +354,25 @@ input, `windows_paste.py`, and `e2e_desktop.py` / `e2e_x11.py`. It is started by
   - No vocabulary hints on windows shorter than 2 s (Whisper echoes them).
   - Earlier, simpler variants were clearly worse (Slovak WER 15.9 %, invented words). Re-run
     `tests/bench_live.py` after any change.
+- **Updates** (`update.py`, standard library only): *Check for updates* asks GitHub's API for main's
+  newest commit and the git blob SHA-1 of its root files, and compares them with the installed
+  program files (`PROGRAM`: what the installers copy), so it works however the program was
+  installed (git, ZIP, an earlier update); files that differ count as older. *Install the update*
+  runs `update.py --run SHA DATE` as a process of its own: from inside the systemd service
+  (`/proc/self/cgroup`) through `systemd-run --user --unit=dictate-update`, since the installer's
+  `systemctl --user restart` ends every process in the service; elsewhere detached (its name
+  isn't matched by the installers' `pkill -f …dictate.py` or install.ps1's stop filter). It
+  downloads `codeload.github.com/…/zip/SHA`, refuses paths outside its folder, backs up the
+  program files (and the unit) to `previous/`, and runs that version's installer with
+  `DICTATE_KEEP=keep` and the saved interface language, without a terminal. Success = a dictation
+  with another pid reports a loaded model in `dictate-status.json` and is still there 5 s later
+  (`READY_LIMIT` 300 s); otherwise the previous files come back (files the update added go) and
+  dictation is restarted the installer's way. The outcome goes to `update-result.json`, which
+  the running dictation's `StateWatcher` picks up and announces (the new version starts before
+  the update knows it worked). It mustn't import the program's packages: on Windows the
+  installer has to replace their files. The venv itself isn't rolled back. GitHub's API allows
+  60 checks an hour per address. CI updates the Windows and macOS installs to the version under
+  test (`update.py --run $GITHUB_SHA`); `tests/unit_update.py` stands in for GitHub on 127.0.0.1.
 - **Interface language** (`i18n.py`): English is the source; `t("Sounds")` looks it up in `SK` while
   `state.json` "ui_language" is "sk". Values go in through placeholders (`t("Hold {key} to dictate",
   key=…)`, positional-only, so a placeholder may be called `text`), never f-strings: the table

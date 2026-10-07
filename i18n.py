@@ -205,6 +205,36 @@ SK: dict[str, str] = {
         "Táto stránka skončila. Nastavenia znova otvoríte z ponuky Dictate.",
     "The browser keeps this tab open: close it with Ctrl+W (Cmd+W on a Mac).":
         "Prehliadač túto kartu nechá otvorenú: zavrite ju pomocou Ctrl+W (na Macu Cmd+W).",
+    # --- updates ---
+    "Check for updates": "Skontrolovať aktualizácie",
+    "Checking for updates…": "Hľadajú sa aktualizácie…",
+    "Install the update from {date}…": "Nainštalovať aktualizáciu z {date}…",
+    "Install the update from {date}": "Nainštalovať aktualizáciu z {date}",
+    "Updates": "Aktualizácie",
+    "Dictation is up to date": "Diktovanie je aktuálne",
+    "This is the newest version (from {date}).": "Toto je najnovšia verzia (z {date}).",
+    "An update is available": "Je dostupná aktualizácia",
+    "The version from {date}: {summary}. Install it from the menu: Install the update.":
+        "Verzia z {date}: {summary}. Nainštalujete ju v ponuke: Nainštalovať aktualizáciu.",
+    "The version from {date} is available: {summary}.": "Je dostupná verzia z {date}: {summary}.",
+    "Could not check for updates": "Aktualizácie sa nepodarilo skontrolovať",
+    "GitHub can't be reached: is the computer online?": "GitHub je nedostupný: je počítač pripojený na internet?",
+    "GitHub allows only a few checks an hour from one address; try again later.":
+        "GitHub povoľuje z jednej adresy len niekoľko kontrol za hodinu; skúste to neskôr.",
+    "GitHub's answer was unexpected ({detail}).": "GitHub odpovedal neočakávane ({detail}).",
+    "The update could not start": "Aktualizáciu sa nepodarilo spustiť",
+    "The update could not start: {error}": "Aktualizáciu sa nepodarilo spustiť: {error}",
+    "Updating dictation": "Diktovanie sa aktualizuje",
+    "Dictation stops for about a minute while the new version is installed, and says when it is back.":
+        "Diktovanie sa asi na minútu zastaví, kým sa nainštaluje nová verzia, a dá vedieť, keď bude späť.",
+    "Updating: dictation stops for about a minute while the new version is installed, and says when it is back.":
+        "Aktualizuje sa: diktovanie sa asi na minútu zastaví, kým sa nainštaluje nová verzia, a dá vedieť, keď bude späť.",
+    "Dictation is updated": "Diktovanie je aktualizované",
+    "This is now the version from {date}.": "Teraz beží verzia z {date}.",
+    "The update did not work": "Aktualizácia sa nepodarila",
+    "The previous version is back. The reason: {error}. Details are in {log}.":
+        "Predchádzajúca verzia je späť. Dôvod: {error}. Podrobnosti sú v {log}.",
+    "the new version didn't start": "nová verzia sa nespustila",
     # --- keys ---
     "numpad Del": "numerický Del", "numpad 0": "numerická 0", "numpad Enter": "numerický Enter",
     "Page Up": "Page Up", "Page Down": "Page Down", "Scroll Lock": "Scroll Lock", "Print Screen": "Print Screen",

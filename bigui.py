@@ -554,6 +554,9 @@ class SettingsModel:
         self.message = ""  # at the top (e.g. "Dictation is stopping")
         self.key_message = ""  # in the key section (the capture prompt and its outcome)
         self.focus_id = None  # the button to focus after the next rebuild
+        self.update_note = ""  # in the updates section: checking, the outcome
+        self.update_found = None  # update.Check of a newer version
+        self.checking = False
 
     # --- what the window does (the big window draws again; the browser page asks every second) ---
     def refresh(self) -> None:
@@ -644,6 +647,39 @@ class SettingsModel:
                               key=label) if wayland else t("New key: {key}. Dictation restarts to use it.", key=label))
         self.focus_id = "key:change"
         self.set(trigger=trigger)
+
+    def check_update(self) -> None:
+        if self.checking:
+            return
+        self.checking, self.update_found, self.update_note = True, None, t("Checking for updates…")
+        self.refresh()
+        threading.Thread(target=self._check_update, name="update-check", daemon=True).start()
+
+    def _check_update(self) -> None:
+        """(On its own thread: it only sets what rows() shows; both windows look again every second.)"""
+        import update
+        result = update.check()
+        self.update_found = result if result.state == "available" else None
+        self.update_note = (t("This is the newest version (from {date}).", date=result.date) if result.state == "current"
+                            else t("The version from {date} is available: {summary}.", date=result.date,
+                                   summary=result.summary.rstrip(".")) if result.state == "available"
+                            else update.problem(result))
+        self.checking = False
+
+    def install_update(self) -> None:
+        import update
+        found = self.update_found
+        if found is None:
+            return
+        try:
+            update.start(found.sha, found.date)
+        except OSError as e:
+            self.update_note = t("The update could not start: {error}", error=e)
+        else:
+            self.update_found = None
+            self.update_note = t("Updating: dictation stops for about a minute while the new version is installed, and "
+                                 "says when it is back.")
+        self.refresh()
 
     def open_web(self) -> None:
         """The same settings as a page in the web browser, which screen readers can read."""
@@ -738,6 +774,13 @@ class SettingsModel:
         rows.append(("heading", t("Starting")))
         rows.append(("button", "login", t("Start dictation at login"), f"check:{on(self.d.starts_at_login(self.cfg.app_id))}",
                      True, self.toggle_login))
+        rows.append(("heading", t("Updates")))
+        if self.update_note:
+            rows.append(("text", self.update_note))
+        if self.update_found is not None:
+            rows.append(("button", "update:install", t("Install the update from {date}", date=self.update_found.date), "",
+                         True, self.install_update))
+        rows.append(("button", "update:check", t("Check for updates"), "", not self.checking, self.check_update))
         rows.append(("heading", ""))
         rows.append(("button", "open", t("Open the settings file"), "", True, lambda: self.d.open_text_file(self.d.CONFIG_PATH)))
         if not self.web:  # (the tray menu has it too, where screen readers can read it)

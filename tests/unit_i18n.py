@@ -31,7 +31,7 @@ def fields(text):
     return sorted({f[1] for f in string.Formatter().parse(text) if f[1] is not None})
 
 
-SOURCES = ["dictate.py", "bigui.py", "websettings.py", "keys.py", "models.py", "macos.py", "windows.py"]
+SOURCES = ["dictate.py", "bigui.py", "websettings.py", "keys.py", "models.py", "macos.py", "windows.py", "update.py"]
 used, bad = {}, []
 for name in SOURCES:
     tree = ast.parse((ROOT / name).read_text(encoding="utf-8"))
@@ -55,7 +55,8 @@ indirect = ([info for _, _, info in models.MODELS.values()] + list(bigui.SCHEME_
             + ["the screen is locked", "the computer was asleep", "transcribing took too long",
                "the paste keys could not be pressed",
                "the app didn't take it (it may run as administrator, or not paste with Shift+Insert)",
-               "muted", "no speech", "transcription error", "recommended", "current"])
+               "muted", "no speech", "transcription error", "recommended", "current",
+               "the new version didn't start"])  # (update.py's reason, shown translated when it is this one)
 for text in indirect:
     used.setdefault(text, "(indirect)")
 # The installers' own lines: L 'English' 'Slovak' in install.sh, L "English" "Slovak (\\u escapes)" in install.ps1.
@@ -122,7 +123,7 @@ ui = dictate.UiState(dictate.load_config())
 top = dictate.TopBar.__new__(dictate.TopBar)
 top.ui, top.MenuItem, top.switch = ui, tray.MenuItem, None
 top.lock = __import__("threading").Lock()
-top.state = {"download": None, "key": None}
+top.state = {"download": None, "key": None, "update": None}
 ui.set(ui_language="sk")
 i18n.set_language(ui.ui_language)
 labels = [item.label for item in top.menu()]

@@ -90,7 +90,8 @@ bash install.sh
   *Start at login* switches that off).
 - **Wayland, first start only:** your desktop asks you to approve the keyboard shortcut. Click
   *Add* (or *Allow*); the approval is permanent.
-- **Update:** `git pull && bash install.sh`.
+- **Update:** the menu's *Check for updates* (see [Using it](#using-it)), or
+  `git pull && bash install.sh`.
 
 ### Windows
 1. On this page, click **Code → Download ZIP**, then extract it (right-click → *Extract All*).
@@ -103,7 +104,7 @@ bash install.sh
   folder, so dictation starts at every login (the menu's *Start at login* switches that off).
 - The microphone icon appears in the taskbar's notification area. Windows may tuck it under the
   **^** arrow; drag it next to the clock to keep it in sight.
-- **Update:** download the ZIP again and run `install.cmd` again.
+- **Update:** the menu's *Check for updates*, or download the ZIP again and run `install.cmd` again.
 
 ### macOS
 1. On this page, click **Code → Download ZIP**. Safari unpacks it into your Downloads folder.
@@ -120,7 +121,8 @@ bash install.sh
   `~/Applications` (the permissions are given to it) and a login item that starts it (the menu's
   *Start at login* switches that off).
 - The microphone icon appears in the menu bar.
-- **Update:** download the ZIP again and run `bash install.sh` again. The permissions stay.
+- **Update:** the menu's *Check for updates*, or download the ZIP again and run `bash install.sh`
+  again. The permissions stay.
 
 ### Installing without questions
 Set the answers beforehand, for example to install on many computers:
@@ -183,6 +185,14 @@ last left it). On Linux and macOS:
     Startup* or `systemctl --user disable dictate` shows here too. (On macOS 13 and newer, the
     *Allow in the Background* switch in System Settings → General → Login Items is a separate
     one: if you turned Dictate off there, turn it on there again.)
+  - **Check for updates:** compares the program with the newest version on GitHub and says
+    whether it is up to date. If not, the menu offers **Install the update from** (its date),
+    and a notification says what is new. Installing runs the new version's own installer, which
+    keeps every setting, choice and downloaded model; dictation stops for about a minute and
+    says when it is back. If the installer fails, or the new version doesn't start and load its
+    model within 5 minutes, the previous program files are put back and started, and a
+    notification says why (details in `update.log` in the program folder). Nothing is checked or
+    installed unless you choose it. The same buttons are in both settings windows (*Updates*).
   - **Settings window…:** every choice above, plus the dictation key, in large print (while a
     screen reader runs, the page below opens instead).
   - **Settings in the web browser (for screen readers)…:** the same choices as a web page; see

@@ -51,6 +51,7 @@ import numpy as np
 import i18n
 import keys
 import models
+import update
 from i18n import t
 
 WINDOWS, MACOS = sys.platform == "win32", sys.platform == "darwin"
@@ -2210,11 +2211,13 @@ def open_settings_window():
 
 
 class StateWatcher(threading.Thread):
-    """Applies what the big settings window changes (it saves state.json) and runs its commands."""
+    """Applies what the big settings window changes (it saves state.json) and runs its commands; also
+    passes on how an update ended (update.py writes it once the new version runs, or the old one is
+    back)."""
 
-    def __init__(self, ui: UiState, emit):
+    def __init__(self, ui: UiState, emit, on_update_result=lambda result: None):
         super().__init__(name="state", daemon=True)
-        self.ui, self.emit = ui, emit
+        self.ui, self.emit, self.on_update_result = ui, emit, on_update_result
         self.mtime = self._mtime()
 
     @staticmethod
@@ -2232,6 +2235,10 @@ class StateWatcher(threading.Thread):
             if mtime != self.mtime:
                 self.mtime = mtime
                 self.ui.reload()  # our own saves come back here too: then nothing has changed
+            if update.RESULT_PATH.exists():
+                result = update.take_result()
+                if result:
+                    self.on_update_result(result)
             try:
                 text = command.read_text(encoding="utf-8").strip()
                 command.unlink()
@@ -2321,7 +2328,8 @@ class TopBar:
         self.lock = threading.Lock()
         self.state = {"loading": True, "recording": False, "busy": 0, "key_problem": None, "model_problem": None,
                       "detected": None, "preview": "", "model": None, "download": None, "key": None,
-                      "working": None}  # working: {"since": time.time(), "expected": seconds or None}
+                      "working": None,  # working: {"since": time.time(), "expected": seconds or None}
+                      "update": None}  # "checking", or the update.Check of a newer version
         self.on_quit = lambda: None  # set by the daemon: ends the program cleanly
         self.switch: ModelSwitch | None = None  # set by the daemon: applies model and device choices
         # After the state above: pystray builds the menu right away (Linux's tray builds it on request).
@@ -2444,11 +2452,69 @@ class TopBar:
                 M(44, "Menu language · Jazyk ponúk", children=[  # (in both: whoever can't read one finds it)
                     M(440 + i, name, "radio", ui.ui_language == code) for i, (code, name) in enumerate(i18n.LANGUAGES.items())]),
                 M(24, t("Start at login"), "check", starts_at_login(APP_ID)),
+                *self.update_items(),
                 M(5, kind="separator"),
                 M(32, t("Settings window…")),
                 M(33, t("Settings in the web browser (for screen readers)…")),
                 M(30, t("Open settings file")),
                 M(31, t("Stop dictation"))]
+
+    def update_items(self) -> list:
+        M = self.MenuItem
+        with self.lock:
+            found = self.state["update"]
+        items = [M(35, t("Install the update from {date}…", date=found.date))] if isinstance(found, update.Check) else []
+        return items + [M(34, t("Checking for updates…") if found == "checking" else t("Check for updates"),
+                          enabled=found != "checking")]
+
+    def check_update(self) -> None:
+        with self.lock:
+            if self.state["update"] == "checking":
+                return
+            self.state["update"] = "checking"
+        self.tray.refresh_menu()
+        threading.Thread(target=self._check_update, name="update-check", daemon=True).start()
+
+    def _check_update(self) -> None:
+        result = update.check()
+        log.info("update check: %s %s %s", result.state, result.sha[:7], result.error)
+        with self.lock:
+            self.state["update"] = result if result.state == "available" else None
+        self.tray.refresh_menu()
+        if result.state == "current":
+            notify(t("Dictation is up to date"), t("This is the newest version (from {date}).", date=result.date))
+        elif result.state == "available":
+            notify(t("An update is available"), t("The version from {date}: {summary}. Install it from the menu: Install the "
+                                                  "update.", date=result.date, summary=result.summary.rstrip(".")))
+        else:
+            notify(t("Could not check for updates"), update.problem(result))
+
+    def install_update(self) -> None:
+        with self.lock:
+            found = self.state["update"]
+        if not isinstance(found, update.Check):
+            return
+        try:
+            update.start(found.sha, found.date)
+        except OSError as e:
+            log.warning("the update could not start: %s", e)
+            notify(t("The update could not start"), str(e))
+            return
+        log.info("updating to %s (%s)", found.sha[:7], found.date)
+        notify(t("Updating dictation"), t("Dictation stops for about a minute while the new version is installed, and "
+                                          "says when it is back."))
+
+    def update_finished(self, result: dict) -> None:
+        """How an update ended (update.py's result, seen by the StateWatcher)."""
+        log.info("update result: %s", result)
+        with self.lock:
+            self.state["update"] = None
+        self.tray.refresh_menu()
+        if result.get("ok"):
+            notify(t("Dictation is updated"), t("This is now the version from {date}.", date=result.get("date", "?")))
+        else:
+            notify(t("The update did not work"), t("The previous version is back. The reason: {error}. Details are in {log}.",
+                                                   error=t(str(result.get("error", "?"))), log=update.LOG_PATH))
 
     def how_to(self) -> str:
         return (t("Hold {key} to dictate, or tap it to start and stop", key=self.key_label()) if self.ui.tap
@@ -2491,6 +2557,10 @@ class TopBar:
             self.open_settings()
         elif item_id == 33:
             open_web_settings()
+        elif item_id == 34:
+            self.check_update()
+        elif item_id == 35:
+            self.install_update()
         elif item_id in (440, 441):
             self.ui.set(ui_language=list(i18n.LANGUAGES)[item_id - 440])
         elif item_id == 30:
@@ -2834,7 +2904,7 @@ def run_daemon(cfg) -> int:
             log.info("the dictation key is now %s: restarting", ui.trigger)
             restart_self()
     ui.listeners.append(key_changed)
-    StateWatcher(ui, ctl.emit).start()
+    StateWatcher(ui, ctl.emit, topbar.update_finished).start()
     Hotkey(cfg, ctl.emit).start()
     if MACOS:  # ask for the microphone now, not on the first key press
         from macos import ask_for_microphone
