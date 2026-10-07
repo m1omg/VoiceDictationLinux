@@ -306,7 +306,28 @@ input, `windows_paste.py`, and `e2e_desktop.py` / `e2e_x11.py`. It is started by
   - Auto-detect waits for 1.5 s of speech; `tests/bench_detect.py` shows Slovak is confidently
     misread as English below that. Real Slovak dictation was still read as English at 95-100 %
     after ~2 s, and whisper then translates. So when nothing was typed live, the final pass
-    detects again on the whole recording (log: `language: sk after all`).
+    detects again on the whole recording (log: `language: sk after all`). With live typing, until
+    the first word is typed every pass checks the language again (a flip restarts the streamer,
+    which costs nothing as nothing was typed), and no word is typed before 3 s of speech
+    (`Worker.AUTO_TYPE_AFTER`; settled words wait in `Session.held`).
+  - A tap (shorter than `Controller.TAP`) latches the dictation only while the menu's *Tap to start
+    and stop* is on (`state.json` "tap", config `tap_to_toggle`); off, a short press is just a
+    short hold.
+  - Instant typing (`state.json` "instant", config `instant_typing`; needs a keyboard with
+    `backspace()`, i.e. uinput or XTEST, so not yet Windows/macOS): every live pass renders the
+    whole text (committed + pending words, `render_words`) and `Worker._show` deletes only the end
+    that differs from `Session.shown`, then types the rest (`PasteItem.delete`, `.full`). It never
+    deletes more than the dictation typed. No 3 s hold in auto mode; instead the language is
+    re-checked until `Worker.AUTO_SETTLED` (6 s) of speech and a flip restarts the streamer, which
+    retypes; after release the whole recording may overrule the language once more
+    (`_final_instant`). Measured: first words 1.5 s (en) / 1.9 s (sk); characters taken back ~20
+    per English and ~90 per Slovak sentence; final WER equal to the safe mode
+    (`tests/bench_live.py --quick`, `tests/unit_instant.py`).
+  - Short clips in auto mode (< `Worker.SHORT` = 2 s of speech, `speech_total`): an "en" verdict
+    keeps the previous dictation's language if that wasn't English (whisper takes short Slovak for
+    English, rarely the reverse). Vocabulary hints are left out below 1 s of speech.
+  - Bigger models: large-v3 and large-v2 are offered; on FLEURS neither beats large-v3-turbo for
+    both languages (v3: 3.9 % / 6.6 %, v2: 3.2 % / 10.2 %, both ~1.5x slower).
   - No vocabulary hints on windows shorter than 2 s (Whisper echoes them).
   - Earlier, simpler variants were clearly worse (Slovak WER 15.9 %, invented words). Re-run
     `tests/bench_live.py` after any change.

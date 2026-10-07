@@ -76,7 +76,7 @@ ids = [i.id for i in walk(real)]
 checks.append(("dictate's menu: ids unique", len(ids) == len(set(ids))))
 labels = {i.id: i.label for i in real}
 checks.append(("dictate's menu: model and device submenus", labels[40].startswith("Speech model")
-               and labels[41].startswith("Run on") and len(next(i for i in real if i.id == 40).children) == 5))
+               and labels[41].startswith("Run on") and len(next(i for i in real if i.id == 40).children) == len(d.models.MODELS)))
 
 for label, good in checks:
     print(f"{'ok  ' if good else 'FAIL'} {label}")

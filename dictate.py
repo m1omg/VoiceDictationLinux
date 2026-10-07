@@ -94,6 +94,8 @@ DEFAULTS = {
     "device": "auto",  # "auto" (the GPU when one works), "gpu" or "cpu",
     "language": "en",
     "live_typing": True,
+    "tap_to_toggle": True,
+    "instant_typing": False,  # live typing types the words heard so far at once and corrects them  # a quick tap starts dictating until the next press (holding works either way)
     "sounds": True,
     "beam_size": 5,
     "cpu_beam_size": 2,  # on the CPU a narrower beam saves time for little accuracy
@@ -179,7 +181,8 @@ class UiState:
 
     def __init__(self, cfg):
         self._defaults = {"language": cfg.language if cfg.language in LANGUAGES else "en",
-                          "live": cfg.live_typing, "sounds": cfg.sounds,
+                          "live": cfg.live_typing, "instant": cfg.instant_typing, "tap": cfg.tap_to_toggle,
+                          "sounds": cfg.sounds,
                           "device": cfg.device if cfg.device in DEVICES else "auto",
                           "gpu_model": cfg.model, "cpu_model": cfg.fallback_model,
                           "trigger": cfg.trigger if valid_trigger(cfg.trigger) else DEFAULTS["trigger"],
@@ -411,7 +414,7 @@ class VirtualKeyboard:
     """A uinput keyboard used only to press Shift+Insert (keycodes, so the layout doesn't matter)."""
     UI_SET_EVBIT, UI_SET_KEYBIT, UI_DEV_SETUP = 0x40045564, 0x40045565, 0x405C5503
     UI_DEV_CREATE, UI_DEV_DESTROY = 0x5501, 0x5502
-    EV_SYN, EV_KEY, KEY_LEFTSHIFT, KEY_INSERT = 0, 1, 42, 110
+    EV_SYN, EV_KEY, KEY_LEFTSHIFT, KEY_INSERT, KEY_BACKSPACE = 0, 1, 42, 110, 14
 
     def __init__(self):
         import fcntl
@@ -433,8 +436,17 @@ class VirtualKeyboard:
         with self.lock:
             time.sleep(max(0.0, 1.0 - (time.monotonic() - self.created)))  # let mutter adopt the device
             events = [(self.KEY_LEFTSHIFT, 1), (self.KEY_INSERT, 1), (self.KEY_INSERT, 0), (self.KEY_LEFTSHIFT, 0)]
-            os.write(self.fd, b"".join(struct.pack("llHHi", 0, 0, self.EV_KEY, code, value)
-                                       + struct.pack("llHHi", 0, 0, self.EV_SYN, 0, 0) for code, value in events))
+            self._write(events)
+
+    def backspace(self, count: int) -> None:
+        """Delete `count` characters before the cursor (instant live typing corrects itself so)."""
+        with self.lock:
+            time.sleep(max(0.0, 1.0 - (time.monotonic() - self.created)))
+            self._write([(self.KEY_BACKSPACE, value) for _ in range(count) for value in (1, 0)])
+
+    def _write(self, events) -> None:
+        os.write(self.fd, b"".join(struct.pack("llHHi", 0, 0, self.EV_KEY, code, value)
+                                   + struct.pack("llHHi", 0, 0, self.EV_SYN, 0, 0) for code, value in events))
 
     def close(self) -> None:
         try:
@@ -456,7 +468,16 @@ class XTestKeyboard:
             raise OSError("the X server has no XTEST extension")
         self.shift = self.d.keysym_to_keycode(XK.string_to_keysym("Shift_L"))
         self.insert = self.d.keysym_to_keycode(XK.string_to_keysym("Insert"))
+        self.backspace_code = self.d.keysym_to_keycode(XK.string_to_keysym("BackSpace"))
         self.lock = threading.Lock()
+
+    def backspace(self, count: int) -> None:
+        """Delete `count` characters before the cursor (instant live typing corrects itself so)."""
+        with self.lock:
+            for _ in range(count):
+                self.xtest.fake_input(self.d, self.X.KeyPress, self.backspace_code)
+                self.xtest.fake_input(self.d, self.X.KeyRelease, self.backspace_code)
+            self.d.sync()
 
     def shift_insert(self) -> None:
         X = self.X
@@ -1299,6 +1320,17 @@ def speech_seconds(audio: np.ndarray) -> float:
     return (len(audio) - stamps[0]["start"]) / RATE if stamps else 0.0
 
 
+def speech_total(audio: np.ndarray) -> float:
+    """Seconds of actual speech in this audio (Silero VAD, without its 0.4 s of padding)."""
+    from faster_whisper.vad import VadOptions, get_speech_timestamps
+    return sum(s["end"] - s["start"] for s in get_speech_timestamps(audio, VadOptions(speech_pad_ms=0))) / RATE
+
+
+def render_words(cfg, words, language: str, final=False) -> str:
+    """The whole text for these words, as live typing types it (one line, no fillers)."""
+    return LiveText(cfg).add(words, language, final)
+
+
 def silence_seconds(audio: np.ndarray) -> float:
     """How long the speaker has been quiet at the end of this audio (Silero VAD, which ends speech
     only after 2 s of silence and pads it by 0.4 s, so this jumps from 0 to 1.6 s)."""
@@ -1388,12 +1420,20 @@ class Session:
     language: str | None = None  # None until auto-detect has decided
     text: LiveText | None = None
     streamer: Streamer = field(default_factory=Streamer)
+    held: list = field(default_factory=list)  # settled words not typed yet (auto mode, first seconds)
     passed_at: float = 0.0  # seconds of audio at the last live pass
     live_ok: bool = True  # switched off for this session if a live pass fails
+    instant: bool = False  # live words are shown at once and corrected with Backspace
+    shown: str = ""  # instant mode: what this dictation has put into the app so far
     dropped: bool = False
     audio: np.ndarray | None = None
     t_release: float = 0.0
     key_up_at: float = 0.0  # when the key that started it went up (0: still held)
+
+    @property
+    def typed(self) -> bool:
+        """Did words already go into the app while the key was held?"""
+        return bool(self.shown or (self.text and self.text.typed))
 
 
 @dataclass
@@ -1401,6 +1441,8 @@ class PasteItem:
     text: str
     session: Session
     final: bool
+    delete: int = 0  # instant mode: characters to delete before typing `text`
+    full: str | None = None  # instant mode: the whole text of the dictation after this item
 
 
 class Worker(threading.Thread):
@@ -1409,6 +1451,9 @@ class Worker(threading.Thread):
     # silence_seconds() above this: the speaker has been quiet for 2 s. Live passes then wait for
     # speech, because whisper invents words ("Thank you.", "Bye.") for windows of silence.
     QUIET = 1.0
+    AUTO_TYPE_AFTER = 3.0  # auto mode: seconds of speech before the first live word is typed (safe mode)
+    AUTO_SETTLED = 6.0  # auto mode, instant typing: the language is checked again until this much speech
+    SHORT = 2.0  # less speech than this: too little to tell Slovak from English
 
     def __init__(self, cfg, transcriber: Transcriber, paster, cues: Cues, topbar):
         super().__init__(name="transcribe", daemon=True)
@@ -1420,6 +1465,7 @@ class Worker(threading.Thread):
         self.loading: float | None = None  # since when a model has been loading
         self.wanted: tuple | None = None  # (device, gpu model, cpu model) to load next
         self.choice: tuple = ("auto", None, None)  # what was loaded last (or is loading)
+        self.last_language: str | None = None  # of the last dictation: short ones in auto mode keep it
 
     def want(self, choice: tuple) -> None:
         """Load this model choice once nothing is being dictated; the latest request wins. All loading
@@ -1447,7 +1493,7 @@ class Worker(threading.Thread):
             if self.active is session:
                 self.active = None
             session.dropped = True
-            typed = bool(session.text and session.text.typed)
+            typed = session.typed
         if typed:  # live words already went out: let the paster finish the session (clipboard)
             self.paster.put(PasteItem("", session, final=True))
 
@@ -1472,7 +1518,7 @@ class Worker(threading.Thread):
                         log.info("no speech model is loaded; dictation dropped")
                         self.cues.play("error")
                         self.topbar.event("error", "No speech model is loaded (the tray icon says why).")
-                        if session.text and session.text.typed:  # let the paster restore the clipboard
+                        if session.typed:  # let the paster restore the clipboard
                             self.paster.put(PasteItem("", session, final=True))
                 finally:
                     self.busy = None
@@ -1515,16 +1561,27 @@ class Worker(threading.Thread):
         audio = s.rec.snapshot()
         seconds = len(audio) / RATE
         s.passed_at = seconds
-        if s.language is None:  # auto-detect: Slovak needs ~1.5 s of speech to be told from English
-            speech = speech_seconds(audio)
+        hold = False
+        # Auto mode: the language can still change until a word is typed (instant mode, which takes
+        # words back, keeps checking for the first AUTO_SETTLED seconds of speech).
+        speech = speech_seconds(audio) if s.mode == "auto" and (s.instant or not s.typed) else None
+        if speech is not None and (not s.typed or speech < self.AUTO_SETTLED):
             if speech < 1.5:
                 return
             language, share = self.transcriber.detect(audio)
+            if language != s.language:
+                if s.language is None:
+                    log.info("detected language: %s (%.0f%% sure after %.1f s of speech)", language, share * 100, speech)
+                else:  # start over in the other language (instant mode retypes what it showed)
+                    log.info("language: %s after all (%.0f%% sure after %.1f s of speech)", language, share * 100, speech)
+                    s.streamer, s.held = Streamer(), []
+                s.language = language
+                self.topbar.update(detected=language)
             if share < 0.9 and speech < 2.5:
                 return
-            s.language = language
-            log.info("detected language: %s (%.0f%% sure after %.1f s of speech)", language, share * 100, speech)
-            self.topbar.update(detected=language)
+            # Real Slovak can look like English for ~2 s. The safe mode can't take typed words back,
+            # so it waits; instant mode corrects itself.
+            hold = not s.instant and speech < self.AUTO_TYPE_AFTER
         st = s.streamer
         start = st.window_start
         window = audio[int(start * RATE):]
@@ -1534,22 +1591,45 @@ class Worker(threading.Thread):
                                         beam_size=None if s.live else 1, hotwords=len(window) >= 2 * RATE)
         new = st.step(st.words_after_commit(segments, start), seconds)
         self.topbar.update(preview=st.preview)
-        if s.live and new:
+        if s.instant:  # what the top bar shows goes into the app at once, corrected as it changes
+            if not hold:
+                self._show(s, render_words(self.cfg, st.committed + st.pending, s.language))
+            return
+        if s.live:
+            s.held += new
+        if s.live and s.held and not hold:
             with self.cond:
                 if s.dropped:
                     return
-                piece = s.text.add(new, s.language)
+                piece = s.text.add(s.held, s.language)
+                s.held = []
                 if piece:
                     self.paster.put(PasteItem(piece, s, final=False))
 
+    def _show(self, s: Session, target: str, final: bool = False) -> None:
+        """Instant mode: make the app show `target`. Deletes only the end of what this dictation typed
+        that differs from it, then types the rest."""
+        keep = 0
+        for a, b in zip(s.shown, target):
+            if a != b:
+                break
+            keep += 1
+        delete, insert = len(s.shown) - keep, target[keep:]
+        with self.cond:
+            if s.dropped or not (delete or insert or final):
+                return
+            s.shown = target
+            self.paster.put(PasteItem(insert, s, final=final, delete=delete, full=target))
+
     def _final(self, s: Session) -> None:
         started = time.monotonic()
-        typed_live = s.live and bool(s.text.typed)
+        typed_live = s.live and s.typed
+        instant = typed_live and s.instant
         try:
-            piece, problem = self._final_text(s, typed_live)
+            piece, problem = self._final_instant(s) if instant else self._final_text(s, typed_live)
         except Exception:
             log.exception("transcription failed")
-            piece, problem = "", "transcription error"
+            piece, problem = (s.shown, None) if instant else ("", "transcription error")
         seconds = len(s.audio) / RATE
         if problem:
             peak = float(np.abs(s.audio).max()) if s.audio.size else 0.0
@@ -1562,21 +1642,49 @@ class Worker(threading.Thread):
                        + (", and that Dictate may use the microphone (System Settings > Privacy & Security)."
                           if MACOS else "."))
         else:
+            self.last_language = s.language
             log.info("transcribed %.1f s of %s audio in %.2f s (%d chars%s)", seconds, s.language,
-                     time.monotonic() - started, len(s.text.typed) if typed_live else len(piece),
-                     ", typed live" if typed_live else "")
-            log.debug("text: %r", s.text.typed if typed_live else piece)
-        if piece or typed_live:
+                     time.monotonic() - started, len(piece) if instant or not typed_live else len(s.text.typed),
+                     ", typed instantly" if instant else ", typed live" if typed_live else "")
+            log.debug("text: %r", piece if instant or not typed_live else s.text.typed)
+        if instant:
+            self._show(s, piece, final=True)
+        elif piece or typed_live:
             self.paster.put(PasteItem(piece, s, final=True))
+
+    def _final_instant(self, s: Session) -> tuple[str, None]:
+        """Instant mode after release: the whole text, with the end transcribed once more. In auto mode
+        the whole recording may overrule the language guessed from its start; then it is retyped."""
+        audio, st = s.audio, s.streamer
+        if s.mode == "auto" and speech_total(audio) >= self.SHORT:
+            language, share = self.transcriber.detect(audio)
+            if language != s.language and share >= 0.9:
+                log.info("language: %s after all (%.0f%% sure on the whole recording); retyping", language, share * 100)
+                s.language = language
+                return clean_text(" ".join(seg.text.strip() for seg in self._run(audio, language)),
+                                  self.cfg, language), None
+        window = audio[int(st.window_start * RATE):]
+        words = []
+        if len(window) >= RATE // 4 and (st.pending or silence_seconds(window[-30 * RATE:]) <= self.QUIET):
+            words = st.words_after_commit(self._run(window, s.language, words=True, prompt=st.prompt(),
+                                                    hotwords=len(window) >= 2 * RATE), st.window_start)
+        return render_words(self.cfg, st.committed + words, s.language, final=True), None
 
     def _final_text(self, s: Session, typed_live: bool) -> tuple[str, str | None]:
         audio = s.audio
         if not typed_live and (not audio.size or float(np.abs(audio).max()) < 1e-4):
             return "", "muted"
+        speech = speech_total(audio)
         if s.mode == "auto" and not typed_live:  # nothing typed yet: the whole recording decides
             first = s.language  # guessed from the first ~2 s of speech, if the live passes got that far
             s.language, share = self.transcriber.detect(audio)
-            if first and first != s.language:
+            # Whisper takes short or unclear non-English speech for English (real Slovak dictation was
+            # read as English at 95-100 %), but hardly the other way round: so a short clip that only
+            # seems English keeps the previous dictation's language.
+            if speech < self.SHORT and s.language == "en" and self.last_language not in (None, "en"):
+                s.language, share = self.last_language, 0.0
+                log.info("language: %s as last time (only %.1f s of speech, which seemed English)", s.language, speech)
+            if first and first != s.language and share:
                 log.info("language: %s after all (%.0f%% sure on the whole recording)", s.language, share * 100)
         elif s.language is None:
             s.language = s.mode
@@ -1586,9 +1694,10 @@ class Worker(threading.Thread):
             window = audio[int(start * RATE):]
             words = []
             if len(window) >= RATE // 4 and (st.pending or silence_seconds(window[-30 * RATE:]) <= self.QUIET):
-                words = st.words_after_commit(self._run(window, s.language, words=True, prompt=st.prompt()), start)
+                words = st.words_after_commit(self._run(window, s.language, words=True, prompt=st.prompt(),
+                                                        hotwords=len(window) >= 2 * RATE), start)
             return s.text.add(words, s.language, final=True), None
-        segments = self._run(audio, s.language)
+        segments = self._run(audio, s.language, hotwords=speech >= 1.0)  # below 1 s whisper may echo them
         text = clean_text(" ".join(seg.text.strip() for seg in segments), self.cfg, s.language)
         return (text, None) if text else ("", "no speech")
 
@@ -1786,6 +1895,7 @@ class Paster(threading.Thread):
         self.wait_for_key = (keyboard is not None and not hasattr(keyboard, "modifiers_held")
                              and trigger is not None and bool(trigger.mods or trigger.lone_modifier))
         self.diverted: dict[int, tuple[str, str]] = {}  # session id -> (why not typed, text so far)
+        self.can_correct = keyboard is not None and hasattr(keyboard, "backspace")  # instant live typing
         self.live_started: set[int] = set()
 
     def put(self, item: PasteItem) -> None:
@@ -1820,23 +1930,33 @@ class Paster(threading.Thread):
             self.diverted[s.id] = (problem, "")
         if s.id in self.diverted:
             why, text = self.diverted[s.id]
-            self.diverted[s.id] = (why, text + item.text)
+            self.diverted[s.id] = (why, item.full if item.full is not None else text + item.text)
             if item.final:
                 self._give_up(s, *self.diverted.pop(s.id))
             return
         if s.id not in self.saved:
             self.saved[s.id] = self.sel.read_clipboard() if self.cfg.restore_clipboard else None
         chunks = split_chunks(item.text, self.cfg.paste_chunk_chars) if item.text else []
-        if chunks and not self._modifiers_up(item):
-            self.diverted[s.id] = ("a modifier key stayed pressed", "".join(chunks))
+        if (chunks or item.delete) and not self._modifiers_up(item):
+            self.diverted[s.id] = ("a modifier key stayed pressed", item.full if item.full is not None else "".join(chunks))
             if item.final:
                 self._give_up(s, *self.diverted.pop(s.id))
             return
         if s.dropped and not item.final:  # cancelled while it waited for Ctrl to come up
             return
+        if item.delete:  # instant mode: take back the end of what was typed before
+            try:
+                self.kbd.backspace(item.delete)
+            except OSError as e:
+                self.diverted[s.id] = (f"the keys could not be pressed ({e})", item.full or "")
+                if item.final:
+                    self._give_up(s, *self.diverted.pop(s.id))
+                return
+            self.on_inject()
         for i, chunk in enumerate(chunks):
             if not self.sel.publish(chunk):
-                self.diverted[s.id] = ("the clipboard handoff could not be confirmed", "".join(chunks[i:]))
+                self.diverted[s.id] = ("the clipboard handoff could not be confirmed",
+                                       item.full if item.full is not None else "".join(chunks[i:]))
                 if item.final:
                     self._give_up(s, *self.diverted.pop(s.id))
                 return
@@ -1854,7 +1974,7 @@ class Paster(threading.Thread):
                     else:
                         log.info("no app fetched the pasted text")
             if why:
-                self.diverted[s.id] = (why, "".join(chunks[i:]))
+                self.diverted[s.id] = (why, item.full if item.full is not None else "".join(chunks[i:]))
                 if item.final:
                     self._give_up(s, *self.diverted.pop(s.id))
                 return
@@ -1868,7 +1988,7 @@ class Paster(threading.Thread):
         if s.t_release:
             log.info("typed; release -> done %.2f s", time.monotonic() - s.t_release)
         if not s.dropped:
-            self.on_done("typed", s.text.typed if s.text and s.text.typed else item.text)
+            self.on_done("typed", s.shown or (s.text.typed if s.text and s.text.typed else item.text))
         old = self.saved.pop(s.id, None)
         if old:  # nothing to restore if the clipboard was empty or held non-text (e.g. an image)
             time.sleep(0.3)
@@ -2129,13 +2249,15 @@ class TopBar:
         on_gpu = self.model_key() == "gpu_model"
         run_on = [M(410, "Graphics card (GPU)" if gpu else "Graphics card (none usable)", "radio", on_gpu, enabled=gpu),
                   M(411, "Processor (CPU)", "radio", not on_gpu)]
-        return [M(1, f"Hold {self.key_label()} to dictate, or tap it to start and stop", enabled=False),
+        return [M(1, self.how_to(), enabled=False),
                 M(2, kind="separator"),
                 M(10, LANGUAGES["en"], "radio", ui.language == "en"),
                 M(11, LANGUAGES["sk"], "radio", ui.language == "sk"),
                 M(12, LANGUAGES["auto"], "radio", ui.language == "auto"),
                 M(3, kind="separator"),
                 M(20, "Type while speaking", "check", ui.live),
+                M(23, "Instantly, correcting itself as it goes", "check", ui.instant, enabled=ui.live),
+                M(22, "Tap to start and stop", "check", ui.tap),
                 M(21, "Sounds", "check", ui.sounds),
                 M(4, kind="separator"),
                 M(40, f"Speech model: {current}", children=model_items),
@@ -2149,6 +2271,9 @@ class TopBar:
                 M(32, "Settings window…"),
                 M(30, "Open settings file"),
                 M(31, "Stop dictation")]
+
+    def how_to(self) -> str:
+        return f"Hold {self.key_label()} to dictate" + (", or tap it to start and stop" if self.ui.tap else "")
 
     def key_label(self) -> str:
         """The key as the desktop reported it when it bound the shortcut, else from the settings."""
@@ -2166,6 +2291,10 @@ class TopBar:
             self.ui.set(live=not self.ui.live)
         elif item_id == 21:
             self.ui.set(sounds=not self.ui.sounds)
+        elif item_id == 22:
+            self.ui.set(tap=not self.ui.tap)
+        elif item_id == 23:
+            self.ui.set(instant=not self.ui.instant)
         elif item_id in self.MODEL_IDS.values():
             name = next(n for n, i in self.MODEL_IDS.items() if i == item_id)
             self.ui.set(**{self.model_key(): name})
@@ -2198,7 +2327,7 @@ class TopBar:
         elif s["busy"]:
             icon, tip = "working", "Transcribing…"
         else:
-            icon, tip = "ready", f"Hold {self.key_label()} to dictate, or tap it to start and stop"
+            icon, tip = "ready", self.how_to()
         code = language.upper()
         if s["recording"]:
             if language == "auto" and s["detected"]:
@@ -2326,7 +2455,7 @@ class Controller:
         elif kind == "release":
             if self.state == "HOLD" and self.session is not None:
                 self.session.key_up_at = value
-            if self.state == "HOLD" and not self.reps and value - self.t_press < self.TAP:
+            if self.state == "HOLD" and not self.reps and value - self.t_press < self.TAP and self.ui.tap:
                 self.state = "LATCHED"  # a tap: keep dictating until the next press
                 log.info("tapped: dictating until the next press")
             elif self.state == "HOLD":
@@ -2405,7 +2534,8 @@ class Controller:
             self.cues.play("error")
             return
         mode = self.ui.language
-        self.session = Session(next(self.ids), rec, mode, self.ui.live, sleep_offset(), t_press=t,
+        instant = self.ui.live and self.ui.instant and getattr(self.worker.paster, "can_correct", False)
+        self.session = Session(next(self.ids), rec, mode, self.ui.live, sleep_offset(), t_press=t, instant=instant,
                                language=None if mode == "auto" else mode, text=LiveText(self.cfg))
         self.state, self.t_press, self.last, self.reps = "HOLD", t, t, 0
         self.worker.begin(self.session)
@@ -2611,8 +2741,10 @@ def check_linux(cfg, report) -> None:
                 xml = dbus_call(conn, Introspectable(portal.object_path, portal.bus_name).Introspect())[0]
                 for iface in ("org.freedesktop.host.portal.Registry", "org.freedesktop.portal.GlobalShortcuts"):
                     report(f"portal {iface.rsplit('.', 1)[1]}", f'"{iface}"' in xml, "present" if f'"{iface}"' in xml else "missing")
+        locked = not tray_host and screen_locked()  # GNOME pauses its extensions while locked
         report("top-bar icon host", tray_host, "present" if tray_host
-               else "missing; on GNOME, enable the AppIndicator extension to get the menu")
+               else "paused while the screen is locked; the icon comes back on unlock" if locked
+               else "missing; on GNOME, enable the AppIndicator extension to get the menu", required=not locked)
     except Exception as e:
         report("D-Bus", False, repr(e))
     desktop = Path.home() / f".local/share/applications/{APP_ID}.desktop"

@@ -127,7 +127,7 @@ Set the answers beforehand, for example to install on many computers:
 
 ## Using it
 - **Hold the key, speak, release.** Or **tap** it (shorter than 0.4 s), speak as long as you like,
-  and tap it again to stop.
+  and tap it again to stop. (Switch tapping off with *Tap to start and stop* in the menu.)
   - High beep: listening.
   - Lower beep: stopped.
   - Low double beep: nothing heard, or the microphone is muted.
@@ -135,14 +135,24 @@ Set the answers beforehand, for example to install on many computers:
   language: **EN**, **SK** or **AUTO**, and a filled circle while it records. Its menu:
   - **English / Slovenčina / Auto-detect (English / Slovak).** Auto-detect decides per dictation
     and only chooses between those two (plain Whisper might pick Czech or Polish). It waits for
-    about 1.5 s of speech before deciding; Slovak can be mistaken for English below that. With
-    *Type while speaking* off, or before anything has been typed, the whole recording decides
-    again at the end. For the fastest start, pick the language yourself.
+    about 1.5 s of speech before deciding; Slovak can be mistaken for English below that. Until
+    the first word is typed it keeps checking, and with *Type while speaking* on it types nothing
+    before 3 s of speech (real Slovak can look English for about 2 s, and typed words can't be
+    taken back). With *Type while speaking* off, or before anything has been typed, the whole
+    recording decides again at the end. For the fastest start, pick the language yourself.
   - **Type while speaking.** Words are typed while you talk, about 1–2 s behind your voice; when
     you pause after a sentence, its last word follows within about a second, and the rest lands
     when you let go. Accuracy is the same as waiting for the whole sentence (see
     [Accuracy and speed](#accuracy-and-speed)), but a word, once typed, isn't corrected
     afterwards. Switch it off to get the whole text at once when you let go.
+  - **Instantly, correcting itself as it goes** (with *Type while speaking*): the words heard so
+    far, as the top bar shows them, go into the app at once (first words after about 1.5–2 s, in
+    Slovak too) and are corrected with Backspace while they settle, so the start of a sentence can
+    visibly change a few times. It only ever deletes what it typed itself in that dictation;
+    don't click elsewhere while dictating. In auto-detect it keeps checking the language for the
+    first 6 s and retypes in the other one if it guessed wrong.
+  - **Tap to start and stop:** whether a quick tap starts a dictation that lasts until the next
+    press. Holding the key works either way.
   - **Sounds:** the beeps, on or off.
   - **Speech model:** see [Speech models](#speech-models). A model that isn't downloaded yet shows
     its size; picking it downloads it, then switches to it.
@@ -166,8 +176,8 @@ Set the answers beforehand, for example to install on many computers:
   On Windows and macOS the log is `dictate.log` in the program folder.
 
 ## Speech models
-All five are multilingual. Bigger models are more accurate and slower; on a graphics card even the
-biggest is fast.
+All are multilingual. Bigger models are usually more accurate and always slower; on a graphics
+card even the biggest is fast.
 
 | Model | Download | English | Slovak | Suits |
 |---|---|---|---|---|
@@ -176,6 +186,8 @@ biggest is fast.
 | small | 484 MB | very good | poor | computers without a graphics card, English |
 | medium | 1.5 GB | excellent | fair | rarely the best choice: large-v3-turbo is as fast and much better in Slovak |
 | large-v3-turbo | 1.6 GB | excellent | very good | a graphics card; Slovak on a 4-core or faster processor |
+| large-v3 | 3.1 GB | excellent | very good | measured as accurate as large-v3-turbo, 1.5x slower; a graphics card |
+| large-v2 | 3.1 GB | excellent | good | slightly better English, worse Slovak, 1.5x slower; a graphics card |
 
 Measured word error rates and times are under [Accuracy and speed](#accuracy-and-speed).
 - **What the installer suggests:** large-v3-turbo on a graphics card with at least 2 GB of memory.
@@ -256,7 +268,7 @@ by the installer, it is kept in `state.json` and these no longer apply:
 | `model` | `"large-v3-turbo"` | the model on a graphics card |
 | `fallback_model` | `"small"` | the model on the processor |
 | `device` | `"auto"` | `"auto"` (the graphics card when one works), `"gpu"` or `"cpu"` |
-| `language`, `live_typing`, `sounds` | `"en"`, `true`, `true` | the menu's first choices |
+| `language`, `live_typing`, `instant_typing`, `tap_to_toggle`, `sounds` | `"en"`, `true`, `false`, `true`, `true` | the menu's first choices |
 | `big_panel`, `big_settings` | `false`, `false` | [large text](#large-text-for-low-vision) parts |
 | `ui_scale`, `ui_colors`, `panel_position` | `2.0`, `"yellow-on-black"`, `"bottom"` | their size, colours and place |
 
@@ -336,6 +348,17 @@ Word error rate (lower is better) on real recorded sentences
 | auto-detect picks the right language | 15/15 | 30/30 | 15/15 | 30/30 |
 | transcription time, ~9 s sentence | ~0.35 s | ~0.38 s | ~0.40 s | ~0.48 s |
 | live typing: first words appear after | ~1.9 s | ~3–4 s | ~2.0 s | ~4 s |
+| instant typing: first words appear after | ~1.5 s | ~1.9 s | | |
+| instant typing in auto-detect | ~2.6 s | ~3.4 s | | |
+
+Instant typing ends with the same text as live typing (same error rates); on the way it took back
+about 20 characters per English sentence and 90 per Slovak one (the start of a Slovak sentence
+settles later). Auto-detect with live typing (not instant) types nothing before 3 s of speech, so
+its first words come after about 5–6 s.
+
+**Bigger models on the RTX 3060** (one-shot, same sentences): large-v3 3.9 % English / 6.6 % Slovak
+at ~0.54 / 0.72 s per sentence; large-v2 3.2 % / 10.2 % at ~0.55 / 0.73 s. Neither beats
+large-v3-turbo for both languages, which is why it stays the default.
 
 (For live typing, the one-shot rates on the same long dictations were 1.3 % / 6.2 % in English and
 6.8 % / 7.8 % in Slovak.)

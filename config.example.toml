@@ -36,6 +36,8 @@ backend = "auto"
 #
 # language = "en"             # "en", "sk" or "auto"
 # live_typing = true          # type while speaking
+# instant_typing = false      # with live typing: type the words heard so far at once, then correct them
+# tap_to_toggle = true        # a quick tap starts dictating until the next press
 # sounds = true
 #
 # Large text, for low vision: a big status panel while dictating, and the big settings window when

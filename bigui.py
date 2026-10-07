@@ -549,6 +549,10 @@ class Settings:
         rows.append(("heading", "Typing"))
         rows.append(("button", "live", "Type while speaking", f"check:{on(ui.live)}", True,
                      lambda: self.set(live=not ui.live)))
+        rows.append(("button", "instant", "Type instantly, correcting as it goes", f"check:{on(ui.instant)}", ui.live,
+                     lambda: self.set(instant=not ui.instant)))
+        rows.append(("button", "tap", "Tap to start and stop", f"check:{on(ui.tap)}", True,
+                     lambda: self.set(tap=not ui.tap)))
         rows.append(("button", "sounds", "Sounds", f"check:{on(ui.sounds)}", True, lambda: self.set(sounds=not ui.sounds)))
         rows.append(("heading", f"Speech model (runs on the {'graphics card' if on_gpu else 'processor'})"))
         downloading = status.get("download") or ""
