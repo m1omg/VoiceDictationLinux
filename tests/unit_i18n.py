@@ -66,6 +66,15 @@ ps1_pairs = [(decode(en), decode(sk)) for en, sk in
 for en, _sk in sh_pairs + ps1_pairs:
     used.setdefault(en, "(installer)")
 check("no t() call with an f-string or expression", bad, [])
+wrong_values = []  # (a placeholder without its value raises KeyError, but only when that text is shown)
+for name in SOURCES:
+    for node in ast.walk(ast.parse((ROOT / name).read_text(encoding="utf-8"))):
+        if (isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "t" and node.args
+                and isinstance(node.args[0], ast.Constant) and isinstance(node.args[0].value, str)):
+            wanted = {f.split("!")[0] for f in fields(node.args[0].value)}
+            if len(node.args) > 1 or {k.arg for k in node.keywords} != wanted:
+                wrong_values.append(f"{name}:{node.lineno}")
+check("every t() call gives exactly the values its text needs", wrong_values, [])
 
 
 def local_names(fn):
