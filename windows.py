@@ -24,6 +24,7 @@ import time
 from pathlib import Path
 
 import keys
+from i18n import t
 
 log = logging.getLogger("dictate")
 
@@ -187,7 +188,8 @@ STARTUP_APPROVED = r"Software\Microsoft\Windows\CurrentVersion\Explorer\StartupA
 
 
 def known_folder(name: str) -> Path:
-    """The Start menu's "Programs" or "Startup" folder (a policy can move them, so ask the shell)."""
+    """The Start menu's "Programs" or "Startup" folder (a policy can move them, so ask the shell). Also
+    when it doesn't exist yet (a new profile has no Startup folder until something goes into it)."""
     import uuid
     shell32, ole32 = ctypes.WinDLL("shell32"), ctypes.WinDLL("ole32")
     shell32.SHGetKnownFolderPath.restype = LONG
@@ -195,7 +197,7 @@ def known_folder(name: str) -> Path:
     ole32.CoTaskMemFree.restype, ole32.CoTaskMemFree.argtypes = None, [ctypes.c_void_p]
     guid = GUID.from_buffer_copy(uuid.UUID(FOLDER_IDS[name]).bytes_le)
     path = ctypes.c_wchar_p()
-    result = shell32.SHGetKnownFolderPath(ctypes.byref(guid), 0, None, ctypes.byref(path))
+    result = shell32.SHGetKnownFolderPath(ctypes.byref(guid), 0x4000, None, ctypes.byref(path))  # KF_FLAG_DONT_VERIFY
     try:
         if result != 0:
             raise OSError(f"Windows didn't say where the {name} folder is (error {result & 0xFFFFFFFF:#x})")
@@ -366,7 +368,7 @@ class Hotkey(threading.Thread):
         u = user32()
         self.hook = self._install()
         if not self.hook:
-            self.emit("fatal", f"The dictation key could not be set up (error {ctypes.get_last_error()}).")
+            self.emit("fatal", t("The dictation key could not be set up (error {code}).", code=ctypes.get_last_error()))
             return
         log.info("push-to-talk key: %s (Windows keyboard hook)", self.trigger)
         self.emit("key_ready", self.cfg.trigger)

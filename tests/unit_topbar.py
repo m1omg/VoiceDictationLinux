@@ -67,6 +67,11 @@ models_menu = next(item for item in top.tray.menu if item.label.startswith("Spee
 check("every model listed, the missing ones with their size",
       [item.label.split(" ")[0] for item in models_menu.children], list(d.models.MODELS))
 check("a missing model offers its download", "download 76 MB" in models_menu.children[0].label, True)
+top.update(key="Press KP_Delete")  # how GNOME reports the shortcut the user approved
+check("the key as GNOME describes it, in plain words", top.how_to(), "Hold numpad Del to dictate, or tap it to start and stop")
+top.update(key="Press <Super>F9")
+check("a description it can't read stays as GNOME wrote it", top.key_label(), "Press <Super>F9")
+top.update(key=None)
 top.clicked(20)
 check("Type while speaking toggles and is saved", (ui.live, d.UiState(d.load_config()).live), (False, False))
 top.clicked(421)

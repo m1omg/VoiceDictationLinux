@@ -48,8 +48,10 @@ from types import SimpleNamespace
 
 import numpy as np
 
+import i18n
 import keys
 import models
+from i18n import t
 
 WINDOWS, MACOS = sys.platform == "win32", sys.platform == "darwin"
 LINUX = not (WINDOWS or MACOS)
@@ -74,6 +76,11 @@ RATE = 16000
 STALE_SECONDS = 15
 C_LOCALE = {**os.environ, "LC_ALL": "C"}  # pw-cat parses numbers with the locale (sk uses ",")
 LANGUAGES = {"en": "English", "sk": "Slovenčina", "auto": "Auto-detect (English / Slovak)"}
+
+
+def language_name(code: str) -> str:
+    """A dictation language as the menus show it (each language in its own words, the rest translated)."""
+    return t(LANGUAGES[code]) if code == "auto" else LANGUAGES[code]
 AUTO_LANGUAGES = ("en", "sk")
 
 # Keep caches inside APP_DIR even when run by hand (the systemd unit sets these as well).
@@ -107,13 +114,15 @@ DEFAULTS = {
     "paste_chunk_chars": 750,
     "tail_ms": 200,
     "max_seconds": 300,
-    "big_panel": False,  # large-text mode (low vision): a big status panel while dictating,
+    "status_popup": "auto",  # a small pop-up while dictating: "auto" (when the model runs on the processor), "on", "off"
+    "big_panel": False,  # large-text mode (low vision): a big status panel while dictating (instead),
     "big_settings": False,  # clicking the tray icon opens the big settings window,
     "ui_scale": 2.0,  # their text size (1-3 times),
     "ui_colors": "yellow-on-black",  # and colours (see COLOR_SCHEMES)
     "panel_position": "bottom",
 }
 COLOR_SCHEMES = ("yellow-on-black", "white-on-black", "black-on-white", "black-on-yellow")
+POPUPS = ("auto", "on", "off")  # the small status pop-up (the big panel, when on, takes its place)
 
 
 def load_config() -> SimpleNamespace:
@@ -125,7 +134,7 @@ def load_config() -> SimpleNamespace:
         user = {}
     except tomllib.TOMLDecodeError as e:
         log.error("config: %s is not valid TOML (%s); using defaults", CONFIG_PATH, e)
-        notify("Dictation settings could not be read", f"{CONFIG_PATH}: {e}")
+        notify(t("Dictation settings could not be read"), f"{CONFIG_PATH}: {e}")
         user = {}
     for key, value in user.items():
         default = DEFAULTS.get(key)
@@ -183,9 +192,11 @@ class UiState:
         self._defaults = {"language": cfg.language if cfg.language in LANGUAGES else "en",
                           "live": cfg.live_typing, "instant": cfg.instant_typing, "tap": cfg.tap_to_toggle,
                           "sounds": cfg.sounds, "autostart": True,  # (what the system does is the truth)
+                          "ui_language": "en",  # menus and messages (the installers ask first)
                           "device": cfg.device if cfg.device in DEVICES else "auto",
                           "gpu_model": cfg.model, "cpu_model": cfg.fallback_model,
                           "trigger": cfg.trigger if valid_trigger(cfg.trigger) else DEFAULTS["trigger"],
+                          "popup": cfg.status_popup if cfg.status_popup in POPUPS else "auto",
                           "big_panel": cfg.big_panel, "big_settings": cfg.big_settings,
                           "ui_scale": min(3.0, max(1.0, float(cfg.ui_scale))),
                           "ui_colors": cfg.ui_colors if cfg.ui_colors in COLOR_SCHEMES else "yellow-on-black",
@@ -238,6 +249,10 @@ class UiState:
             return value in COLOR_SCHEMES
         if key == "panel_position":
             return value in ("bottom", "top")
+        if key == "popup":
+            return value in POPUPS
+        if key == "ui_language":
+            return value in i18n.LANGUAGES
         return True
 
     def __getattr__(self, name: str):
@@ -896,7 +911,7 @@ class X11Hotkey(threading.Thread):
             if catch.get_error():
                 raise RuntimeError(f"another program already uses {self.cfg.trigger}")
         except Exception as e:
-            self.emit("fatal", f"The dictation key could not be set up: {e}")
+            self.emit("fatal", t("The dictation key could not be set up: {error}", error=e))
             return
         log.info("push-to-talk key grabbed: %s (X11)", trigger)
         self.emit("key_ready", self.cfg.trigger)
@@ -1190,8 +1205,8 @@ class Transcriber:
             self.desc = f"{name} on {platform if where == 'cuda' else where}/{compute_type}"
             log.info("model ready: %s (%.1f s)", self.desc, time.monotonic() - started)
             if where == "cpu" and wanted_gpu:
-                notify("Dictation is running on the CPU",
-                       f"The GPU could not be used, so the {name} model runs on the processor instead.")
+                notify(t("Dictation is running on the CPU"),
+                       t("The GPU could not be used, so the {model} model runs on the processor instead.", model=name))
             self.ready.set()
             return
         raise RuntimeError("no Whisper model could be loaded")
@@ -1466,6 +1481,7 @@ class Worker(threading.Thread):
         self.wanted: tuple | None = None  # (device, gpu model, cpu model) to load next
         self.choice: tuple = ("auto", None, None)  # what was loaded last (or is loading)
         self.last_language: str | None = None  # of the last dictation: short ones in auto mode keep it
+        self.pace: float | None = None  # seconds of work per second of audio, for the pop-up's estimate
 
     def want(self, choice: tuple) -> None:
         """Load this model choice once nothing is being dictated; the latest request wins. All loading
@@ -1517,7 +1533,7 @@ class Worker(threading.Thread):
                     else:  # the last load failed; the tray says why
                         log.info("no speech model is loaded; dictation dropped")
                         self.cues.play("error")
-                        self.topbar.event("error", "No speech model is loaded (the tray icon says why).")
+                        self.topbar.event("error", t("No speech model is loaded (the tray icon says why)."))
                         if session.typed:  # let the paster restore the clipboard
                             self.paster.put(PasteItem("", session, final=True))
                 finally:
@@ -1539,14 +1555,16 @@ class Worker(threading.Thread):
 
     def _load(self, choice: tuple) -> None:
         self.choice, self.loading = choice, time.monotonic()
+        self.pace = None  # another model, or device
         self.topbar.update(loading=True)
         try:
             self.transcriber.load(*choice)
             self.topbar.update(loading=False, model_problem=None, model=self.transcriber.desc)
         except Exception as e:
             log.exception("model loading failed")
-            self.topbar.update(loading=False, model_problem=f"The speech model could not be loaded: {e}", model=None)
-            notify("Dictation can't transcribe", f"The speech model could not be loaded: {e}")
+            problem = t("The speech model could not be loaded: {error}", error=e)
+            self.topbar.update(loading=False, model_problem=problem, model=None)
+            notify(t("Dictation can't transcribe"), problem)
         finally:
             self.loading = None
 
@@ -1625,22 +1643,30 @@ class Worker(threading.Thread):
         started = time.monotonic()
         typed_live = s.live and s.typed
         instant = typed_live and s.instant
+        seconds = len(s.audio) / RATE
+        if not typed_live:  # the whole recording: on a processor that can take a while, so the pop-up counts
+            self.topbar.update(working={"since": time.time(), "expected": self.pace * seconds if self.pace else None})
         try:
             piece, problem = self._final_instant(s) if instant else self._final_text(s, typed_live)
         except Exception:
             log.exception("transcription failed")
             piece, problem = (s.shown, None) if instant else ("", "transcription error")
-        seconds = len(s.audio) / RATE
+        finally:
+            self.topbar.update(working=None)
+        if not typed_live and not problem and seconds >= 2:
+            pace = (time.monotonic() - started) / seconds
+            self.pace = pace if self.pace is None else 0.6 * self.pace + 0.4 * pace
         if problem:
             peak = float(np.abs(s.audio).max()) if s.audio.size else 0.0
             log.info("%s in %.1f s of audio (peak %.0f dBFS)", problem, seconds, 20 * np.log10(max(peak, 1e-9)))
             self.cues.play("error")
-            self.topbar.event({"muted": "muted", "no speech": "nothing"}.get(problem, "error"), problem)
+            self.topbar.event({"muted": "muted", "no speech": "nothing"}.get(problem, "error"), t(problem))
             if problem == "muted":
                 log.info("default microphone: %s", microphone())
-                notify("Microphone is muted", "Only silence was recorded. Check the headset's mute switch"
-                       + (", and that Dictate may use the microphone (System Settings > Privacy & Security)."
-                          if MACOS else "."))
+                notify(t("Microphone is muted"),
+                       t("Only silence was recorded. Check the headset's mute switch, and that Dictate may use the "
+                         "microphone (System Settings > Privacy & Security).") if MACOS
+                       else t("Only silence was recorded. Check the headset's mute switch."))
         else:
             self.last_language = s.language
             log.info("transcribed %.1f s of %s audio in %.2f s (%d chars%s)", seconds, s.language,
@@ -1742,16 +1768,16 @@ class Watchdog(threading.Thread):
             if sys.stderr is not None:  # the log file or the journal
                 faulthandler.dump_traceback(file=sys.stderr, all_threads=True)
             if time.time() - float(os.environ.get("DICTATE_RESTARTED", 0)) < 600:
-                notify("Dictation is stuck", "It already restarted itself recently. Restart the computer if "
-                       "it stays stuck.")
+                notify(t("Dictation is stuck"), t("It already restarted itself recently. Restart the computer if "
+                                                  "it stays stuck."))
                 return
             if loading is not None and self.worker.choice[0] != "cpu" and self.worker.transcriber.gpu_available:
                 os.environ["DICTATE_FORCE_CPU"] = "1"  # for the restarted copy, until dictation is started anew
-                notify("Dictation restarted on the processor", "The graphics card did not respond while the "
-                       "speech model was loading, so the model now runs on the CPU.")
+                notify(t("Dictation restarted on the processor"), t("The graphics card did not respond while the "
+                       "speech model was loading, so the model now runs on the CPU."))
             else:
-                notify("Dictation restarted", "Transcribing got stuck, so dictation started over. The last "
-                       "dictation was lost.")
+                notify(t("Dictation restarted"), t("Transcribing got stuck, so dictation started over. The last "
+                                                   "dictation was lost."))
             os.environ["DICTATE_RESTARTED"] = str(time.time())
             restart_self()
 
@@ -1817,7 +1843,8 @@ class ModelSwitch:
             if name in models.MODELS:
                 self.download(name, "gpu_model" if on_gpu else "cpu_model")
             else:
-                notify("Speech model not found", f"There is no model called {name} in {MODELS_DIR}.")
+                notify(t("Speech model not found"), t("There is no model called {model} in {folder}.", model=name,
+                                                      folder=MODELS_DIR))
             return
         self.worker.want(choice)
 
@@ -1829,8 +1856,8 @@ class ModelSwitch:
         threading.Thread(target=self._download, args=(name, key), name="download", daemon=True).start()
 
     def _download(self, name: str, key: str) -> None:
-        notify(f"Downloading the {name} speech model", f"{models.size_label(name)}. Dictation keeps working "
-               "with the current model meanwhile.")
+        notify(t("Downloading the {model} speech model", model=name),
+               t("{size}. Dictation keeps working with the current model meanwhile.", size=models.size_label(name)))
         log.info("downloading the %s model", name)
         env = {**os.environ, "HF_HUB_DISABLE_PROGRESS_BARS": "1"}
         try:
@@ -1853,8 +1880,8 @@ class ModelSwitch:
             log.info("the %s model is downloaded", name)
             self.changed()
         else:
-            notify(f"The {name} model could not be downloaded", "Check the internet connection. The log has "
-                   "the details.")
+            notify(t("The {model} model could not be downloaded", model=name),
+                   t("Check the internet connection. The log has the details."))
             loaded = self.loaded()
             if loaded and loaded[1] != name and key == ("gpu_model" if loaded[0] else "cpu_model"):
                 self.ui.set(**{key: loaded[1]})  # the menu shows what really runs; picking it again retries
@@ -1914,7 +1941,7 @@ class Paster(threading.Thread):
         if self.kbd is None:
             return self.no_keyboard
         if screen_locked():
-            return "the screen is locked"
+            return "the screen is locked"  # (in English: the log; t() when shown)
         if sleep_offset() - s.sleep_offset > 2:
             return "the computer was asleep"
         if item.final and s.t_release and time.monotonic() - s.t_release > STALE_SECONDS:
@@ -1965,7 +1992,8 @@ class Paster(threading.Thread):
             try:
                 self.kbd.shift_insert()
             except OSError as e:
-                why = f"the paste keys could not be pressed ({e})"
+                log.warning("pressing the paste keys failed: %s", e)
+                why = "the paste keys could not be pressed"
             else:
                 self.on_inject()
                 if not self.sel.wait_served(base, 1.5 if item.final else 0.8):
@@ -2025,8 +2053,8 @@ class Paster(threading.Thread):
         log.info("left %d chars on the clipboard: %s", len(text), why)
         self.sel.publish(text, immediate=True)
         self.on_done("copied", why)
-        notify("Dictation copied to the clipboard",
-               f"It was not typed because {why}. Paste it with {'Cmd+V' if MACOS else 'Ctrl+V'}.")
+        notify(t("Dictation copied to the clipboard"),
+               t("It was not typed because {why}. Paste it with {keys}.", why=t(why), keys="Cmd+V" if MACOS else "Ctrl+V"))
 
 
 def open_text_file(path: Path) -> None:
@@ -2121,9 +2149,10 @@ def run_start_at_login(cfg, on: bool) -> int:
         kind, _path = login_item(cfg.app_id)
         set_start_at_login(on, cfg.app_id)
     except OSError as e:
-        print(f"    could not set up start-at-login: {e}")
+        print("    " + t("could not set up start-at-login: {error}", error=e))
         return 1
-    print(f"    {'on' if on else 'off'} ({LOGIN_KINDS[kind]})" + ("" if on else "; the menu's Start at login switches it on"))
+    how = t(LOGIN_KINDS[kind])
+    print("    " + (t("on ({how})", how=how) if on else t("off ({how}); the menu's Start at login switches it on", how=how)))
     return 0
 
 
@@ -2137,8 +2166,41 @@ def child_streams() -> dict:
     return {"stdout": sys.stderr, "stderr": subprocess.STDOUT} if WINDOWS and sys.__stderr__ is None else {}
 
 
+def open_web_settings():
+    """The settings as a page in the web browser (websettings.py), which screen readers can read."""
+    try:
+        return subprocess.Popen([sys.executable, str(HERE / "websettings.py")], creationflags=NO_WINDOW,
+                                stdin=subprocess.DEVNULL, start_new_session=not WINDOWS, **child_streams())
+    except OSError as e:
+        log.warning("cannot open the settings page: %s", e)
+        return None
+
+
+def screen_reader_on() -> bool:
+    """Whether a screen reader runs (Orca, NVDA, Narrator, VoiceOver): then the settings open as the
+    browser page, since the big settings window's pictures can't be read aloud."""
+    try:
+        if WINDOWS:
+            import ctypes
+            on = ctypes.c_int(0)  # SPI_GETSCREENREADER
+            return bool(ctypes.windll.user32.SystemParametersInfoW(0x0046, 0, ctypes.byref(on), 0) and on.value)
+        if MACOS:
+            import AppKit
+            return bool(AppKit.NSWorkspace.sharedWorkspace().isVoiceOverEnabled())
+        from jeepney import DBusAddress, Properties
+        from jeepney.io.blocking import open_dbus_connection
+        with open_dbus_connection("SESSION") as conn:  # AT-SPI's own switch, which Orca turns on
+            status = DBusAddress("/org/a11y/bus", bus_name="org.a11y.Bus", interface="org.a11y.Status")
+            reply = conn.send_and_get_reply(Properties(status).get("ScreenReaderEnabled"), timeout=2)
+            return bool(reply.body and reply.body[0][1])
+    except Exception as e:  # no D-Bus, no AT-SPI, an old macOS: then none that we know of
+        log.debug("screen reader check: %s", e)
+        return False
+
+
 def open_settings_window():
-    """The big settings window (bigui.py settings), a process of its own."""
+    """The big settings window (bigui.py settings), a process of its own (it opens the browser page
+    instead while a screen reader runs)."""
     try:
         return subprocess.Popen([sys.executable, str(HERE / "bigui.py"), "settings"], creationflags=NO_WINDOW,
                                 stdin=subprocess.DEVNULL, start_new_session=not WINDOWS, **child_streams())
@@ -2183,8 +2245,8 @@ class PanelProcess:
     """The big status panel (bigui.py panel): one JSON message per line on its stdin. It quits when
     dictation ends (its stdin closes); if it crashes it is started again, at most every 30 s."""
 
-    def __init__(self, ui: UiState):
-        self.ui, self.proc, self.started = ui, None, -60.0
+    def __init__(self, ui: UiState, mode):
+        self.ui, self.mode, self.proc, self.started = ui, mode, None, -60.0  # mode(): "small", "large" or "off"
         self.lock = threading.Lock()
 
     def send(self, msg: dict | None) -> None:
@@ -2192,7 +2254,8 @@ class PanelProcess:
         It is started ahead of the first dictation: a window shown for the first time can take the
         keyboard focus on Windows."""
         with self.lock:
-            if not self.ui.big_panel:
+            size = self.mode()
+            if size == "off":
                 self._stop()
                 return
             if self.proc is None or self.proc.poll() is not None:
@@ -2209,7 +2272,8 @@ class PanelProcess:
                     return
             if msg is None:
                 return
-            msg = {**msg, "scale": self.ui.ui_scale, "colors": self.ui.ui_colors, "position": self.ui.panel_position}
+            msg = {**msg, "size": size, "scale": self.ui.ui_scale, "colors": self.ui.ui_colors,
+                   "position": self.ui.panel_position, "lang": i18n.language}
             try:
                 self.proc.stdin.write(json.dumps(msg) + "\n")
                 self.proc.stdin.flush()
@@ -2247,6 +2311,7 @@ class TopBar:
 
     def __init__(self, ui: UiState):
         global NOTIFY_HOOK
+        i18n.set_language(ui.ui_language)
         sys.path.insert(0, str(HERE))
         if LINUX:
             from tray import MenuItem, TrayIcon
@@ -2255,7 +2320,8 @@ class TopBar:
         self.ui, self.MenuItem = ui, MenuItem
         self.lock = threading.Lock()
         self.state = {"loading": True, "recording": False, "busy": 0, "key_problem": None, "model_problem": None,
-                      "detected": None, "preview": "", "model": None, "download": None, "key": None}
+                      "detected": None, "preview": "", "model": None, "download": None, "key": None,
+                      "working": None}  # working: {"since": time.time(), "expected": seconds or None}
         self.on_quit = lambda: None  # set by the daemon: ends the program cleanly
         self.switch: ModelSwitch | None = None  # set by the daemon: applies model and device choices
         # After the state above: pystray builds the menu right away (Linux's tray builds it on request).
@@ -2263,7 +2329,7 @@ class TopBar:
                              on_activate=self.open_settings if ui.big_settings else None)
         if WINDOWS:  # notifications come from the tray icon there
             NOTIFY_HOOK = self.tray.notify
-        self.panel = PanelProcess(ui)
+        self.panel = PanelProcess(ui, self.popup_mode)
         self.panel_ongoing = False  # the panel shows "Listening" or "Transcribing" (no outcome yet)
         self.settings_window = None
         self.status_text = ""
@@ -2273,15 +2339,26 @@ class TopBar:
         if self.settings_window is None or self.settings_window.poll() is not None:
             self.settings_window = open_settings_window()
 
+    def popup_mode(self) -> str:
+        """The status pop-up: "large" (the big panel), "small" or "off". Automatic means small while the
+        model runs on the processor (also after a graphics card failed), where a long dictation can take
+        a while to transcribe."""
+        if self.ui.big_panel:
+            return "large"
+        if self.ui.popup == "auto":
+            return "small" if self.switch is not None and self.switch.worker.transcriber.on_cpu else "off"
+        return "small" if self.ui.popup == "on" else "off"
+
     def event(self, kind: str, text: str = "") -> None:
         """An outcome for the big panel: "typed" (text), "copied" (why), "muted", "nothing", "error"."""
         paste = "Cmd+V" if MACOS else "Ctrl+V"
         title, words, accent, seconds = {
-            "typed": ("Typed", text, False, 3),
-            "copied": (f"Not typed. It is on the clipboard: paste it with {paste}.", f"It was not typed because {text}.",
-                       True, 8),
-            "muted": ("Only silence was recorded: is the microphone muted?", "", True, 8),
-            "nothing": ("Nothing was heard.", "", False, 3), "error": (f"Dictation failed: {text}", "", True, 8),
+            "typed": (t("Typed"), text, False, 3),
+            "copied": (t("Not typed. It is on the clipboard: paste it with {keys}.", keys=paste),
+                       t("It was not typed because {why}.", why=t(text)), True, 8),
+            "muted": (t("Only silence was recorded: is the microphone muted?"), "", True, 8),
+            "nothing": (t("Nothing was heard."), "", False, 3),
+            "error": (t("Dictation failed: {problem}", problem=text), "", True, 8),
         }.get(kind, (text, "", False, 3))
         self.panel_ongoing = False
         self.panel.send({"show": True, "title": title, "mark": "tick" if kind == "typed" else None, "text": words,
@@ -2297,6 +2374,8 @@ class TopBar:
             self.state.update(changes)
         if {"download", "model", "key"} & set(changes):  # the menu shows them
             self.tray.refresh_menu()
+        if "model" in changes:  # it decides whether the automatic pop-up shows: started ahead of use
+            self.panel.send(None)
         self.push()
 
     def busy(self, delta: int) -> None:
@@ -2305,6 +2384,7 @@ class TopBar:
         self.push()
 
     def changed(self) -> None:
+        i18n.set_language(self.ui.ui_language)
         if (self.tray.on_activate is not None) != self.ui.big_settings:  # a click opens the window, or the menu
             self.tray.set_activate(self.open_settings if self.ui.big_settings else None)
         self.panel.send(None)  # started, or stopped, as the big panel was switched on or off
@@ -2325,53 +2405,63 @@ class TopBar:
         model_items = []
         for name, item_id in self.MODEL_IDS.items():
             if downloading.startswith(name + " "):
-                note = f" – downloading {downloading.split(' ', 1)[1]}"
+                note = " – " + t("downloading {progress}", progress=downloading.split(" ", 1)[1])
             elif not models.installed(MODELS_DIR, name):
-                note = f" – download {models.size_label(name)}"
+                note = " – " + t("download {size}", size=models.size_label(name))
             else:
                 note = ""
-            model_items.append(M(item_id, f"{name} ({models.MODELS[name][2]}){note}", "radio", name == current))
+            model_items.append(M(item_id, f"{name} ({t(models.MODELS[name][2])}){note}", "radio", name == current))
         if current not in self.MODEL_IDS:
             model_items.append(M(499, current, "radio", True))
         gpu = self.switch is None or self.switch.worker.transcriber.gpu_available is not False
         on_gpu = self.model_key() == "gpu_model"
-        run_on = [M(410, "Graphics card (GPU)" if gpu else "Graphics card (none usable)", "radio", on_gpu, enabled=gpu),
-                  M(411, "Processor (CPU)", "radio", not on_gpu)]
+        run_on = [M(410, t("Graphics card (GPU)") if gpu else t("Graphics card (none usable)"), "radio", on_gpu,
+                    enabled=gpu),
+                  M(411, t("Processor (CPU)"), "radio", not on_gpu)]
         return [M(1, self.how_to(), enabled=False),
                 M(2, kind="separator"),
-                M(10, LANGUAGES["en"], "radio", ui.language == "en"),
-                M(11, LANGUAGES["sk"], "radio", ui.language == "sk"),
-                M(12, LANGUAGES["auto"], "radio", ui.language == "auto"),
+                M(10, language_name("en"), "radio", ui.language == "en"),
+                M(11, language_name("sk"), "radio", ui.language == "sk"),
+                M(12, language_name("auto"), "radio", ui.language == "auto"),
                 M(3, kind="separator"),
-                M(20, "Type while speaking", "check", ui.live),
-                M(23, "Instantly, correcting itself as it goes", "check", ui.instant, enabled=ui.live),
-                M(22, "Tap to start and stop", "check", ui.tap),
-                M(21, "Sounds", "check", ui.sounds),
+                M(20, t("Type while speaking"), "check", ui.live),
+                M(23, t("Instantly, correcting itself as it goes"), "check", ui.instant, enabled=ui.live),
+                M(22, t("Tap to start and stop"), "check", ui.tap),
+                M(21, t("Sounds"), "check", ui.sounds),
                 M(4, kind="separator"),
-                M(40, f"Speech model: {current}", children=model_items),
-                M(41, f"Run on: {'graphics card' if on_gpu else 'processor'}", children=run_on),
-                M(42, "Large text", children=[
-                    M(420, "Big status panel while dictating", "check", ui.big_panel),
+                M(40, t("Speech model: {model}", model=current), children=model_items),
+                M(41, t("Run on: graphics card") if on_gpu else t("Run on: processor"), children=run_on),
+                M(43, t("Status pop-up while dictating"), children=[
+                    M(430, t("Automatic: small, when the model runs on the processor"), "radio",
+                      not ui.big_panel and ui.popup == "auto"),
+                    M(431, t("Small"), "radio", not ui.big_panel and ui.popup == "on"),
+                    M(432, t("Large, for low vision"), "radio", ui.big_panel),
+                    M(433, t("Off"), "radio", not ui.big_panel and ui.popup == "off")]),
+                M(42, t("Large text"), children=[
                     *([] if MACOS else  # the menu bar item always opens its menu there
-                      [M(421, "Clicking the icon opens the big settings window", "check", ui.big_settings)]),
-                    M(422, "Text size and colours…")]),
-                M(24, "Start at login", "check", starts_at_login(APP_ID)),
+                      [M(421, t("Clicking the icon opens the big settings window"), "check", ui.big_settings)]),
+                    M(422, t("Text size and colours…"))]),
+                M(44, "Menu language · Jazyk ponúk", children=[  # (in both: whoever can't read one finds it)
+                    M(440 + i, name, "radio", ui.ui_language == code) for i, (code, name) in enumerate(i18n.LANGUAGES.items())]),
+                M(24, t("Start at login"), "check", starts_at_login(APP_ID)),
                 M(5, kind="separator"),
-                M(32, "Settings window…"),
-                M(30, "Open settings file"),
-                M(31, "Stop dictation")]
+                M(32, t("Settings window…")),
+                M(33, t("Settings in the web browser (for screen readers)…")),
+                M(30, t("Open settings file")),
+                M(31, t("Stop dictation"))]
 
     def how_to(self) -> str:
-        return f"Hold {self.key_label()} to dictate" + (", or tap it to start and stop" if self.ui.tap else "")
+        return (t("Hold {key} to dictate, or tap it to start and stop", key=self.key_label()) if self.ui.tap
+                else t("Hold {key} to dictate", key=self.key_label()))
 
     def key_label(self) -> str:
         """The key as the desktop reported it when it bound the shortcut, else from the settings."""
         with self.lock:
             key = self.state["key"] or self.ui.trigger
-        try:
-            return keys.label(keys.parse(key), sys.platform)
+        try:  # (GNOME describes the shortcut the user approved as "Press KP_Delete")
+            return keys.label(keys.parse(key.removeprefix("Press ")), sys.platform)
         except ValueError:
-            return key  # e.g. GNOME's own description of the shortcut the user approved
+            return key  # a description we can't read: as the desktop wrote it
 
     def clicked(self, item_id: int) -> None:
         if item_id in (10, 11, 12):
@@ -2391,12 +2481,18 @@ class TopBar:
             self.ui.set(**{self.model_key(): name})
         elif item_id in (410, 411):
             self.ui.set(device="gpu" if item_id == 410 else "cpu")
-        elif item_id == 420:
-            self.ui.set(big_panel=not self.ui.big_panel)
+        elif item_id in (430, 431, 433):
+            self.ui.set(big_panel=False, popup={430: "auto", 431: "on", 433: "off"}[item_id])
+        elif item_id == 432:
+            self.ui.set(big_panel=True)
         elif item_id == 421:
             self.ui.set(big_settings=not self.ui.big_settings)
         elif item_id in (32, 422):
             self.open_settings()
+        elif item_id == 33:
+            open_web_settings()
+        elif item_id in (440, 441):
+            self.ui.set(ui_language=list(i18n.LANGUAGES)[item_id - 440])
         elif item_id == 30:
             open_text_file(CONFIG_PATH)
         elif item_id == 31:
@@ -2411,7 +2507,7 @@ class TopBar:
             set_start_at_login(on, APP_ID)
         except OSError as e:
             log.warning("start at login: %s", e)
-            notify("Could not change starting at login", str(e))
+            notify(t("Could not change starting at login"), str(e))
             return
         self.ui.set(autostart=on)  # (the installers keep this choice; it also refreshes the menu)
 
@@ -2420,13 +2516,13 @@ class TopBar:
             s = dict(self.state)
         language = self.ui.language
         if s["recording"]:  # a press while a model loads still records
-            icon, tip = "recording", "Listening…"
+            icon, tip = "recording", t("Listening…")
         elif s["model_problem"] or s["key_problem"]:  # (kept apart: one being solved doesn't hide the other)
             icon, tip = "problem", s["model_problem"] or s["key_problem"]
         elif s["loading"]:
-            icon, tip = "working", "Loading the speech model…"
+            icon, tip = "working", t("Loading the speech model…")
         elif s["busy"]:
-            icon, tip = "working", "Transcribing…"
+            icon, tip = "working", t("Transcribing…")
         else:
             icon, tip = "ready", self.how_to()
         code = language.upper()
@@ -2439,9 +2535,11 @@ class TopBar:
                 label += f"  {'…' if len(preview) > 30 else ''}{preview[-30:]}"
         else:
             label = code
-        tooltip = f"{tip}\nLanguage: {LANGUAGES[language]}" + (f"\nModel: {s['model']}" if s["model"] else "")
+        tooltip = f"{tip}\n" + t("Language: {language}", language=language_name(language))
+        if s["model"]:
+            tooltip += "\n" + t("Model: {model}", model=s["model"])
         if s["download"]:
-            tooltip += f"\nDownloading {s['download']}"
+            tooltip += "\n" + t("Downloading {model}", model=s["download"])
         self.tray.set(icon=self.ICONS[icon], label=label, tooltip=tooltip)
         self.push_panel(s, code)
         self.write_status({"pid": os.getpid(), "tip": tip, "model": s["model"], "download": s["download"],
@@ -2451,13 +2549,16 @@ class TopBar:
     def push_panel(self, s: dict, code: str) -> None:
         """The big panel shows what is going on; event() shows how it ended."""
         if s["recording"]:
-            note = " (the speech model is still loading)" if s["loading"] else ""
-            message = {"show": True, "title": f"Listening — {code}{note}", "mark": "dot", "text": s["preview"],
+            title = (t("Listening — {language} (the speech model is still loading)", language=code) if s["loading"]
+                     else t("Listening — {language}", language=code))
+            message = {"show": True, "title": title, "mark": "dot", "text": s["preview"],
                        "accent": True}
         elif s["busy"]:
-            message = {"show": True, "title": "Transcribing…", "text": s["preview"]}
+            message = {"show": True, "title": t("Transcribing…"), "text": s["preview"]}
+            if s["working"]:  # the pop-up counts the seconds, against the estimate if there is one
+                message["working"] = s["working"]
         elif self.panel_ongoing:  # ended without an outcome (e.g. a recording too short to use)
-            message = {"show": True, "title": "Transcribing…", "text": s["preview"], "hide_after": 2}
+            message = {"show": True, "title": t("Transcribing…"), "text": s["preview"], "hide_after": 2}
         else:
             return
         self.panel_ongoing = "hide_after" not in message
@@ -2576,13 +2677,13 @@ class Controller:
             if self.state in ("HOLD", "LATCHED", "TAIL"):
                 self._finish()
             self.state = "IDLE"
-            self.topbar.update(key_problem="Waiting for the keyboard shortcut…")
+            self.topbar.update(key_problem=t("Waiting for the keyboard shortcut…"))
         elif kind == "not_approved":
-            notify("Dictation shortcut was not approved",
-                   "Run 'systemctl --user restart dictate' to see GNOME's dialog again.")
+            notify(t("Dictation shortcut was not approved"),
+                   t("Run 'systemctl --user restart dictate' to see GNOME's dialog again."))
             return 3
         elif kind == "fatal":
-            notify("Dictation stopped", str(value))
+            notify(t("Dictation stopped"), str(value))
             return 1
         elif kind == "quit":
             if self.session:
@@ -2712,7 +2813,7 @@ def run_daemon(cfg) -> int:
         threading.Thread(target=PortAudioRecorder.warm_up, name="audio-devices", daemon=True).start()
     if keyboard is None:
         log.error("cannot create the virtual keyboard: %s", no_keyboard)
-        notify("Dictation can't type", f"{no_keyboard}; text will only be copied.")
+        notify(t("Dictation can't type"), t("{problem}; text will only be copied.", problem=no_keyboard))
     transcriber = Transcriber(cfg)
     paster = Paster(cfg, selection, keyboard, no_keyboard)
     paster.start()
@@ -2941,28 +3042,29 @@ def ask(question: str, options: list[tuple[str, str]], default: str, env: str | 
         print(f"{question} {preset} ({env})")
         return preset
     if preset:
-        print(f"{env}={preset!r} is not one of: {', '.join(keys)}")
+        print(t("{name}={value!r} is not one of: {choices}", name=env, value=preset, choices=", ".join(keys)))
     if not sys.stdin or not sys.stdin.isatty():
         print(f"{question} {default}")
         return default
     print(f"\n{question}")
     for i, (key, label) in enumerate(options, 1):
-        print(f"  {i}) {label}" + (f"   <- {note}" if key == default else ""))
+        print(f"  {i}) {label}" + (f"   <- {t(note)}" if key == default else ""))
     while True:
-        answer = read_line(f"Type 1-{len(options)} and Enter, or just Enter for {keys.index(default) + 1}: ")
+        answer = read_line(t("Type 1-{last} and Enter, or just Enter for {default}: ", last=len(options),
+                             default=keys.index(default) + 1))
         if not answer:
             return default
         if answer.isdigit() and 1 <= int(answer) <= len(options):
             return keys[int(answer) - 1]
         if answer in keys:
             return answer
-        print("Please type one of the numbers, or just press Enter.")
+        print(t("Please type one of the numbers, or just press Enter."))
 
 
 def ensure_config(cpu_only: bool) -> None:
     """Create config.toml from config.example.toml if there is none; keep an existing one."""
     if CONFIG_PATH.exists():
-        print(f"Keeping your settings file {CONFIG_PATH}")
+        print(t("Keeping your settings file {path}", path=CONFIG_PATH))
         return
     example = Path(__file__).resolve().parent / "config.example.toml"
     CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -2971,7 +3073,7 @@ def ensure_config(cpu_only: bool) -> None:
         text += ("\n# No usable GPU found at install time: the model runs on the CPU and live typing "
                  "starts off.\nlive_typing = false\n")
     CONFIG_PATH.write_text(text, encoding="utf-8")
-    print(f"Created the settings file {CONFIG_PATH}")
+    print(t("Created the settings file {path}", path=CONFIG_PATH))
 
 
 def previous_setup() -> bool:
@@ -2984,20 +3086,20 @@ def ask_key(hw, current: str | None = None) -> str:
     """The push-to-talk key: suggested for this keyboard (or the current one, when updating), or any
     key or combination typed in."""
     if MACOS:  # MacBooks have no numpad; Left Option still types @ # { } on Slovak layouts
-        options = [("Alt_R", "Right Option (⌥)"), ("Super_R", "Right Command (⌘)"),
-                   ("KP_Delete", "numpad . (a keyboard with a numpad)")]
+        options = [("Alt_R", t("Right Option (⌥)")), ("Super_R", t("Right Command (⌘)")),
+                   ("KP_Delete", t("numpad . (a keyboard with a numpad)"))]
         default = "Alt_R"
     elif LINUX and os.environ.get("XDG_SESSION_TYPE") == "wayland":  # the desktop's dialog can change it
-        options, default = [("KP_Delete", "numpad Del / .   (keyboards with a numpad)")], "KP_Delete"
+        options, default = [("KP_Delete", t("numpad Del / .   (keyboards with a numpad)"))], "KP_Delete"
     else:
-        options = [("KP_Delete", "numpad Del / .   (keyboards with a numpad)"),
-                   ("Control_R", "Right Ctrl        (laptops; it still works in shortcuts)")]
+        options = [("KP_Delete", t("numpad Del / .   (keyboards with a numpad)")),
+                   ("Control_R", t("Right Ctrl        (laptops; it still works in shortcuts)"))]
         default = "Control_R" if hw.laptop else "KP_Delete"
     if current and current not in [key for key, _ in options]:
         options.insert(0, (current, keys.label(keys.parse(current), sys.platform)))
-    options.append(("other", "another key or a combination, typed in (e.g. F13, Ctrl+Alt+D)"))
-    question = "Which key do you hold to dictate?" + (" (On Wayland the desktop then shows its own dialog "
-                                                      "to approve or change it.)" if LINUX else "")
+    options.append(("other", t("another key or a combination, typed in (e.g. F13, Ctrl+Alt+D)")))
+    question = (t("Which key do you hold to dictate? (On Wayland the desktop then shows its own dialog to approve or "
+                  "change it.)") if LINUX else t("Which key do you hold to dictate?"))
     preset = os.environ.get("DICTATE_KEY", "").strip()
     if preset and valid_trigger(preset):
         print(f"{question} {keys.parse(preset)} (DICTATE_KEY)")
@@ -3007,7 +3109,7 @@ def ask_key(hw, current: str | None = None) -> str:
     if choice != "other":
         return choice
     while True:
-        text = read_line("Type the key or combination (Enter for the suggestion): ")
+        text = read_line(t("Type the key or combination (Enter for the suggestion): "))
         if not text:
             return default
         try:
@@ -3023,40 +3125,47 @@ def run_setup(cfg, gpu: str) -> int:
     variable (DICTATE_LANGUAGE, DICTATE_MODEL, DICTATE_KEY, DICTATE_LARGE_UI) changes only its own."""
     if gpu == "auto":  # what the installed GPU libraries say
         gpu = {"cuda": "nvidia", "rocm": "amd"}.get(preload_gpu_libraries()[0], "none")
-    hw = models.probe(None if gpu == "none" else gpu)
-    print(f"This computer: {hw.describe()}")
     ui = UiState(cfg)
+    # The installer asked this first (before anything else, in its own words): menus and messages.
+    ui_language = os.environ.get("DICTATE_UI_LANGUAGE", "").strip()
+    ui_language = ui_language if ui_language in i18n.LANGUAGES else ui.ui_language
+    i18n.set_language(ui_language)
+    hw = models.probe(None if gpu == "none" else gpu)
+    print(t("This computer: {hardware}", hardware=hw.describe()))
     previous = previous_setup()
     note = "current" if previous else "recommended"
     on_gpu = gpu != "none" and ui.device != "cpu"
     keep = previous and ask(
-        f"Your current choices: language {LANGUAGES[ui.language]}, model {ui.gpu_model if on_gpu else ui.cpu_model}, "
-        f"key {keys.label(keys.parse(ui.trigger), sys.platform)}.", [("keep", "keep them"), ("change", "choose again")],
-        "keep", "DICTATE_KEEP") == "keep"
+        t("Your current choices: language {language}, model {model}, key {key}.", language=language_name(ui.language),
+          model=ui.gpu_model if on_gpu else ui.cpu_model, key=keys.label(keys.parse(ui.trigger), sys.platform)),
+        [("keep", t("keep them")), ("change", t("choose again"))], "keep", "DICTATE_KEEP") == "keep"
 
     def asked(env: str) -> bool:  # not kept: asked, or answered by its environment variable
         return not keep or bool(os.environ.get(env, "").strip())
 
     language = ui.language
     if asked("DICTATE_LANGUAGE"):
-        language = ask("Which language will you dictate?", [("en", "English"), ("sk", "Slovak (Slovenčina)"),
-                       ("auto", "Both: English or Slovak, detected each time")], ui.language if previous else "en",
-                       "DICTATE_LANGUAGE", note)
+        language = ask(t("Which language will you dictate?"),
+                       [("en", t("English")), ("sk", t("Slovak (Slovenčina)")),
+                        ("auto", t("Both: English or Slovak, detected each time"))],
+                       ui.language if previous else "auto" if ui_language == "sk" else "en", "DICTATE_LANGUAGE", note)
     device, gpu_model, cpu_model = models.recommend(hw, language)
     suggested = gpu_model or cpu_model
     if previous:  # where it runs, and the model of the other device, stay as they are
         device, gpu_model, cpu_model = ("gpu" if on_gpu else "cpu"), (ui.gpu_model if gpu != "none" else None), ui.cpu_model
     if asked("DICTATE_MODEL"):
         current = gpu_model if device == "gpu" else cpu_model
-        options = [(name, f"{name:<15}{models.size_label(name):>8}   {info}"
-                    + ("   (suggested for this computer)" if name == suggested != current else ""))
+        options = [(name, f"{name:<15}{models.size_label(name):>8}   {t(info)}"
+                    + ("   " + t("(suggested for this computer)") if name == suggested != current else ""))
                    for name, (_, _, info) in models.MODELS.items()]
         if current not in models.MODELS:  # a model of your own
-            options.insert(0, (current, f"{current:<15}{'':>8}   your own model"))
-        where = ("on the graphics card" if device == "gpu" else
-                 "on the processor" + (" (no usable graphics card)" if gpu == "none" else ""))
-        chosen = ask(f"Which speech model? It runs {where}; bigger models are more accurate but slower.",
-                     options, current, "DICTATE_MODEL", note)
+            options.insert(0, (current, f"{current:<15}{'':>8}   " + t("your own model")))
+        question = (t("Which speech model? It runs on the graphics card; bigger models are more accurate but slower.")
+                    if device == "gpu" else
+                    t("Which speech model? It runs on the processor (no usable graphics card); bigger models are more "
+                      "accurate but slower.") if gpu == "none" else
+                    t("Which speech model? It runs on the processor; bigger models are more accurate but slower."))
+        chosen = ask(question, options, current, "DICTATE_MODEL", note)
         if device == "gpu":
             gpu_model = chosen
         else:
@@ -3065,13 +3174,13 @@ def run_setup(cfg, gpu: str) -> int:
     large_now = "both" if ui.big_settings else "panel" if ui.big_panel else "off"
     large = large_now
     if asked("DICTATE_LARGE_UI"):
-        large = ask("Large text, for low vision? (Size and colours can be changed later in the settings window.)",
-                    [("off", "no"), ("panel", "a big status panel while dictating"),
-                     ("both", "the big panel, and a big settings window when you click the tray icon")],
+        large = ask(t("Large text, for low vision? (Size and colours can be changed later in the settings window.)"),
+                    [("off", t("no")), ("panel", t("a big status panel while dictating")),
+                     ("both", t("the big panel, and a big settings window when you click the tray icon"))],
                     large_now if previous else "off", "DICTATE_LARGE_UI", note)
     ensure_config(cpu_only=device == "cpu")
     ui = UiState(load_config())
-    changes = {"language": language, "cpu_model": cpu_model, "trigger": trigger}
+    changes = {"language": language, "cpu_model": cpu_model, "trigger": trigger, "ui_language": ui_language}
     if gpu_model:
         changes["gpu_model"] = gpu_model
     if large != large_now:
@@ -3085,11 +3194,11 @@ def run_setup(cfg, gpu: str) -> int:
 def finish_setup(gpu_model: str | None, cpu_model: str) -> int:
     for name in dict.fromkeys(m for m in (gpu_model, cpu_model) if m):
         if models.installed(MODELS_DIR, name):
-            print(f"The {name} model is already downloaded")
+            print(t("The {model} model is already downloaded", model=name))
         elif name in models.MODELS:
-            print(f"Downloading the {name} model ({models.size_label(name)})…", flush=True)
+            print(t("Downloading the {model} model ({size})…", model=name, size=models.size_label(name)), flush=True)
             models.download(MODELS_DIR, name)
-    print("\nLoading the model once to check it:", flush=True)
+    print("\n" + t("Loading the model once to check it:"), flush=True)
     return subprocess.run([sys.executable, str(Path(__file__).resolve()), "--check-model"]).returncode
 
 
@@ -3124,7 +3233,7 @@ def run_check_model(cfg) -> int:
     print(f"ok   model: {tr.desc}, loaded in {loaded:.1f} s; a pass for a short dictation takes about "
           f"{time.monotonic() - started:.1f} s")
     if tr.on_cpu and ui.device != "cpu" and tr.gpu_available:
-        print("note the GPU could not be used, so the model runs on the CPU (the log has the reason)")
+        print("note " + t("the GPU could not be used, so the model runs on the CPU (the log has the reason)"))
     return 0
 
 
@@ -3188,7 +3297,9 @@ def main() -> int:
     if args.check_model:
         return run_check_model(cfg)
     if args.start_at_login:
-        return run_start_at_login(cfg, args.start_at_login == "saved" and UiState(cfg).autostart)
+        ui = UiState(cfg)
+        i18n.set_language(ui.ui_language)
+        return run_start_at_login(cfg, args.start_at_login == "saved" and ui.autostart)
     return run_daemon(cfg)
 
 

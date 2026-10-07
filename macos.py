@@ -18,6 +18,7 @@ import threading
 import time
 
 import keys
+from i18n import t
 
 log = logging.getLogger("dictate")
 MARK = 0x44494354  # "DICT" in kCGEventSourceUserData: our own events
@@ -93,8 +94,8 @@ class Hotkey(threading.Thread):
         except ValueError:  # e.g. Pause or Scroll Lock: Mac keyboards have none
             log.warning("%s has no key on a Mac: using Right Option", self.trigger)
             from dictate import notify
-            notify("Dictation key not on a Mac", f"{self.trigger} doesn't exist on a Mac keyboard, so Right Option "
-                   "is used. Choose another key in the settings window.")
+            notify(t("Dictation key not on a Mac"), t("{key} doesn't exist on a Mac keyboard, so Right Option is used. "
+                                                      "Choose another key in the settings window.", key=self.trigger))
             self.trigger = keys.parse("Alt_R")
             self.code = keys.mac(self.trigger)
         self.flags = keys.mac_flags(self.trigger)
@@ -117,8 +118,8 @@ class Hotkey(threading.Thread):
                     permissions(ask=True)
                     open_settings("accessibility")
                     from dictate import notify
-                    notify("Allow Dictate to use the keyboard", "In System Settings > Privacy & Security, switch "
-                           "Dictate on under Accessibility and under Input Monitoring.")
+                    notify(t("Allow Dictate to use the keyboard"), t("In System Settings > Privacy & Security, switch "
+                           "Dictate on under Accessibility and under Input Monitoring."))
                 time.sleep(3)
         source = Quartz.CFMachPortCreateRunLoopSource(None, self.tap, 0)
         Quartz.CFRunLoopAddSource(Quartz.CFRunLoopGetCurrent(), source, Quartz.kCFRunLoopCommonModes)

@@ -11,6 +11,8 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
+from i18n import t
+
 # name: (Hugging Face repository, download size in MB, what it is like). All multilingual.
 MODELS = {
     "tiny": ("Systran/faster-whisper-tiny", 76, "fastest; rough English, no Slovak"),
@@ -82,8 +84,9 @@ class Hardware:
 
     def describe(self) -> str:
         gpu = (f"{self.gpu_name or self.gpu.upper() + ' GPU'}" + (f" ({self.vram_gb:.0f} GB)" if self.vram_gb else "")
-               if self.gpu else "no usable GPU")
-        return f"{gpu}; {self.cores}-core CPU; {self.ram_gb:.0f} GB RAM" + ("; laptop" if self.laptop else "")
+               if self.gpu else t("no usable GPU"))
+        return (t("{gpu}; {cores}-core CPU; {ram} GB RAM", gpu=gpu, cores=self.cores, ram=f"{self.ram_gb:.0f}")
+                + ("; " + t("laptop") if self.laptop else ""))
 
 
 def has_system_battery(power_supply: Path = Path("/sys/class/power_supply")) -> bool:

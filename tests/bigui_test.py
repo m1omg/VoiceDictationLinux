@@ -132,7 +132,10 @@ try:
     press("space")
     time.sleep(0.5)
     checks.append(("arrow key and Space choose Slovak", state().get("language") == "sk"))
-    for _ in range(11):  # down to "Change it…" (3 languages, 2 typing, 5 models, 2 devices)
+    buttons = subprocess.run([sys.executable, "-c", "import bigui\nprint(' '.join(r[1] for r in bigui.SettingsModel()"
+                              ".rows() if r[0] == 'button'))"], env=env, cwd=ROOT, capture_output=True, text=True,
+                             timeout=30).stdout.split()
+    for _ in range(buttons.index("key:change") - buttons.index("lang:sk")):  # down to "Change it…" (every button counts)
         press("Down")
     press("Return")
     time.sleep(0.5)

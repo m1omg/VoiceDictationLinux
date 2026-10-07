@@ -40,6 +40,11 @@ backend = "auto"
 # tap_to_toggle = true        # a quick tap starts dictating until the next press
 # sounds = true
 #
+# A small pop-up while dictating that counts the seconds while transcribing (against the time it
+# expects): "auto" shows it when the model runs on the processor, where a long dictation can take a
+# while; "on" always; "off" never. (The menu's Status pop-up changes it; the big panel replaces it.)
+# status_popup = "auto"
+#
 # Large text, for low vision: a big status panel while dictating, and the big settings window when
 # the tray icon is clicked; their size (1.0 - 3.0) and colours ("yellow-on-black", "white-on-black",
 # "black-on-white" or "black-on-yellow"), and where the panel shows ("bottom" or "top").

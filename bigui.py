@@ -26,6 +26,9 @@ from pathlib import Path
 
 from PIL import Image, ImageDraw, ImageFont
 
+import i18n
+from i18n import t
+
 HERE = Path(__file__).resolve().parent
 WINDOWS, MACOS = sys.platform == "win32", sys.platform == "darwin"
 SCHEMES = {  # name: (text, background, accent for the recording dot and problems)
@@ -215,18 +218,76 @@ def _find_primary_monitor(root: tk.Tk) -> tuple[int, int, int, int]:
 
 # --- the status panel ------------------------------------------------------------------------
 def panel_image(msg: dict, width: int, px: int) -> Image.Image:
-    """The panel's picture for a message: the title (with its mark), then the last three lines of
-    what was heard, in a frame. width and px (the text height) are in pixels."""
+    """The panel's picture for a message: the title (with its mark), a note, then the last lines of
+    what was heard (three, or two in the small pop-up), and a progress bar, in a frame. width and px
+    (the text height) are in pixels."""
     fg, bg, accent = SCHEMES.get(msg.get("colors"), SCHEMES["yellow-on-black"])
     pad = px // 2
     f = font(px)
     room = width - 2 * pad - (mark_width(px) if msg.get("mark") else 0)
     lines = [(line, accent if msg.get("accent") else fg) for line in wrap(msg.get("title", ""), f, room)]
+    lines += [(line, fg) for line in wrap(msg.get("note", ""), f, room)]
     words = wrap(msg.get("text", ""), f, room)
-    if len(words) > 3:  # the last three lines: what was just said
-        words = ["…" + words[-3]] + words[-2:]
+    keep = 2 if msg.get("size") == "small" else 3
+    if len(words) > keep:  # the last lines: what was just said
+        words = ["…" + words[-keep]] + words[1 - keep:]
     lines += [(line, fg) for line in words]
-    return framed(text_image(lines, width, px, bg, pad, msg.get("mark")), max(2, px // 8), fg)
+    image = text_image(lines, width, px, bg, pad, msg.get("mark"))
+    if "bar" in msg or "bar_phase" in msg:
+        image = with_bar(image, msg, pad, px, fg, bg)
+    return framed(image, max(2, px // 8), fg)
+
+
+def with_bar(image: Image.Image, msg: dict, pad: int, px: int, fg: str, bg: str) -> Image.Image:
+    """The image with a progress bar under it: filled to msg["bar"] (0-1), or, while nobody knows how
+    long it takes, a piece that travels along it (msg["bar_phase"], 0-1), so it visibly keeps going."""
+    height = max(6, px // 3)
+    out = Image.new("RGB", (image.width, image.height + height + pad // 2), bg)
+    out.paste(image, (0, 0))
+    draw = ImageDraw.Draw(out)
+    x0, x1, y0 = pad, image.width - pad, image.height - pad // 2
+    draw.rectangle((x0, y0, x1, y0 + height), outline=fg, width=max(1, height // 4))
+    if "bar" in msg:
+        draw.rectangle((x0, y0, x0 + int((x1 - x0) * max(0.0, min(1.0, float(msg["bar"])))), y0 + height), fill=fg)
+    else:
+        piece = (x1 - x0) // 4
+        phase = float(msg["bar_phase"]) % 1.0
+        start = x0 + int((x1 - x0 - piece) * (1 - abs(1 - 2 * phase)))  # there and back
+        draw.rectangle((start, y0, start + piece, y0 + height), fill=fg)
+    return out
+
+
+def progress_view(msg: dict, now: float) -> dict:
+    """A message with "working" ({"since": time.time(), "expected": seconds or None}) as it looks at
+    this moment: the seconds so far after the title, and a bar filled against the expected time, or a
+    travelling piece before there is an estimate (the first dictation after the model loaded)."""
+    work = msg.get("working")
+    if not work:
+        return msg
+    i18n.set_language(msg.get("lang", "en"))
+    elapsed = max(0.0, now - float(work.get("since", now)))
+    expected = work.get("expected")
+    out = dict(msg, title=f"{msg.get('title', '')}  {int(elapsed)} s")
+    if expected and expected > 0:
+        left = expected - elapsed
+        out["bar"] = min(0.97, elapsed / expected)
+        out["note"] = (t("About {seconds} s left", seconds=max(1, round(left))) if left >= 1
+                       else t("Almost done…") if elapsed < 2 * expected + 5 else t("Taking longer than usual…"))
+    else:
+        out["bar_phase"] = (elapsed / 3.0) % 1.0
+    return out
+
+
+def panel_px(msg: dict, dpi_scale: float) -> int:
+    """The text height in pixels: the small pop-up at about the size of the desktop's own text, the
+    big panel at the chosen size (1-3 times)."""
+    if msg.get("size") == "small":
+        return int(BASE_PX * 0.75 * dpi_scale)
+    return int(BASE_PX * 1.25 * float(msg.get("scale", 2.0)) * dpi_scale)
+
+
+def panel_width(msg: dict, screen_width: float, px: int) -> int:
+    return int(min(screen_width * 0.8, px * 26) if msg.get("size") == "small" else screen_width * 0.8)
 
 
 class Panel:
@@ -246,6 +307,8 @@ class Panel:
         self.image = None
         self.mapped = False
         self.hide_job = None
+        self.current: dict | None = None  # the message shown (redrawn every half second while it counts)
+        self.tick_job = None
         self.messages: queue.Queue = queue.Queue()
         threading.Thread(target=self._read, daemon=True).start()
         if WINDOWS:  # mapped once, now and off-screen, then only moved: a Tk window activates when shown
@@ -278,22 +341,31 @@ class Panel:
         self.root.after(50, self._poll)
 
     def apply(self, msg: dict) -> None:
-        if self.hide_job:
-            self.root.after_cancel(self.hide_job)
-            self.hide_job = None
+        for job in (self.hide_job, self.tick_job):
+            if job:
+                self.root.after_cancel(job)
+        self.hide_job = self.tick_job = None
         if not msg.get("show"):
+            self.current = None
             self.hide()
             return
+        self.current = msg
+        self.draw()
+        if msg.get("hide_after"):
+            self.hide_job = self.root.after(int(float(msg["hide_after"]) * 1000), self.hide)
+
+    def draw(self) -> None:
+        msg = progress_view(self.current, time.time())
         x0, y0, sw, sh = primary_monitor(self.root)
-        px = int(BASE_PX * 1.25 * float(msg.get("scale", 2.0)) * self.root.winfo_fpixels("1i") / 96)
-        framed = panel_image(msg, int(sw * 0.8), px)
+        px = panel_px(msg, self.root.winfo_fpixels("1i") / 96)
+        framed = panel_image(msg, panel_width(msg, sw, px), px)
         self.image = photo(framed)
         self.label.configure(image=self.image)
         x = x0 + (sw - framed.width) // 2
         y = y0 + (sh - framed.height - sh // 20 if msg.get("position", "bottom") == "bottom" else sh // 20)
         self.show(x, y, framed.width, framed.height)
-        if msg.get("hide_after"):
-            self.hide_job = self.root.after(int(float(msg["hide_after"]) * 1000), self.hide)
+        if self.current.get("working"):
+            self.tick_job = self.root.after(500, self.draw)
 
     def show(self, x: int, y: int, w: int, h: int) -> None:
         self.root.geometry(f"{w}x{h}+{x}+{y}")
@@ -306,6 +378,9 @@ class Panel:
 
     def hide(self) -> None:
         self.hide_job = None
+        if self.tick_job:
+            self.root.after_cancel(self.tick_job)
+            self.tick_job = None
         if WINDOWS:  # moved away: it is never shown again, which could activate it
             self.root.geometry("+-32000+-32000")
         elif self.mapped:
@@ -382,15 +457,23 @@ class MacPanel:
             print(f"panel: {e!r}", file=sys.stderr)
 
     def apply(self, msg: dict) -> None:
-        AppKit = self.AppKit
         self.generation += 1
         if not msg.get("show"):
             self.panel.orderOut_(None)
             return
+        self.draw(msg, self.generation)
+        if msg.get("hide_after"):
+            self.AppHelper.callLater(float(msg["hide_after"]), self._hide, self.generation)
+
+    def draw(self, original: dict, generation: int) -> None:
+        if generation != self.generation:  # something newer is shown
+            return
+        AppKit = self.AppKit
+        msg = progress_view(original, time.time())
         screen = AppKit.NSScreen.screens()[0]  # the one with the menu bar
         usable, pixels = screen.visibleFrame(), screen.backingScaleFactor()  # (above the Dock)
-        px = int(BASE_PX * 1.25 * float(msg.get("scale", 2.0)) * pixels)
-        image = panel_image(msg, int(usable.size.width * 0.8 * pixels), px)
+        px = panel_px(msg, pixels)
+        image = panel_image(msg, panel_width(msg, usable.size.width * pixels, px), px)
         buf = io.BytesIO()
         image.save(buf, "PNG", compress_level=1)
         data = buf.getvalue()
@@ -404,8 +487,8 @@ class MacPanel:
              else usable.origin.y + usable.size.height - h - gap)  # (AppKit counts y from the bottom)
         self.panel.setFrame_display_(((x, y), (w, h)), True)
         self.panel.orderFrontRegardless()  # shown without activating the app
-        if msg.get("hide_after"):
-            self.AppHelper.callLater(float(msg["hide_after"]), self._hide, self.generation)
+        if original.get("working"):
+            self.AppHelper.callLater(0.5, self.draw, original, generation)
 
     def _hide(self, generation: int) -> None:
         if generation == self.generation:  # nothing newer was shown meanwhile
@@ -435,6 +518,13 @@ SOLO_KEYS = {"Fn", "ISO_Level3_Shift"}  # held like modifiers, but they can be t
 WINDOWS_EXTENDED = 0x40000  # in a Tk key event's state on Windows: an extended key (numpad Enter, not Enter)
 
 
+def touchpad_dy(delta: int) -> int:
+    """The vertical movement in a <TouchpadScroll> event's delta: Tk packs x into its high 16 bits and
+    y into its low 16 bits, each signed (tk::PreciseScrollDeltas)."""
+    dy = delta & 0xFFFF
+    return dy - 0x10000 if dy & 0x8000 else dy
+
+
 def signature(rows: list[tuple]) -> list[tuple]:
     """What a list of rows shows (without the buttons' actions): rebuilt only when this changes."""
     return [row[:5] if row[0] == "button" else row for row in rows]
@@ -444,10 +534,11 @@ def sentence(text: str) -> str:
     return text if text[-1:] in (".", "…", "!", "?") else text + "."
 
 
-class Settings:
-    """Every choice of the tray menu as large buttons, driven fully by the keyboard: Tab or the
-    arrow keys move, Space or Enter choose, Esc closes. The buttons are pictures with a thick
-    frame around the focused one, so they look the same on every system."""
+class SettingsModel:
+    """The choices of the settings windows (rows()) and what choosing one does, without a window: the
+    big window (Settings, Tk) draws them as large buttons, the browser page (websettings.py) as a
+    form that screen readers can read. Both save state.json, which dictate watches."""
+    web = False  # the browser page: it captures a new key itself and has no "open in the browser" button
 
     def __init__(self):
         sys.path.insert(0, str(HERE))
@@ -457,15 +548,217 @@ class Settings:
         self.d, self.keys, self.models = dictate, keys, models
         self.cfg = dictate.load_config()
         self.ui = dictate.UiState(self.cfg)
+        i18n.set_language(self.ui.ui_language)
         self.state_mtime = self._mtime()
         self.capturing = False
         self.message = ""  # at the top (e.g. "Dictation is stopping")
         self.key_message = ""  # in the key section (the capture prompt and its outcome)
         self.focus_id = None  # the button to focus after the next rebuild
+
+    # --- what the window does (the big window draws again; the browser page asks every second) ---
+    def refresh(self) -> None:
+        pass
+
+    def later(self, seconds: float, action) -> None:
+        threading.Timer(seconds, action).start()
+
+    def close(self) -> None:
+        pass
+
+    # --- reading and writing the choices ---
+    def _mtime(self) -> float:
+        try:
+            return self.d.STATE_PATH.stat().st_mtime
+        except OSError:
+            return 0.0
+
+    def reload(self) -> None:
+        """Take over a choice made elsewhere (the tray menu, the other settings window)."""
+        if self._mtime() != self.state_mtime:
+            self.state_mtime = self._mtime()
+            self.ui = self.d.UiState(self.cfg)
+            i18n.set_language(self.ui.ui_language)
+
+    def status(self) -> dict:
+        """What the running dictation reports (in dictate.STATUS_PATH), or {} if it isn't running."""
+        try:
+            import psutil
+            status = json.loads(self.d.STATUS_PATH.read_text(encoding="utf-8"))
+            return status if psutil.pid_exists(status["pid"]) else {}
+        except (OSError, ValueError, KeyError, TypeError, ImportError):
+            return {}
+
+    def set(self, **changes) -> None:
+        self.ui.set(**changes)
+        self.state_mtime = self._mtime()
+        if "ui_language" in changes:
+            i18n.set_language(self.ui.ui_language)
+        self.refresh()
+
+    def toggle_login(self) -> None:
+        on = not self.d.starts_at_login(self.cfg.app_id)
+        try:
+            self.d.set_start_at_login(on, self.cfg.app_id)
+        except OSError as e:
+            self.message = t("Could not change starting at login: {error}", error=e)
+            self.refresh()
+            return
+        self.message = ""
+        self.set(autostart=on)  # (the installers keep this choice)
+
+    def stop(self) -> None:
+        try:  # the systemd service (else it would start dictation again): stopped through systemd
+            service = not WINDOWS and not MACOS and "dictate.service" in subprocess.run(
+                ["systemctl", "--user", "list-units", "--state=active", "dictate.service"],
+                capture_output=True, text=True, timeout=5).stdout
+        except (OSError, subprocess.TimeoutExpired):  # no systemd (Devuan, Void, Alpine)
+            service = False
+        if service:
+            subprocess.Popen(["systemctl", "--user", "stop", "dictate.service"])
+        else:
+            self.d.RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
+            self.d.COMMAND_PATH.write_text("quit\n", encoding="utf-8")
+        self.message = t("Dictation is stopping.")
+        self.later(1.5, self.refresh)
+
+    def capture(self) -> None:
+        self.capturing = True
+        self.key_message = t("Press the new dictation key, or a key combination like Ctrl+Alt+D, now. Esc cancels.")
+        self.refresh()
+
+    def cancel_capture(self) -> None:
+        self.capturing, self.key_message, self.focus_id = False, t("The key was not changed."), "key:change"
+        self.refresh()
+
+    def key_problem(self, error: str) -> None:
+        """A key that can't be the dictation key was pressed during a capture."""
+        self.key_message = t("{problem} Try another key or combination; Esc cancels.",
+                             problem=sentence(error[0].upper() + error[1:]))
+        self.refresh()
+
+    def set_key(self, trigger: str) -> None:
+        self.capturing = False
+        wayland = os.environ.get("XDG_SESSION_TYPE") == "wayland" and not WINDOWS and not MACOS
+        label = self.keys.label(self.keys.parse(trigger), sys.platform)
+        self.key_message = (t("New key: {key}. Dictation restarts to use it, and your desktop asks you to approve it.",
+                              key=label) if wayland else t("New key: {key}. Dictation restarts to use it.", key=label))
+        self.focus_id = "key:change"
+        self.set(trigger=trigger)
+
+    def open_web(self) -> None:
+        """The same settings as a page in the web browser, which screen readers can read."""
+        try:
+            subprocess.Popen([sys.executable, str(HERE / "websettings.py")], stdin=subprocess.DEVNULL,
+                             start_new_session=not WINDOWS, creationflags=0x08000000 if WINDOWS else 0)
+        except OSError as e:
+            self.message = str(e)
+            self.refresh()
+
+    # --- the rows ---
+    def rows(self) -> list[tuple]:
+        """("heading" or "text", text), or ("button", id, label, mark, enabled, action[, colour scheme]):
+        mark is "radio:on", "check:off", ... or "" for a plain button; the id stays the same across
+        rebuilds, so the keyboard focus stays where it was."""
+        ui, models, status = self.ui, self.models, self.status()
+        on = lambda b: "on" if b else "off"  # noqa: E731
+        gpu_ok = status.get("gpu_available") is not False
+        on_gpu = ui.device != "cpu" and gpu_ok
+        model_key = "gpu_model" if on_gpu else "cpu_model"
+        current = getattr(ui, model_key)
+        rows = [("heading", t("Dictate settings"))]
+        if status:
+            tip = (status.get("tip") or "").strip()
+            rows.append(("text", t("Dictation is running.") + (f" {sentence(tip)}" if tip else "")
+                         + (" " + t("Model: {model}.", model=status["model"]) if status.get("model") else "")))
+        else:
+            rows.append(("text", t("Dictation is not running.")))
+        if self.message:
+            rows.append(("text", self.message))
+        rows.append(("heading", t("Language you dictate in")))
+        for code in self.d.LANGUAGES:
+            rows.append(("button", f"lang:{code}", self.d.language_name(code), f"radio:{on(ui.language == code)}", True,
+                         lambda c=code: self.set(language=c)))
+        rows.append(("heading", "Menu language · Jazyk ponúk"))  # (in both: whoever can't read one finds it)
+        for code, name in i18n.LANGUAGES.items():
+            rows.append(("button", f"uilang:{code}", name, f"radio:{on(ui.ui_language == code)}", True,
+                         lambda c=code: self.set(ui_language=c)))
+        rows.append(("heading", t("Typing")))
+        rows.append(("button", "live", t("Type while speaking"), f"check:{on(ui.live)}", True,
+                     lambda: self.set(live=not ui.live)))
+        rows.append(("button", "instant", t("Type instantly, correcting as it goes"), f"check:{on(ui.instant)}",
+                     ui.live, lambda: self.set(instant=not ui.instant)))
+        rows.append(("button", "tap", t("Tap to start and stop"), f"check:{on(ui.tap)}", True,
+                     lambda: self.set(tap=not ui.tap)))
+        rows.append(("button", "sounds", t("Sounds"), f"check:{on(ui.sounds)}", True,
+                     lambda: self.set(sounds=not ui.sounds)))
+        rows.append(("heading", t("Speech model (runs on the graphics card)") if on_gpu
+                     else t("Speech model (runs on the processor)")))
+        downloading = status.get("download") or ""
+        for name, (_repo, _mb, info) in models.MODELS.items():
+            if downloading.startswith(name + " "):
+                note = t(", downloading {progress}", progress=downloading.split(" ", 1)[1])
+            elif not models.installed(self.d.MODELS_DIR, name):
+                note = t(", download {size}", size=models.size_label(name))
+            else:
+                note = ""
+            rows.append(("button", f"model:{name}", f"{name}: {t(info)}{note}", f"radio:{on(current == name)}", True,
+                         lambda n=name: self.set(**{model_key: n})))
+        rows.append(("heading", t("Run on")))
+        rows.append(("button", "device:gpu", t("Graphics card (GPU)") if gpu_ok else t("Graphics card (GPU): none can be used"),
+                     f"radio:{on(on_gpu)}", gpu_ok, lambda: self.set(device="gpu")))
+        rows.append(("button", "device:cpu", t("Processor (CPU)"), f"radio:{on(not on_gpu)}", True,
+                     lambda: self.set(device="cpu")))
+        rows.append(("heading", t("Dictation key")))
+        if self.key_message:
+            rows.append(("text", self.key_message))
+        label = self.keys.label(self.keys.parse(ui.trigger), sys.platform)
+        rows.append(("button", "key:change", t("Hold: {key}. Change it…", key=label), "", True, self.capture))
+        if ui.trigger != "KP_Delete":
+            rows.append(("button", "key:default", t("Use numpad Del again"), "", True, lambda: self.set_key("KP_Delete")))
+        rows.append(("heading", t("Status pop-up while dictating")))
+        for choice, label in (("auto", t("Automatic: small, when the model runs on the processor")), ("on", t("Small")),
+                              ("large", t("Large, for low vision")), ("off", t("Off"))):
+            chosen = ui.big_panel if choice == "large" else not ui.big_panel and ui.popup == choice
+            change = {"big_panel": True} if choice == "large" else {"big_panel": False, "popup": choice}
+            rows.append(("button", f"popup:{choice}", label, f"radio:{on(chosen)}", True,
+                         lambda c=change: self.set(**c)))
+        for where, label in (("bottom", t("Pop-up at the bottom of the screen")), ("top", t("Pop-up at the top of the screen"))):
+            rows.append(("button", f"pos:{where}", label, f"radio:{on(ui.panel_position == where)}", True,
+                         lambda w=where: self.set(panel_position=w)))
+        rows.append(("heading", t("Large text")))
+        if not MACOS:  # (the menu bar item always opens its menu there)
+            rows.append(("button", "click", t("Clicking the tray icon opens this window"), f"check:{on(ui.big_settings)}",
+                         True, lambda: self.set(big_settings=not ui.big_settings)))
+        for scale in SCALES:
+            rows.append(("button", f"size:{scale:g}", t("Size {size}×", size=f"{scale:g}"),
+                         f"radio:{on(abs(ui.ui_scale - scale) < 0.01)}", True, lambda s=scale: self.set(ui_scale=s)))
+        for scheme, name in SCHEME_LABELS.items():
+            rows.append(("button", f"colours:{scheme}", t(name), f"radio:{on(ui.ui_colors == scheme)}", True,
+                         lambda c=scheme: self.set(ui_colors=c), scheme))
+        rows.append(("heading", t("Starting")))
+        rows.append(("button", "login", t("Start dictation at login"), f"check:{on(self.d.starts_at_login(self.cfg.app_id))}",
+                     True, self.toggle_login))
+        rows.append(("heading", ""))
+        rows.append(("button", "open", t("Open the settings file"), "", True, lambda: self.d.open_text_file(self.d.CONFIG_PATH)))
+        if not self.web:  # (the tray menu has it too, where screen readers can read it)
+            rows.append(("button", "web", t("Open these settings in the web browser (for screen readers)"), "", True,
+                         self.open_web))
+        if status:
+            rows.append(("button", "stop", t("Stop dictation"), "", True, self.stop))
+        rows.append(("button", "close", t("Close this window"), "", True, self.close))
+        return rows
+
+class Settings(SettingsModel):
+    """Every choice of the tray menu as large buttons, driven fully by the keyboard: Tab or the
+    arrow keys move, Space or Enter choose, Esc closes. The buttons are pictures with a thick
+    frame around the focused one, so they look the same on every system."""
+
+    def __init__(self):
+        super().__init__()
         self.last_focus_id = None  # the button that had the focus last
         dpi_aware()
         self.root = root = tk.Tk()
-        root.title("Dictate settings")
+        root.title(t("Dictate settings"))
         root.protocol("WM_DELETE_WINDOW", root.destroy)
         root.bind("<Escape>", self._escape)
         root.bind("<KeyPress>", self._key, add=True)
@@ -476,6 +769,10 @@ class Settings:
         self.canvas.create_window(0, 0, window=self.frame, anchor="nw")
         for sequence in ("<MouseWheel>", "<Button-4>", "<Button-5>"):
             root.bind_all(sequence, self._wheel)
+        try:  # Tk 9 on macOS reports two-finger scrolling on a touchpad as this, not as <MouseWheel>
+            root.bind_all("<TouchpadScroll>", self._touchpad)
+        except tk.TclError:  # Tk 8.6
+            pass
         self.images: list = []
         self.buttons: list[tk.Label] = []
         self.shown: list = []  # signature() of the rows on screen
@@ -490,130 +787,31 @@ class Settings:
         # itself would leave the arrow keys and Space with nothing to act on).
         root.after(200, lambda: (self.focus_target or root).focus_force())
 
-    # --- reading and writing the choices ---
-    def _mtime(self) -> float:
-        try:
-            return self.d.STATE_PATH.stat().st_mtime
-        except OSError:
-            return 0.0
-
-    def status(self) -> dict:
-        """What the running dictation reports (in dictate.STATUS_PATH), or {} if it isn't running."""
-        try:
-            import psutil
-            status = json.loads(self.d.STATUS_PATH.read_text(encoding="utf-8"))
-            return status if psutil.pid_exists(status["pid"]) else {}
-        except (OSError, ValueError, KeyError, TypeError, ImportError):
-            return {}
-
-    def set(self, **changes) -> None:
-        self.ui.set(**changes)
-        self.state_mtime = self._mtime()
+    def refresh(self) -> None:
         self.build()
 
-    def toggle_login(self) -> None:
-        on = not self.d.starts_at_login(self.cfg.app_id)
-        try:
-            self.d.set_start_at_login(on, self.cfg.app_id)
-        except OSError as e:
-            self.message = f"Could not change starting at login: {e}"
-            self.build()
-            return
-        self.message = ""
-        self.set(autostart=on)  # (the installers keep this choice)
+    def later(self, seconds: float, action) -> None:
+        self.root.after(int(seconds * 1000), action)
+
+    def close(self) -> None:
+        self.root.destroy()
+
+    def capture(self) -> None:
+        self.down, self.lone = {}, None
+        super().capture()
 
     def _watch(self):
         """Show what changed elsewhere: a choice made in the tray menu, what dictation is doing, a
         finished download."""
         if not self.capturing:
-            if self._mtime() != self.state_mtime:
-                self.state_mtime = self._mtime()
-                self.ui = self.d.UiState(self.cfg)
+            self.reload()
             if signature(self.rows()) != self.shown:
                 self.build()
         self.root.after(1000, self._watch)
 
     # --- layout ---
-    def rows(self) -> list[tuple]:
-        """("heading" or "text", text), or ("button", id, label, mark, enabled, action[, colour scheme]):
-        mark is "radio:on", "check:off", ... or "" for a plain button; the id stays the same across
-        rebuilds, so the keyboard focus stays where it was."""
-        ui, models, status = self.ui, self.models, self.status()
-        on = lambda b: "on" if b else "off"  # noqa: E731
-        gpu_ok = status.get("gpu_available") is not False
-        on_gpu = ui.device != "cpu" and gpu_ok
-        model_key = "gpu_model" if on_gpu else "cpu_model"
-        current = getattr(ui, model_key)
-        rows = [("heading", "Dictate settings")]
-        if status:
-            tip = (status.get("tip") or "").strip()
-            rows.append(("text", "Dictation is running." + (f" {sentence(tip)}" if tip else "")
-                         + (f" Model: {status['model']}." if status.get("model") else "")))
-        else:
-            rows.append(("text", "Dictation is not running."))
-        if self.message:
-            rows.append(("text", self.message))
-        rows.append(("heading", "Language"))
-        for code, name in self.d.LANGUAGES.items():
-            rows.append(("button", f"lang:{code}", name, f"radio:{on(ui.language == code)}", True,
-                         lambda c=code: self.set(language=c)))
-        rows.append(("heading", "Typing"))
-        rows.append(("button", "live", "Type while speaking", f"check:{on(ui.live)}", True,
-                     lambda: self.set(live=not ui.live)))
-        rows.append(("button", "instant", "Type instantly, correcting as it goes", f"check:{on(ui.instant)}", ui.live,
-                     lambda: self.set(instant=not ui.instant)))
-        rows.append(("button", "tap", "Tap to start and stop", f"check:{on(ui.tap)}", True,
-                     lambda: self.set(tap=not ui.tap)))
-        rows.append(("button", "sounds", "Sounds", f"check:{on(ui.sounds)}", True, lambda: self.set(sounds=not ui.sounds)))
-        rows.append(("heading", f"Speech model (runs on the {'graphics card' if on_gpu else 'processor'})"))
-        downloading = status.get("download") or ""
-        for name, (_repo, _mb, info) in models.MODELS.items():
-            if downloading.startswith(name + " "):
-                note = f", downloading {downloading.split(' ', 1)[1]}"
-            elif not models.installed(self.d.MODELS_DIR, name):
-                note = f", download {models.size_label(name)}"
-            else:
-                note = ""
-            rows.append(("button", f"model:{name}", f"{name}: {info}{note}", f"radio:{on(current == name)}", True,
-                         lambda n=name: self.set(**{model_key: n})))
-        rows.append(("heading", "Run on"))
-        rows.append(("button", "device:gpu", "Graphics card (GPU)" + ("" if gpu_ok else ": none can be used"),
-                     f"radio:{on(on_gpu)}", gpu_ok, lambda: self.set(device="gpu")))
-        rows.append(("button", "device:cpu", "Processor (CPU)", f"radio:{on(not on_gpu)}", True,
-                     lambda: self.set(device="cpu")))
-        rows.append(("heading", "Dictation key"))
-        if self.key_message:
-            rows.append(("text", self.key_message))
-        label = self.keys.label(self.keys.parse(ui.trigger), sys.platform)
-        rows.append(("button", "key:change", f"Hold: {label}. Change it…", "", True, self.capture))
-        if ui.trigger != "KP_Delete":
-            rows.append(("button", "key:default", "Use numpad Del again", "", True, lambda: self.set_key("KP_Delete")))
-        rows.append(("heading", "Large text"))
-        rows.append(("button", "panel", "Big status panel while dictating", f"check:{on(ui.big_panel)}", True,
-                     lambda: self.set(big_panel=not ui.big_panel)))
-        if not MACOS:  # (the menu bar item always opens its menu there)
-            rows.append(("button", "click", "Clicking the tray icon opens this window", f"check:{on(ui.big_settings)}",
-                         True, lambda: self.set(big_settings=not ui.big_settings)))
-        for where in ("bottom", "top"):
-            rows.append(("button", f"pos:{where}", f"Panel at the {where} of the screen",
-                         f"radio:{on(ui.panel_position == where)}", True, lambda w=where: self.set(panel_position=w)))
-        for scale in SCALES:
-            rows.append(("button", f"size:{scale:g}", f"Size {scale:g}×", f"radio:{on(abs(ui.ui_scale - scale) < 0.01)}",
-                         True, lambda s=scale: self.set(ui_scale=s)))
-        for scheme, name in SCHEME_LABELS.items():
-            rows.append(("button", f"colours:{scheme}", name, f"radio:{on(ui.ui_colors == scheme)}", True,
-                         lambda c=scheme: self.set(ui_colors=c), scheme))
-        rows.append(("heading", "Starting"))
-        rows.append(("button", "login", "Start dictation at login", f"check:{on(self.d.starts_at_login(self.cfg.app_id))}",
-                     True, self.toggle_login))
-        rows.append(("heading", ""))
-        rows.append(("button", "open", "Open the settings file", "", True, lambda: self.d.open_text_file(self.d.CONFIG_PATH)))
-        if status:
-            rows.append(("button", "stop", "Stop dictation", "", True, self.stop))
-        rows.append(("button", "close", "Close this window", "", True, self.root.destroy))
-        return rows
-
     def build(self) -> None:
+        self.root.title(t("Dictate settings"))  # (the interface language may have changed)
         focus_id = self.focus_id or self.last_focus_id
         self.focus_id = None
         for child in self.frame.winfo_children():
@@ -722,36 +920,17 @@ class Settings:
         delta = -1 if getattr(event, "num", 0) == 4 or getattr(event, "delta", 0) > 0 else 1
         self.canvas.yview_scroll(delta * 3, "units")
 
+    def _touchpad(self, event) -> None:
+        self.scroll_pixels(touchpad_dy(event.delta))
+
+    def scroll_pixels(self, dy: int) -> None:
+        """Move the content by dy pixels, as the fingers moved (positive: down, towards the top)."""
+        region = str(self.canvas.cget("scrollregion")).split()
+        total = float(region[3]) if len(region) == 4 else 0.0
+        if dy and total > 0:
+            self.canvas.yview_moveto(max(0.0, self.canvas.yview()[0] - dy / total))
+
     # --- actions ---
-    def stop(self) -> None:
-        try:  # the systemd service (else it would start dictation again): stopped through systemd
-            service = not WINDOWS and not MACOS and "dictate.service" in subprocess.run(
-                ["systemctl", "--user", "list-units", "--state=active", "dictate.service"],
-                capture_output=True, text=True, timeout=5).stdout
-        except (OSError, subprocess.TimeoutExpired):  # no systemd (Devuan, Void, Alpine)
-            service = False
-        if service:
-            subprocess.Popen(["systemctl", "--user", "stop", "dictate.service"])
-        else:
-            self.d.RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
-            self.d.COMMAND_PATH.write_text("quit\n", encoding="utf-8")
-        self.message = "Dictation is stopping."
-        self.root.after(1500, self.build)
-
-    def capture(self) -> None:
-        self.capturing, self.down, self.lone = True, {}, None
-        self.key_message = "Press the new dictation key, or a key combination like Ctrl+Alt+D, now. Esc cancels."
-        self.build()
-
-    def set_key(self, trigger: str) -> None:
-        self.capturing = False
-        wayland = os.environ.get("XDG_SESSION_TYPE") == "wayland" and not WINDOWS and not MACOS
-        label = self.keys.label(self.keys.parse(trigger), sys.platform)
-        self.key_message = (f"New key: {label}. Dictation restarts to use it"
-                            + (", and your desktop asks you to approve it." if wayland else "."))
-        self.focus_id = "key:change"
-        self.set(trigger=trigger)
-
     def key_name(self, event) -> str | None:
         """The key of a Tk key event as a key name of keys.py. The key's code is used where a held
         modifier changes the character (AltGr on Windows, Option on macOS) or Tk names the key
@@ -778,14 +957,13 @@ class Settings:
         held = list(self.down.values())
         try:
             if "ISO_Level3_Shift" in held:  # (it changes the key's character: đ, not d)
-                raise ValueError("AltGr can be the dictation key only on its own")
+                raise ValueError(t("AltGr can be the dictation key only on its own"))
             if name is None:
-                raise ValueError(f"{event.keysym} can't be the dictation key")
+                raise ValueError(t("{key} can't be the dictation key", key=event.keysym))
             trigger = self.keys.parse(str(self.keys.Trigger(frozenset(MODIFIER_OF[n] for n in held if n in MODIFIER_OF),
                                                             name)))
         except ValueError as e:
-            self.key_message = f"{sentence(str(e)[0].upper() + str(e)[1:])} Try another key or combination; Esc cancels."
-            self.build()
+            self.key_problem(str(e))
             return "break"
         self.set_key(str(trigger))
         return "break"
@@ -799,14 +977,12 @@ class Settings:
             try:
                 self.set_key(str(self.keys.parse(name)))
             except ValueError as e:
-                self.key_message = f"{sentence(str(e)[0].upper() + str(e)[1:])} Try another key; Esc cancels."
-                self.build()
+                self.key_problem(str(e))
         return "break"
 
     def _escape(self, _event) -> None:
         if self.capturing:
-            self.capturing, self.key_message, self.focus_id = False, "The key was not changed.", "key:change"
-            self.build()
+            self.cancel_capture()
         else:
             self.root.destroy()
 
@@ -825,6 +1001,11 @@ def main() -> int:
         else:
             Panel().root.mainloop()
     elif what == "settings":
+        sys.path.insert(0, str(HERE))
+        import dictate
+        if dictate.screen_reader_on():  # this window's pictures can't be read aloud: the browser page instead
+            import websettings
+            return websettings.main()
         settings = Settings()
         if MACOS:
             settings.root.after(100, settings.root.focus_force)

@@ -97,17 +97,21 @@ Offer the trade-off to the user: speed or accuracy. A 2-core laptop (2017 MacBoo
 measured and will be slower; `tests/bench_asr.py MODEL --cpu` measures it on their machine.
 
 ## 3. Install
-Ask the installer's questions up front, in one multiple-choice round: language (English / Slovak /
+Ask the installer's questions up front, in one multiple-choice round: the interface language
+(English / Slovenčina: installer, menus, messages), the dictation language (English / Slovak /
 both), model (see above), key (numpad Del; Right Ctrl on laptops; Right Option on Macs; or a
 combination such as Ctrl+Alt+D), large text (off / big status panel / panel and big settings
 window). Then run it without questions, in the background (the first run downloads 0.5–4 GB):
 ```bash
-DICTATE_LANGUAGE=sk DICTATE_MODEL=large-v3-turbo DICTATE_KEY=KP_Delete DICTATE_LARGE_UI=off bash install.sh
+DICTATE_UI_LANGUAGE=sk DICTATE_LANGUAGE=sk DICTATE_MODEL=large-v3-turbo DICTATE_KEY=KP_Delete DICTATE_LARGE_UI=off bash install.sh
 ```
 ```powershell
-$env:DICTATE_LANGUAGE="en"; $env:DICTATE_MODEL="small"; $env:DICTATE_KEY="Control_R"; $env:DICTATE_LARGE_UI="off"
-powershell -NoProfile -ExecutionPolicy Bypass -File install.ps1
+$env:DICTATE_UI_LANGUAGE="en"; $env:DICTATE_LANGUAGE="en"; $env:DICTATE_MODEL="small"; $env:DICTATE_KEY="Control_R"
+$env:DICTATE_LARGE_UI="off"; powershell -NoProfile -ExecutionPolicy Bypass -File install.ps1
 ```
+- Without `DICTATE_UI_LANGUAGE` and without a terminal, the installers take the saved choice, else
+  English for an install from before the question existed (`DICTATE_KEEP=keep`), else the system's
+  language. With a terminal they ask first (`Language / Jazyk`), in both languages.
 - It's safe to re-run: it keeps the settings file, the choices (`DICTATE_KEEP=keep` skips the
   "keep your choices?" question) and the models.
 - `DICTATE_NO_AUTOSTART=1` skips start-at-login while testing. Otherwise the installers run
@@ -124,7 +128,7 @@ python3 tests/fetch_fleurs.py
 $D/venv/bin/python tests/bench_asr.py           # GPU targets: en ~4 % WER, sk ~6-7 %, ~0.35-0.5 s per sentence
 $D/venv/bin/python tests/bench_live.py          # GPU targets: live WER ≈ one-shot; first words ~2 s (en)
 for t in unit_keys unit_models unit_audio unit_portability unit_windows unit_macos unit_topbar unit_setup unit_paster unit_switch \
-         unit_capture unit_login
+         unit_capture unit_login unit_i18n unit_popup unit_websettings
 do $D/venv/bin/python tests/$t.py; done
 dbus-run-session -- $D/venv/bin/python tests/unit_tray.py
 XVFB=… $D/venv/bin/python tests/x11_paste.py   # X11 desktops: key grab, combinations, repeats, paste, clipboard
@@ -315,6 +319,16 @@ input, `windows_paste.py`, and `e2e_desktop.py` / `e2e_x11.py`. It is started by
   - A tap (shorter than `Controller.TAP`) latches the dictation only while the menu's *Tap to start
     and stop* is on (`state.json` "tap", config `tap_to_toggle`); off, a short press is just a
     short hold.
+  - The status pop-up (`TopBar.popup_mode()`: "large" = `big_panel`, else `state.json` "popup"
+    auto/on/off, auto = small while the loaded model runs on the processor, `Transcriber.on_cpu`,
+    also after a graphics card failed): the same panel process
+    (`bigui.py panel`) at about 16 px and 26 em wide ("size": "small"). While the whole recording
+    is transcribed, `Worker._final` sends `working` = {"since": time.time(), "expected": pace x
+    seconds}; `Worker.pace` (seconds of work per second of audio, an average over dictations of 2 s
+    or more) starts over with every model load. The panel redraws itself every 0.5 s from that
+    (`bigui.progress_view`): seconds, a bar, *About N s left*, *Almost done…*, *Taking longer
+    than usual…* (past 2 x expected + 5 s); without an estimate, a piece travels along the bar.
+    Live-typed dictations send no count (only their tail is transcribed) (`tests/unit_popup.py`).
   - Start at login (menu, settings window, installers): `login_item()` picks the systemd unit's
     enable link (when `~/.config/systemd/user/dictate.service` exists), the XDG autostart entry,
     the LaunchAgent, or the Startup-folder shortcut (a copy of the Start menu's `Dictate.lnk`);
@@ -340,6 +354,31 @@ input, `windows_paste.py`, and `e2e_desktop.py` / `e2e_x11.py`. It is started by
   - No vocabulary hints on windows shorter than 2 s (Whisper echoes them).
   - Earlier, simpler variants were clearly worse (Slovak WER 15.9 %, invented words). Re-run
     `tests/bench_live.py` after any change.
+- **Interface language** (`i18n.py`): English is the source; `t("Sounds")` looks it up in `SK` while
+  `state.json` "ui_language" is "sk". Values go in through placeholders (`t("Hold {key} to dictate",
+  key=…)`, positional-only, so a placeholder may be called `text`), never f-strings: the table
+  couldn't match them. Texts reaching `t()` through a variable (model descriptions, colour names,
+  clipboard reasons, `LOGIN_KINDS`) are listed in `tests/unit_i18n.py`, which checks that every
+  text has a translation with the same placeholders and none is left over. Logs stay English: a
+  reason like "the screen is locked" is kept in English and translated where it is shown.
+  install.sh's lines are `L 'English' 'Slovak'` (printf `%s` for values); install.ps1 stays ASCII
+  for Windows PowerShell 5, so its Slovak is written as `\u` escapes that `L` decodes (values
+  through `-f`); the test compares both with the table. The menu's *Menu language · Jazyk ponúk*
+  submenu and heading are in both languages on purpose.
+- **Settings for screen readers** (`websettings.py`): `bigui.SettingsModel` holds the rows and the
+  actions of the settings window without Tk; `bigui.Settings` draws them as Tk pictures, and the
+  web page renders the same rows as HTML (radio groups by id prefix, named from `state()`'s
+  "groups"). The page's script redraws only when the rows' ids change and otherwise updates in
+  place, so the focus and the screen reader's place stay. Requests must carry the right
+  `Host: 127.0.0.1:<port>` (DNS rebinding), the random token in the path, and for changes
+  `Content-Type: application/json` (other sites can't send that without a preflight); a CSP nonce
+  allows only the page's own script and style. It writes `RUNTIME_DIR/dictate-web.json` (a second
+  start reopens the running page) and ends 30 s after the last request (the page asks every
+  second). `screen_reader_on()` (AT-SPI's `ScreenReaderEnabled` on Linux, `SPI_GETSCREENREADER`,
+  `NSWorkspace.isVoiceOverEnabled`) makes `bigui.py settings` open the page instead
+  (`tests/unit_websettings.py`).
+- **Touchpads in the settings window:** Tk 9 on macOS reports two-finger scrolling as
+  `<TouchpadScroll>` (dx and dy packed into one number, `touchpad_dy`), not `<MouseWheel>`.
 - **AMD (ROCm):**
   - CTranslate2's ROCm build isn't on PyPI. install.sh and install.ps1 extract it from the
     release zip (checksums pinned; update them with the version in requirements.txt), and install
@@ -386,6 +425,16 @@ input, `windows_paste.py`, and `e2e_desktop.py` / `e2e_x11.py`. It is started by
   - `e2e_desktop.py` replaces sounddevice with a stand-in module through `PYTHONPATH`; it plays
     FLEURS files in real time.
   - Pillow deprecates `Image.getdata()`: count pixels with numpy.
+  - Arch/CachyOS has no Xvfb installed: fetch `xorg-server-xvfb` for the installed xorg-server
+    version from an Arch mirror into a scratch folder (check its sha256 against the mirror's
+    `extra.db`) and point `XVFB=` at it; no root needed. On CachyOS, `x11_paste.py`'s four paste
+    checks fail with that Xvfb (also for older commits); they pass on GitHub's Ubuntu.
+  - install.ps1 can be parsed on Linux with PowerShell's tarball
+    (`[System.Management.Automation.Language.Parser]::ParseFile`); set
+    `POWERSHELL_TELEMETRY_OPTOUT=1` and point `XDG_CACHE_HOME`/`XDG_DATA_HOME` elsewhere, or it
+    writes `~/.cache/powershell` and `~/.local/share/powershell`.
+  - The settings page's script can be tested in headless Chrome (`--headless=new --dump-dom
+    --virtual-time-budget=…`) with `HOME` and `--user-data-dir` in a scratch folder.
   - GitHub's runners have no microphone and no GPU. A workflow can be started by hand only from
     the default branch: to test another branch before it is merged, add a temporary `push`
     trigger for it (and `[skip ci]` in a commit message pushes without a run).

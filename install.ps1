@@ -37,6 +37,42 @@ function Invoke-Quiet([scriptblock]$Command) {
 }
 [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
 
+# The first question, in both languages: the language of this installer, the menus and the messages.
+# An update keeps the earlier answer (the menu changes it: "Menu language / Jazyk ponuk").
+$UiLang = $env:DICTATE_UI_LANGUAGE
+if ($UiLang -ne "en" -and $UiLang -ne "sk") {
+    $UiLang = ""
+    try { $UiLang = [string](Get-Content -Raw -Encoding UTF8 "$D\state.json" | ConvertFrom-Json).ui_language } catch { }
+}
+if ($UiLang -ne "en" -and $UiLang -ne "sk") {
+    if ($env:DICTATE_KEEP -eq "keep" -and ((Test-Path "$D\state.json") -or (Test-Path "$D\config.toml"))) {
+        $UiLang = "en"  # set up before this question existed: it stays as it was
+    } else {
+        $Suggest = if ((Get-UICulture).TwoLetterISOLanguageName -eq "sk") { "sk" } else { "en" }
+        if ([Environment]::UserInteractive -and -not [Console]::IsInputRedirected) {
+            $Default = if ($Suggest -eq "sk") { "2" } else { "1" }
+            Write-Host ""
+            Write-Host "Language / Jazyk:"
+            Write-Host "  1) English"
+            Write-Host ("  2) Sloven" + [char]0x010D + "ina")
+            while ($true) {
+                $Answer = Read-Host "1 / 2 [Enter = $Default]"
+                if (-not $Answer) { $Answer = $Default }
+                if ($Answer -in @("1", "en")) { $UiLang = "en"; break }
+                if ($Answer -in @("2", "sk")) { $UiLang = "sk"; break }
+            }
+        } else {
+            $UiLang = $Suggest
+        }
+    }
+}
+$env:DICTATE_UI_LANGUAGE = $UiLang
+function L([string]$En, [string]$Sk) {
+    # (English, Slovak) The Slovak is written with \u escapes, as Windows PowerShell 5 reads this file as ANSI.
+    if ($UiLang -ne "sk") { return $En }
+    return [regex]::Replace($Sk, '\\u([0-9a-fA-F]{4})', { param($M) [string][char][Convert]::ToInt32($M.Groups[1].Value, 16) })
+}
+
 if ($env:PROCESSOR_ARCHITECTURE -ne "AMD64") {
     throw "Sorry, only 64-bit Intel/AMD Windows is supported (this is $env:PROCESSOR_ARCHITECTURE)."
 }
@@ -74,26 +110,28 @@ if ($Gpu -eq "none") {
         $Target = Get-AmdTarget $Card
         if ($Target) { $Gpu = "amd"; $AmdTarget = $Target; break }
         if ($Card -match "AMD|Radeon") {
-            Write-Host "Note: $Card has no code in CTranslate2's Windows GPU build, so dictation runs on the processor."
+            Write-Host ((L "Note: {0} has no code in CTranslate2's Windows GPU build, so dictation runs on the processor." "Pozn\u00e1mka: {0} nem\u00e1 k\u00f3d vo verzii CTranslate2 pre grafick\u00e9 karty vo Windows, diktovanie teda be\u017e\u00ed na procesore.") -f $Card)
         }
     }
 }
-Write-Host "Graphics: $($Cards -join ', ')  ->  $(if ($Gpu -eq 'none') { 'the processor (CPU)' } else { "$Gpu GPU" })"
+Write-Host ((L "Graphics: {0}  ->  {1}" "Grafika: {0}  ->  {1}") -f ($Cards -join ', '),
+            $(if ($Gpu -eq 'none') { L "the processor (CPU)" "procesor (CPU)" } else { "$Gpu GPU" }))
 
-Say "Stopping a running copy (Windows keeps its files in use)"
+Say (L "Stopping a running copy (Windows keeps its files in use)" "Zastavuje sa be\u017eiaca k\u00f3pia (Windows dr\u017e\u00ed jej s\u00fabory otvoren\u00e9)")
 Get-CimInstance Win32_Process -Filter "Name = 'pythonw.exe' OR Name = 'python.exe'" |
-    Where-Object { $_.CommandLine -and ($_.CommandLine -like "*dictate.py*" -or $_.CommandLine -like "*bigui.py*") } |
+    Where-Object { $_.CommandLine -and ($_.CommandLine -like "*dictate.py*" -or $_.CommandLine -like "*bigui.py*" -or
+                   $_.CommandLine -like "*websettings.py*") } |
     ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
 Start-Sleep -Seconds 1
 
-Say "Program files"
+Say (L "Program files" "Programov\u00e9 s\u00fabory")
 New-Item -ItemType Directory -Force -Path "$D\cache", "$D\models", "$D\bin" | Out-Null
 Copy-Item -Force -Path "$Src\*.py", "$Src\requirements.txt", "$Src\requirements-cuda.txt", "$Src\config.example.toml",
     "$Src\README.md" -Destination $D
 
 $Uv = "$D\bin\uv.exe"
 if (-not (Test-Path $Uv)) {
-    Say "Downloading uv $UvVersion (Python package manager, kept inside $D)"
+    Say ((L "Downloading uv {0} (Python package manager, kept inside {1})" "S\u0165ahuje sa uv {0} (spr\u00e1vca bal\u00edkov Pythonu, ulo\u017een\u00fd v {1})") -f $UvVersion, $D)
     $Url = "https://github.com/astral-sh/uv/releases/download/$UvVersion/$UvZip"
     $Zip = "$D\cache\$UvZip"
     Invoke-WebRequest -UseBasicParsing -Uri $Url -OutFile $Zip
@@ -107,14 +145,14 @@ if (-not (Test-Path $Uv)) {
 
 $Py = "$D\venv\Scripts\python.exe"
 if (-not (Test-Path $Py)) {
-    Say "Private Python $Python (independent of any other Python on this PC)"
+    Say ((L "Private Python {0} (independent of any other Python on this PC)" "Vlastn\u00fd Python {0} (nez\u00e1visl\u00fd od in\u00fdch Pythonov na tomto PC)") -f $Python)
     & $Uv python install $Python
     if ($LASTEXITCODE -ne 0) { throw "uv python install failed" }
     & $Uv venv --python $Python "$D\venv"
     if ($LASTEXITCODE -ne 0) { throw "uv venv failed" }
 }
 
-Say "Python packages"
+Say (L "Python packages" "Bal\u00edky Pythonu")
 $Packages = @("-r", "$D\requirements.txt")
 if ($Gpu -eq "nvidia") {
     $Packages += @("-r", "$D\requirements-cuda.txt")
@@ -123,7 +161,7 @@ if ($Gpu -eq "nvidia") {
     $Tag = & $Py -c "import sys; print('cp%d%d' % sys.version_info[:2])"
     $Wheel = Get-ChildItem "$D\cache\rocm\ctranslate2-$Ct2-$Tag-$Tag-*.whl" -ErrorAction SilentlyContinue | Select-Object -First 1
     if (-not $Wheel) {
-        Write-Host "    CTranslate2 $Ct2 for ROCm (downloads about 140 MB)"
+        Write-Host ((L "    CTranslate2 {0} for ROCm (downloads about 140 MB)" "    CTranslate2 {0} pre ROCm (stiahne asi 140 MB)") -f $Ct2)
         New-Item -ItemType Directory -Force -Path "$D\cache\rocm" | Out-Null
         $Zip = "$D\cache\rocm\ctranslate2-$Ct2-rocm.zip"
         Invoke-WebRequest -UseBasicParsing -OutFile $Zip `
@@ -135,7 +173,7 @@ if ($Gpu -eq "nvidia") {
         $Wheel = Get-Item "$D\cache\rocm\$($Wheel.Name)"
         Remove-Item -Recurse -Force $Zip, "$D\cache\rocm\zip"
     }
-    Write-Host "    ROCm $RocmVersion runtime with GPU code for $AmdTarget (downloads about 1 GB the first time)"
+    Write-Host ((L "    ROCm {0} runtime with GPU code for {1} (downloads about 1 GB the first time)" "    ROCm {0} s k\u00f3dom pre {1} (prv\u00fdkr\u00e1t stiahne asi 1 GB)") -f $RocmVersion, $AmdTarget)
     $Packages += @($Wheel.FullName)
     foreach ($Name in @("rocm-sdk-core", "rocm-sdk-libraries", "rocm-sdk-device-$AmdTarget")) {
         $File = ($Name -replace "-", "_") + "-$RocmVersion-py3-none-win_amd64.whl"
@@ -160,12 +198,12 @@ if ((Invoke-Quiet { & $Py -c $Import }) -ne 0) {
     }
 }
 
-Say "Language, speech model and key (Enter takes the suggestion)"
+Say (L "Language, speech model and key (Enter takes the suggestion)" "Jazyk, re\u010dov\u00fd model a kl\u00e1ves (Enter prijme n\u00e1vrh)")
 & $Py -X utf8 "$D\dictate.py" --setup "--gpu=$Gpu"
 if ($LASTEXITCODE -ne 0) { throw "setup failed" }
 Invoke-Quiet { & $Uv cache clean } | Out-Null
 
-Say "Start menu shortcuts"
+Say (L "Start menu shortcuts" "Odkazy v ponuke \u0160tart")
 $Icon = "$D\dictate.ico"
 & $Py -c ("import sys, pathlib; sys.path.insert(0, str(pathlib.Path(sys.prefix).parent)); from tray_pystray import " +
           "draw_icon; draw_icon('ready', 'D', 256).save(sys.argv[1], sizes=[(16, 16), (32, 32), (48, 48), (256, 256)])") $Icon
@@ -184,15 +222,16 @@ $Programs = [Environment]::GetFolderPath("Programs")
 New-Shortcut "$Programs\Dictate.lnk" "-X utf8 `"$D\dictate.py`"" "Start push-to-talk dictation"
 New-Shortcut "$Programs\Dictate Settings.lnk" "-X utf8 `"$D\bigui.py`" settings" "Dictation settings in large text"
 # A copy of the Start menu's Dictate shortcut in the Startup folder, as last switched in the menu (on at first)
-Say "Start at login: a shortcut in the Startup folder"
+Say (L "Start at login: a shortcut in the Startup folder" "Sp\u00fa\u0161\u0165anie po prihl\u00e1sen\u00ed: odkaz v prie\u010dinku Po spusten\u00ed")
 $Login = if ($env:DICTATE_NO_AUTOSTART -eq "1") { "off" } else { "saved" }
 & $Py -X utf8 "$D\dictate.py" "--start-at-login=$Login"
 
-Say "Starting dictation"
+Say (L "Starting dictation" "Sp\u00fa\u0161\u0165a sa diktovanie")
 Start-Process -FilePath $Pyw -ArgumentList @("-X", "utf8", "`"$D\dictate.py`"") -WorkingDirectory $D
 
-Say "Checking the installation"
+Say (L "Checking the installation" "Kontrola in\u0161tal\u00e1cie")
 & $Py -X utf8 "$D\dictate.py" --check
 Write-Host ""
-Write-Host "Done. Hold the dictation key, speak, release: the text is typed where the cursor is."
-Write-Host "The microphone icon in the taskbar's notification area has the menu (you may need to drag it out of the ^ overflow)."
+Write-Host (L "Done. Hold the dictation key, speak, release: the text is typed where the cursor is." "Hotovo. Podr\u017ete kl\u00e1ves na diktovanie, hovorte a pustite: text sa nap\u00ed\u0161e tam, kde je kurzor.")
+Write-Host (L "The microphone icon in the taskbar's notification area has the menu (you may need to drag it out of the ^ overflow)." "Ponuka je pod ikonou mikrof\u00f3nu v oblasti ozn\u00e1men\u00ed na paneli \u00faloh (mo\u017eno ju treba vytiahnu\u0165 zo skryt\u00fdch ikon ^).")
+Write-Host (L "The installer has finished: you can close this window." "In\u0161tal\u00e1cia skon\u010dila: toto okno m\u00f4\u017eete zavrie\u0165.")

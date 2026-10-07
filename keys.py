@@ -9,6 +9,8 @@ import re
 import sys
 from dataclasses import dataclass
 
+from i18n import t
+
 MODIFIERS = {"ctrl": "ctrl", "control": "ctrl", "shift": "shift", "alt": "alt", "option": "alt", "opt": "alt",
              "super": "super", "win": "super", "windows": "super", "cmd": "super", "command": "super",
              "meta": "super", "logo": "super"}
@@ -57,12 +59,12 @@ def parse(text: str) -> Trigger:
     """"Ctrl+Alt+D", "ctrl + shift + space", "KP_Delete", "RightCtrl" -> Trigger. Raises ValueError."""
     parts = [p.strip() for p in text.replace(" + ", "+").split("+")]
     if not text.strip() or not all(parts):
-        raise ValueError(f"not a key: {text!r}")
+        raise ValueError(t("not a key: {text!r}", text=text))
     *mod_names, key = parts
     mods = set()
     for name in mod_names:
         if name.lower() not in MODIFIERS:
-            raise ValueError(f"{name!r} is not a modifier (Ctrl, Alt/Option, Shift, Super/Win/Cmd)")
+            raise ValueError(t("{name!r} is not a modifier (Ctrl, Alt/Option, Shift, Super/Win/Cmd)", name=name))
         mods.add(MODIFIERS[name.lower()])
     key = ALIASES.get(key.lower().replace(" ", ""), key)
     if len(key) == 1 and key.isascii() and key.isalnum():
@@ -72,13 +74,12 @@ def parse(text: str) -> Trigger:
         if key.lower() in known:
             key = known[key.lower()]
         elif not (ANY_KEYSYM and not mods and re.fullmatch(r"[A-Za-z][A-Za-z0-9_]+", key)):
-            raise ValueError(f"unknown key {key!r}")  # (an X11 key name stays as written: they are case-sensitive)
+            raise ValueError(t("unknown key {key!r}", key=key))  # (an X11 key name stays as written: they are case-sensitive)
     if mods and key in LONE_MODIFIERS:
-        raise ValueError("a combination needs a key that isn't a modifier, like Ctrl+Alt+D")
+        raise ValueError(t("a combination needs a key that isn't a modifier, like Ctrl+Alt+D"))
     if not mods and (len(key) == 1 or key in TYPING_KEYS):
-        raise ValueError(f"{key} on its own could no longer be typed; add a modifier, like Ctrl+Alt+{key.upper()}"
-                         if len(key) == 1 else f"{key} on its own could no longer be typed; add a modifier, "
-                         f"like Ctrl+{key}")
+        raise ValueError(t("{key} on its own could no longer be typed; add a modifier, like {example}", key=key,
+                           example=f"Ctrl+Alt+{key.upper()}" if len(key) == 1 else f"Ctrl+{key}"))
     return Trigger(frozenset(mods), key)
 
 
@@ -98,7 +99,7 @@ def label(trigger: Trigger, platform: str = "linux") -> str:
     mod_names = {"darwin": {"ctrl": "Control", "alt": "Option", "shift": "Shift", "super": "Command"},
                  "win32": {"ctrl": "Ctrl", "alt": "Alt", "shift": "Shift", "super": "Win"}}.get(
         platform, {"ctrl": "Ctrl", "alt": "Alt", "shift": "Shift", "super": "Super"})
-    key = names.get(trigger.key, trigger.key.upper() if len(trigger.key) == 1 else trigger.key)
+    key = t(names[trigger.key]) if trigger.key in names else trigger.key.upper() if len(trigger.key) == 1 else trigger.key
     return "+".join([mod_names[m] for m in ORDER if m in trigger.mods] + [key])
 
 
@@ -140,7 +141,7 @@ def windows(trigger: Trigger) -> tuple:
     if len(trigger.key) == 1:
         return ord(trigger.key.upper()), None, None
     if trigger.key not in WINDOWS_KEYS:
-        raise ValueError(f"{trigger.key} has no Windows equivalent")
+        raise ValueError(t("{key} has no Windows equivalent", key=trigger.key))
     return WINDOWS_KEYS[trigger.key]
 
 
@@ -166,7 +167,7 @@ def mac(trigger: Trigger) -> int:
     """The virtual keycode (letters by their position on a US keyboard)."""
     code = MAC_LETTERS.get(trigger.key) if len(trigger.key) == 1 else MAC_KEYS.get(trigger.key)
     if code is None:
-        raise ValueError(f"{trigger.key} has no Mac equivalent")
+        raise ValueError(t("{key} has no Mac equivalent", key=trigger.key))
     return code
 
 
@@ -203,6 +204,30 @@ def from_mac_keycode(code: int) -> str | None:
         for name, value in table.items():
             if value == code:
                 return name
+    return None
+
+
+BROWSER_CODES = {  # KeyboardEvent.code (the key's place, whatever the layout) -> key name
+    "NumpadDecimal": "KP_Delete", "NumpadComma": "KP_Delete", "Numpad0": "KP_Insert", "NumpadEnter": "KP_Enter",
+    "NumpadAdd": "KP_Add", "NumpadSubtract": "KP_Subtract", "NumpadMultiply": "KP_Multiply",
+    "NumpadDivide": "KP_Divide", "Insert": "Insert", "Delete": "Delete", "Home": "Home", "End": "End",
+    "PageUp": "Prior", "PageDown": "Next", "Pause": "Pause", "ScrollLock": "Scroll_Lock", "PrintScreen": "Print",
+    "ContextMenu": "Menu", "Space": "space", "Tab": "Tab", "Enter": "Return", "Escape": "Escape",
+    "ControlLeft": "Control_L", "ControlRight": "Control_R", "AltLeft": "Alt_L", "AltRight": "Alt_R",
+    "ShiftLeft": "Shift_L", "ShiftRight": "Shift_R", "MetaLeft": "Super_L", "MetaRight": "Super_R",
+    "OSLeft": "Super_L", "OSRight": "Super_R", "Fn": "Fn"}
+
+
+def from_browser(code: str, key: str = "") -> str | None:
+    """The key of a web page's key event (the browser settings page) as a key name of this module."""
+    if key == "AltGraph":  # the right Alt key of many European layouts: it can only be the key on its own
+        return "ISO_Level3_Shift"
+    if code in BROWSER_CODES:
+        return BROWSER_CODES[code]
+    if re.fullmatch(r"F([1-9]|1[0-9]|2[0-4])", code):
+        return code
+    if m := re.fullmatch(r"Key([A-Z])|Digit([0-9])", code):
+        return (m[1] or m[2]).lower()
     return None
 
 

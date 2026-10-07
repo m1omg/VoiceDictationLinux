@@ -56,6 +56,41 @@ command -v sha256sum >/dev/null || command -v shasum >/dev/null || { echo "Pleas
 if [[ $OS == Linux ]] && ! command -v pw-record >/dev/null && ! command -v parecord >/dev/null; then
   echo "Please install a recorder first: pw-record (PipeWire) or parecord (pulseaudio-utils)." >&2; exit 1
 fi
+
+# The first question, in both languages: the language of this installer, the menus and the messages.
+# An update keeps the earlier answer (the menu changes it: "Menu language · Jazyk ponúk").
+if [[ $OS == Darwin ]]; then STATE_FILE="$D/state.json"; else STATE_FILE="${XDG_STATE_HOME:-$HOME/.local/state}/dictate/state.json"; fi
+UI_LANG=${DICTATE_UI_LANGUAGE:-}
+if [[ $UI_LANG != en && $UI_LANG != sk && -f $STATE_FILE ]]; then  # (|| true: set -e, and no match is fine)
+  UI_LANG=$(sed -n 's/.*"ui_language": *"\([a-z]*\)".*/\1/p' "$STATE_FILE" 2>/dev/null || true)
+fi
+if [[ $UI_LANG != en && $UI_LANG != sk ]]; then
+  if [[ ${DICTATE_KEEP:-} == keep && ( -f $STATE_FILE || -f $CONF/config.toml ) ]]; then
+    UI_LANG=en  # set up before this question existed: it stays as it was
+  else
+    suggest=en
+    case "${LC_ALL:-${LC_MESSAGES:-${LANG:-}}}" in sk*) suggest=sk ;; esac
+    if [[ $OS == Darwin ]]; then  # the first of the languages in System Settings, e.g.     "sk-SK",
+      first=$(defaults read -g AppleLanguages 2>/dev/null | sed -n 2p || true)
+      [[ $first =~ ^[[:space:]]*\"?sk ]] && suggest=sk
+    fi
+    if [[ -t 0 ]]; then
+      default=1; [[ $suggest == sk ]] && default=2
+      printf '\nLanguage / Jazyk:\n  1) English\n  2) Slovenčina\n'
+      while true; do
+        read -r -p "1 / 2 [Enter = $default]: " answer || answer=""  # (end of input: the suggestion)
+        case "${answer:-$default}" in
+          1 | en | EN | e) UI_LANG=en; break ;;
+          2 | sk | SK | s) UI_LANG=sk; break ;;
+        esac
+      done
+    else
+      UI_LANG=$suggest
+    fi
+  fi
+fi
+export DICTATE_UI_LANGUAGE=$UI_LANG
+L() { if [[ $UI_LANG == sk ]]; then printf '%s' "$2"; else printf '%s' "$1"; fi; }  # (English, Slovak)
 amd_target() {  # the ROCm device code an AMD GPU can run from CTranslate2's ROCm build, e.g. gfx1030
   local props v gfx
   for props in /sys/class/kfd/kfd/topology/nodes/*/properties; do
@@ -81,12 +116,12 @@ else MODE=autostart; fi
 mkdir -p "$D/cache" "$D/models"
 chmod 700 "$D"
 
-say "Program files"
+say "$(L 'Program files' 'Programové súbory')"
 install -m 644 "$SRC"/*.py "$SRC/requirements.txt" "$SRC/requirements-cuda.txt" "$SRC/config.example.toml" \
   "$SRC/README.md" "$D/"
 
 if [[ ! -x "$D/bin/uv" ]]; then
-  say "Downloading uv $UV_VERSION (Python package manager, kept inside $D)"
+  say "$(printf "$(L 'Downloading uv %s (Python package manager, kept inside %s)' 'Sťahuje sa uv %s (správca balíkov Pythonu, uložený v %s)')" "$UV_VERSION" "$D")"
   url="https://github.com/astral-sh/uv/releases/download/$UV_VERSION/$UV_TARBALL"
   curl -fsSL -o "$D/cache/$UV_TARBALL" "$url"
   curl -fsSL -o "$D/cache/$UV_TARBALL.sha256" "$url.sha256"
@@ -98,12 +133,12 @@ fi
 UV="$D/bin/uv"
 
 if [[ ! -x "$D/venv/bin/python" ]]; then
-  say "Private Python $PYTHON (independent of the system Python, so system upgrades can't break it)"
+  say "$(printf "$(L 'Private Python %s (separate from the system Python, so system upgrades leave it alone)' 'Vlastný Python %s (oddelený od systémového, aktualizácie systému ho teda neovplyvnia)')" "$PYTHON")"
   "$UV" python install "$PYTHON"
   "$UV" venv --python "$PYTHON" "$D/venv"
 fi
 
-say "Python packages"
+say "$(L 'Python packages' 'Balíky Pythonu')"
 # PyAV's newest wheels need macOS 14 on Apple silicon; without building it (FFmpeg's sources would be
 # needed), uv picks the newest version that has a wheel for this Mac.
 NO_BUILD=(--only-binary av)
@@ -113,7 +148,7 @@ if [[ $GPU == amd ]]; then
   py=$("$D/venv/bin/python" -c 'import sys; print("cp%d%d" % sys.version_info[:2])')
   wheel=$(compgen -G "$D/cache/rocm/ctranslate2-$ct2-$py-$py-*.whl" | head -n 1 || true)
   if [[ -z $wheel ]]; then
-    echo "    CTranslate2 $ct2 for ROCm (downloads about 280 MB, keeps 45 MB)"
+    printf "$(L '    CTranslate2 %s for ROCm (downloads about 280 MB, keeps 45 MB)' '    CTranslate2 %s pre ROCm (stiahne asi 280 MB, ponechá 45 MB)')\n" "$ct2"
     mkdir -p "$D/cache/rocm"
     zip="$D/cache/rocm/ctranslate2-$ct2-rocm.zip"
     curl -fsSL -o "$zip" "https://github.com/OpenNMT/CTranslate2/releases/download/v$ct2/rocm-python-wheels-Linux.zip"
@@ -134,7 +169,7 @@ PY
     rm -f "$zip"
   fi
   rocm() { echo "$1 @ $ROCM_WHEELS/${1//-/_}-$ROCM_VERSION-py3-none-linux_x86_64.whl"; }
-  echo "    ROCm $ROCM_VERSION runtime with device code for $AMD_TARGET (downloads about 1 GB the first time)"
+  printf "$(L '    ROCm %s runtime with device code for %s (downloads about 1 GB the first time)' '    ROCm %s s kódom pre %s (prvýkrát stiahne asi 1 GB)')\n" "$ROCM_VERSION" "$AMD_TARGET"
   "$UV" pip install "${NO_BUILD[@]}" --python "$D/venv/bin/python" -r "$D/requirements.txt" "$wheel" \
     "$(rocm rocm-sdk-core)" "$(rocm rocm-sdk-libraries)" "$(rocm "rocm-sdk-device-$AMD_TARGET")"
 elif [[ $GPU == nvidia ]]; then
@@ -143,7 +178,7 @@ else  # no GPU: no CUDA libraries (they are about 650 MB)
   "$UV" pip install "${NO_BUILD[@]}" --python "$D/venv/bin/python" -r "$D/requirements.txt"
 fi
 
-say "Language, speech model and key (Enter takes the suggestion)"
+say "$(L 'Language, speech model and key (Enter takes the suggestion)' 'Jazyk, rečový model a kláves (Enter prijme návrh)')"
 "$D/venv/bin/python" "$D/dictate.py" --setup --gpu="$GPU"
 "$UV" cache clean >/dev/null 2>&1 || true
 APP_ID=$(sed -n 's/^app_id *= *"\([^"]*\)".*/\1/p' "$CONF/config.toml" | head -n 1)
@@ -152,7 +187,7 @@ if [[ "${DICTATE_NO_AUTOSTART:-}" == 1 ]]; then LOGIN=off; else LOGIN=saved; fi
 start_at_login() { "$D/venv/bin/python" "$D/dictate.py" --start-at-login=$LOGIN || true; }
 
 if [[ $OS == Darwin ]]; then
-  say "Dictate.app (in ~/Applications; macOS asks for permissions in its name)"
+  say "$(L 'Dictate.app (in ~/Applications; macOS asks for permissions in its name)' 'Dictate.app (v ~/Applications; macOS žiada o povolenia v jej mene)')"
   APP="$HOME/Applications/Dictate.app"
   script="$SRC/packaging/macos/Dictate.applescript"
   stamp=$(shasum -a 256 "$script" | cut -d' ' -f1)
@@ -179,9 +214,9 @@ if [[ $OS == Darwin ]]; then
     echo "$stamp" > "$APP/Contents/Resources/dictate-applet.sha256"
     codesign --force --sign - "$APP"
   else
-    echo "    keeping $APP"
+    printf "$(L '    keeping %s' '    ponecháva sa %s')\n" "$APP"
   fi
-  say "Start at login: LaunchAgent (it opens Dictate.app)"
+  say "$(L 'Start at login: LaunchAgent (it opens Dictate.app)' 'Spúšťanie po prihlásení: LaunchAgent (otvára Dictate.app)')"
   start_at_login
   open -g -a "$APP"
 else
@@ -191,10 +226,10 @@ else
     START="sh -c 'exec \"$D/venv/bin/python\" \"$D/dictate.py\" >> \"$D/dictate.log\" 2>&1'"
   fi
 
-  say "Launchers ($APP_ID.desktop: also the identity the desktop stores the shortcut under)"
+  say "$(printf "$(L 'Launchers (%s.desktop: also the identity the desktop stores the shortcut under)' 'Spúšťače (%s.desktop: aj identita, pod ktorou si pracovné prostredie pamätá skratku)')" "$APP_ID")"
   mkdir -p "$APPS"
   if [[ -e "$APPS/$APP_ID.desktop" ]]; then
-    echo "    keeping $APPS/$APP_ID.desktop"
+    printf "$(L '    keeping %s' '    ponecháva sa %s')\n" "$APPS/$APP_ID.desktop"
   else
     cat > "$APPS/$APP_ID.desktop" <<EOF
 [Desktop Entry]
@@ -219,12 +254,12 @@ Categories=Utility;Accessibility;Settings;
 EOF
 
   if [[ $MODE == systemd ]]; then
-    say "Start at login: systemd user service"
+    say "$(L 'Start at login: systemd user service' 'Spúšťanie po prihlásení: používateľská služba systemd')"
     mkdir -p "$HOME/.config/systemd/user"
     install -m 644 "$SRC/packaging/dictate.service" "$HOME/.config/systemd/user/dictate.service"
     systemctl --user daemon-reload
   else
-    say "Start at login: autostart entry (this desktop doesn't use a systemd graphical session)"
+    say "$(L 'Start at login: autostart entry (this desktop runs without a systemd graphical session)' 'Spúšťanie po prihlásení: položka automatického spustenia (toto prostredie nemá grafickú reláciu systemd)')"
   fi
   start_at_login  # enables or disables the service, or writes or removes the autostart entry
   if [[ "${DICTATE_NO_AUTOSTART:-}" == 1 ]]; then
@@ -238,16 +273,23 @@ EOF
   fi
 fi
 
-say "Checking the installation"
+say "$(L 'Checking the installation' 'Kontrola inštalácie')"
 "$D/venv/bin/python" "$D/dictate.py" --check || true
 if [[ $GPU == amd && ! -w /dev/kfd ]]; then
-  echo "Note: this user can't use the AMD GPU yet (no access to /dev/kfd), so it runs on the CPU until you allow it."
-  echo "      See README: Troubleshooting, \"AMD GPU not used\"."
+  L 'Note: this user has no access to the AMD GPU yet (/dev/kfd), so it runs on the CPU until you allow it.' 'Poznámka: tento používateľ zatiaľ nemá prístup ku grafickej karte AMD (/dev/kfd), beží teda na procesore, kým ho nepovolíte.'
+  echo
+  L '      See README: Troubleshooting, "AMD GPU not used".' '      Pozrite README: Troubleshooting, "AMD GPU not used".'
+  echo
 fi
 echo
 if [[ $OS == Darwin ]]; then
-  echo "Done. macOS now asks to allow Dictate to use the microphone, Accessibility and Input Monitoring:"
-  echo "allow all three (System Settings > Privacy & Security), then hold the dictation key, speak, release."
+  L 'Done. macOS now asks to allow Dictate to use the microphone, Accessibility and Input Monitoring:' 'Hotovo. macOS teraz požiada o povolenia pre Dictate: mikrofón, Prístupnosť (Accessibility) a Monitorovanie vstupu (Input Monitoring):'
+  echo
+  L 'allow all three (System Settings > Privacy & Security), then hold the dictation key, speak, release.' 'povoľte všetky tri (Systémové nastavenia > Súkromie a bezpečnosť), potom podržte kláves na diktovanie, hovorte a pustite.'
+  echo
 else
-  echo "Done. Hold the dictation key, speak, release. The first start asks your desktop to approve the key (Wayland)."
+  L 'Done. Hold the dictation key, speak, release. The first start asks your desktop to approve the key (Wayland).' 'Hotovo. Podržte kláves na diktovanie, hovorte a pustite. Pri prvom spustení vás pracovné prostredie požiada o schválenie klávesu (Wayland).'
+  echo
 fi
+L 'The installer has finished: you can close this window.' 'Inštalácia skončila: toto okno môžete zavrieť.'
+echo

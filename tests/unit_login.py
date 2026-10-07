@@ -141,7 +141,8 @@ check("Windows: the folder id structure is 16 bytes, in Windows' byte order",
       (16, "0xb97d20bb", "0xf46a", "ba105e3608430854"))
 platform(*REAL)
 if d.WINDOWS:  # the real shell: read only
-    check("Windows: the shell tells where the Startup folder is", windows.known_folder("Startup").is_dir(), True)
+    startup = windows.known_folder("Startup")  # (a new profile, like GitHub's, may not have it yet)
+    check("Windows: the shell tells where the Startup folder is", (startup.is_absolute(), startup.name), (True, "Startup"))
     check("Windows: the Startup apps registry can be read", type(windows.startup_disabled("Dictate.lnk")), bool)
 
 # --- the menu's choice, which the installers keep (dictate.py --start-at-login=saved) ---

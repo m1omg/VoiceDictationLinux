@@ -27,7 +27,8 @@ on the processor of any other computer. Nothing leaves your computer.
 ## Contents
 [Requirements](#requirements) · [Install](#install) · [Using it](#using-it) ·
 [Speech models](#speech-models) · [The dictation key](#the-dictation-key) ·
-[Large text](#large-text-for-low-vision) · [Settings](#settings) · [How it works](#how-it-works) ·
+[Large text](#large-text-for-low-vision) · [Screen readers](#screen-readers) · [Settings](#settings) ·
+[How it works](#how-it-works) ·
 [Platform support](#platform-support) · [Accuracy and speed](#accuracy-and-speed) ·
 [Languages](#languages) · [Troubleshooting](#troubleshooting) · [Uninstall](#uninstall) ·
 [Privacy](#privacy) · [Setting it up with Claude Code](#setting-it-up-with-claude-code)
@@ -68,9 +69,11 @@ the processor, about 4 GB with large-v3-turbo on an NVIDIA GPU, about 6.5 GB on 
   MacBook Air manages the tiny and base models; see [Speech models](#speech-models).
 
 ## Install
-The installer asks four questions, each with a suggestion for your computer that **Enter**
-accepts: the language, the speech model (it shows the graphics card, processor and memory it found),
-the dictation key, and whether you want [large text](#large-text-for-low-vision). Then it downloads
+The installer first asks, in both languages, whether its questions, the menus and the messages
+should be in English or Slovak (*Language / Jazyk*; an update keeps the answer). Then it asks four
+questions, each with a suggestion for your computer that **Enter** accepts: the language you
+dictate in, the speech model (it shows the graphics card, processor and memory it found), the
+dictation key, and whether you want [large text](#large-text-for-low-vision). Then it downloads
 the model, checks that it works, and starts dictation. Running it again updates the program and
 keeps your settings, choices and models.
 
@@ -122,7 +125,8 @@ bash install.sh
 ### Installing without questions
 Set the answers beforehand, for example to install on many computers:
 `DICTATE_LANGUAGE=en|sk|auto`, `DICTATE_MODEL=tiny|base|small|medium|large-v3-turbo`,
-`DICTATE_KEY=KP_Delete|Control_R|Alt_R|"Ctrl+Alt+D"|…`, `DICTATE_LARGE_UI=off|panel|both`;
+`DICTATE_KEY=KP_Delete|Control_R|Alt_R|"Ctrl+Alt+D"|…`, `DICTATE_LARGE_UI=off|panel|both`,
+`DICTATE_UI_LANGUAGE=en|sk` (the first question);
 `DICTATE_NO_AUTOSTART=1` skips start-at-login (otherwise it stays as the menu's *Start at login*
 last left it). On Linux and macOS:
 `DICTATE_MODEL=small bash install.sh`; on Windows, in PowerShell:
@@ -161,15 +165,28 @@ last left it). On Linux and macOS:
     its size; picking it downloads it, then switches to it.
   - **Run on: graphics card / processor.** The graphics card is greyed out when there is none that
     can run the model.
-  - **Large text:** the big status panel, and whether clicking the icon opens the big settings
-    window; see [Large text](#large-text-for-low-vision).
+  - **Status pop-up while dictating:** *Automatic* (the small one, when the model runs on the
+    processor), *Small*, *Large, for low vision* (the big panel, see
+    [Large text](#large-text-for-low-vision)) or *Off*. It shows *Listening*, then *Transcribing…*
+    with the seconds counting, and from the second dictation on a bar filled against the time it
+    expects (learned from the last dictations) with *About 5 s left*; far over that time it says
+    *Taking longer than usual…*. So on a slow computer a long dictation is visibly still being
+    worked on. The small one sits at the bottom (or top) of the screen, about the size of normal
+    text, and never takes the keyboard focus.
+  - **Large text:** whether clicking the icon opens the big settings window, and the text size and
+    colours; see [Large text](#large-text-for-low-vision).
+  - **Menu language · Jazyk ponúk:** English or Slovenčina for the menu, both settings windows, the
+    pop-up and the notifications (it is written in both, so either reader finds it).
   - **Start at login:** whether dictation starts when you log in. Switching it doesn't stop or
     start the copy that is running, and updates keep your choice. It reads the system's own
     setting, so a switch made in the desktop's startup settings, Windows' *Settings → Apps →
     Startup* or `systemctl --user disable dictate` shows here too. (On macOS 13 and newer, the
     *Allow in the Background* switch in System Settings → General → Login Items is a separate
     one: if you turned Dictate off there, turn it on there again.)
-  - **Settings window…:** every choice above, plus the dictation key, in large print.
+  - **Settings window…:** every choice above, plus the dictation key, in large print (while a
+    screen reader runs, the page below opens instead).
+  - **Settings in the web browser (for screen readers)…:** the same choices as a web page; see
+    [Screen readers](#screen-readers).
   - **Open settings file** ([Settings](#settings)).
   - **Stop dictation.** Frees the memory the model uses. Start it again with **Dictate** from your
     app menu, Start menu or Applications folder.
@@ -229,23 +246,43 @@ Measured word error rates and times are under [Accuracy and speed](#accuracy-and
   `ISO_Level3_Shift` (AltGr) or `XF86Launch5`.
 
 ## Large text, for low vision
-Each part is switched on by itself, in the menu (*Large text*), in the settings window, or by the
-installer's last question:
-- **Big status panel:** a band at the bottom (or top) of the screen while you dictate: *Listening*
-  (with a red dot) and the words as they are recognised, *Transcribing…*, then *Typed* (with a tick)
+Each part is switched on by itself, in the menu (*Status pop-up* and *Large text*), in the settings
+window, or by the installer's last question:
+- **Big status panel** (*Status pop-up while dictating → Large, for low vision*): a band at the
+  bottom (or top) of the screen while you dictate, in place of the small pop-up: *Listening*
+  (with a red dot) and the words as they are recognised, *Transcribing…* with the seconds counting
+  and a bar (as described under the menu's *Status pop-up*), then *Typed* (with a tick)
   and the text, or what went wrong (*Not typed. It is on the clipboard: paste it with Ctrl+V* and
   why, *Only silence was recorded: is the microphone muted?*, *Nothing was heard*). It never takes
   the keyboard focus, and hides 3 s after the text is typed (8 s after a problem).
 - **Big settings window:** every choice as a large button: language, live typing, sounds, speech
   model (with download sizes), graphics card or processor, the dictation key, the panel, text size,
   colours, and stop. It works with the keyboard alone: **Tab** or the **arrow keys** move (a thick
-  frame shows where you are), **Space** or **Enter** choose, **Esc** closes. It opens from the menu (*Settings window…*), from the
+  frame shows where you are), **Space** or **Enter** choose, **Esc** closes. It scrolls with the
+  mouse wheel and, on a Mac, with two fingers on the touchpad. It opens from the menu (*Settings window…*), from the
   **Dictate Settings** launcher (Linux app menu, Windows Start menu), by clicking the icon if you
   switch that on (Linux, Windows), on Windows also by starting Dictate again while it runs, and on a
   Mac by opening the Dictate app again (Spotlight: *Dictate*). On a Mac with a Retina screen its
   text is a little soft (the panel's is sharp).
 - **Text size** 1× to 3× (default 2×) and **colours**: yellow on black (default), white on black,
-  black on white, black on yellow. Both apply to the panel and the window.
+  black on white, black on yellow. Both apply to the panel and the window (the colours also to the
+  small pop-up, and both to the browser page while large text is on).
+
+## Screen readers
+- **The tray menu** is the system's own menu (GNOME's top bar on Linux, the notification area on
+  Windows, the menu bar on a Mac), which Orca, NVDA, Narrator and VoiceOver read. On GNOME,
+  **Ctrl+Alt+Tab** reaches the top bar; the arrow keys then move to the microphone icon.
+- **The settings** are also a page in your web browser, which screen readers read well: menu →
+  *Settings in the web browser (for screen readers)…*. It also opens by itself instead of the big
+  settings window while a screen reader runs (*Dictate Settings*, or *Settings window…*). The big
+  window draws its text as pictures, which no screen reader can read.
+  - The same choices as the big window, as headings, radio buttons, check boxes and buttons. A
+    choice is saved as soon as it is made; messages (a new key, a problem) are read out.
+  - *Change it…* under *Dictation key* waits for the new key or combination, like the big window
+    (**Esc** cancels). The current dictation key itself doesn't reach the browser.
+  - The page is served by Dictate on this computer only (`127.0.0.1`, a random address that other
+    web pages can't use), and stops about 30 s after you close its tab. *Close this window* closes
+    the tab where the browser allows it; otherwise **Ctrl+W** does.
 
 ## Settings
 `config.toml`: on Linux in `~/.config/dictate`, on Windows in `%LOCALAPPDATA%\dictate`, on macOS in
@@ -278,7 +315,8 @@ by the installer, it is kept in `state.json` and these no longer apply:
 | `fallback_model` | `"small"` | the model on the processor |
 | `device` | `"auto"` | `"auto"` (the graphics card when one works), `"gpu"` or `"cpu"` |
 | `language`, `live_typing`, `instant_typing`, `tap_to_toggle`, `sounds` | `"en"`, `true`, `false`, `true`, `true` | the menu's first choices |
-| `big_panel`, `big_settings` | `false`, `false` | [large text](#large-text-for-low-vision) parts |
+| `status_popup` | `"auto"` | the small status pop-up: `"auto"` (when the model runs on the processor), `"on"`, `"off"` |
+| `big_panel`, `big_settings` | `false`, `false` | [large text](#large-text-for-low-vision) parts (the big panel replaces the small pop-up) |
 | `ui_scale`, `ui_colors`, `panel_position` | `2.0`, `"yellow-on-black"`, `"bottom"` | their size, colours and place |
 
 ## How it works
@@ -412,6 +450,9 @@ python3 tests/fetch_fleurs.py                                  # ~27 MB of test 
 - Whisper itself knows about 100 languages.
 - The menu offers English and Slovak, and auto-detect chooses between those two. To change the
   pair, edit `LANGUAGES` and `AUTO_LANGUAGES` near the top of `dictate.py`.
+- The program itself speaks English or Slovak: the installers, the menu, both settings windows, the
+  pop-up and the notifications (the installer's first question, or the menu's *Menu language ·
+  Jazyk ponúk*). Its texts are in `i18n.py`; `tests/unit_i18n.py` checks that none is missing.
 - Accuracy varies by language, so check it with `tests/bench_asr.py`. It downloads the FLEURS
   configs named in `tests/fetch_fleurs.py`.
 
