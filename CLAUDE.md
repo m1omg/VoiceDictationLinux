@@ -296,10 +296,7 @@ input, `windows_paste.py`, and `e2e_desktop.py` / `e2e_x11.py`. It is started by
   the processor.
 - **Models fine-tuned for Slovak** (`models.SLOVAK`, KInIT's Whisper fine-tunes at pinned revisions):
   off unless chosen in the menu, and the installer's question suggests none (2026-10-08: on the
-  owner's PC the gain wasn't noticeable in daily dictation, while Slovak took twice as long and the
-  extra models held 2-6.5 GB of graphics memory; Qwen likewise). Keeping them parked in system memory
-  between dictations was measured (CTranslate2 `unload_model(to_cpu=True)` / `load_model(keep_cache=True)`:
-  back in 0.2 s; from the file instead, 0.86 s and no extra RAM) but not built, since they're off.
+  owner's PC the gain wasn't noticeable in daily dictation, while Slovak took twice as long).
   `state.json` "gpu_slovak" / "cpu_slovak" name one per device (or ""). `Transcriber.load()` loads
   it beside the general model with the same device and compute type. KInIT's models write plain
   lowercase words without punctuation (fine-tuned on normalized text; prompting doesn't bring it
@@ -325,8 +322,8 @@ input, `windows_paste.py`, and `e2e_desktop.py` / `e2e_x11.py`. It is started by
   Whisper in English. RTX 3060, all loaded: en 2.6 % (0.51 s per sentence), sk 2.1 % (0.69 s),
   Slovak taken for English: 10/10 redone, 1.4 %. Qwen on the CPU: 9 s per sentence. The Qwen
   environment is ~4 GB to download, 7 GB on disk; the install retries a step once and cleans uv's
-  cache (NVIDIA's server timed out once at uv's default 30 s). A choice is 6 parts (device, GPU model, CPU
-  model, GPU Slovak, CPU Slovak, English); `ModelSwitch.plan()` compares what would run with what runs, and a
+  cache (NVIDIA's server timed out once at uv's default 30 s). A choice is 7 parts (device, GPU model, CPU
+  model, GPU Slovak, CPU Slovak, English, extras in RAM); `ModelSwitch.plan()` compares what would run with what runs, and a
   missing Slovak model is downloaded while the general one keeps working without it. Download =
   KInIT's safetensors into `models/.partial-NAME-hf`, `convert.py` into `models/.partial-NAME`,
   `complete()`, rename. `convert.py` fills CTranslate2's `WhisperSpec` from numpy arrays the way
@@ -336,6 +333,26 @@ input, `windows_paste.py`, and `e2e_desktop.py` / `e2e_x11.py`. It is started by
   FLEURS (GPU): turbo-sk sk 2.1 % vs turbo 6.4 %; FLEURS is in KInIT's training data, so prefer
   their held-out numbers for comparisons (turbo-sk 5.6 %, medium-sk 6.3 %, small-sk 8.6 %, base-sk
   14.0 % vs turbo 18.4 %).
+- **Extra models on the graphics card only while needed** (`Transcriber.parking`, NVIDIA/CUDA only;
+  ROCm untested, so there they stay loaded): after loading, the Slovak model and Qwen leave the
+  card; `Transcriber.prepare(language)` brings the one for that language back (the other leaves
+  first, so never both), and `park_extras()` frees the card after `Worker.PARK_AFTER` (30 s) without
+  dictating. The main model always stays (live passes, detection, punctuation). Moves happen while
+  the key is held: `Worker.begin()` stages the language (fixed mode, or in auto mode the last
+  dictation's), the live passes stage the detected one, and a thread of its own (`_stager`, the
+  latest request wins) moves it; every pass of an extra model holds `extras_lock`, so nothing moves
+  mid-pass, and calls `prepare()` itself (a model that can't come back: the main model does that
+  pass). `state.json` "extras_in_ram" (menu: *Keep extra models in RAM*; part of the model choice,
+  so switching it reloads): CTranslate2 `unload_model(to_cpu=True)` / `load_model(keep_cache=True)`
+  (back in 0.2 s, park 0.05 s), else `unload_model(to_cpu=False)` and read from model.bin again
+  (0.86 s, no RAM of its own). Qwen (`qwen_worker.py --home=ram|drive`, `Mover`): loaded with
+  `device_map="cpu"` (mapped from the safetensors, no copy), then either one pinned block holding
+  all weights (back in 0.19 s; per-tensor pinning was rounded up to powers of two: +5 GB) or those
+  mapped tensors as home (back in ~1 s from the disk cache); parking points the parameters back at
+  the home copy and calls `empty_cache()` (0.1 s). Loading it onto the card directly made
+  transformers' `caching_allocator_warmup` reserve one block PyTorch couldn't give back (3.3 GB
+  stayed). RTX 3060: on the card 2.4 GB idle, at most 6.3 GB (main + Qwen) while dictating; switch
+  English <-> Slovak 0.3-0.4 s from RAM, ~1 s from disk; private RAM 3.9 GB (RAM) vs 2.3 GB (disk).
 - **The settings window** writes `state.json`; the daemon's `StateWatcher` polls its mtime every
   0.5 s and applies changes (a new key restarts the program). The daemon writes
   `RUNTIME_DIR/dictate-status.json` for the window, and the window's *Stop dictation* writes `quit`

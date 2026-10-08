@@ -45,6 +45,9 @@ WORKER.write_text(textwrap.dedent('''
     stdin = sys.stdin.buffer
     for line in iter(stdin.readline, b""):
         request = json.loads(line)
+        if request.get("command"):
+            print(json.dumps({"ok": True, "home": sys.argv[2], "command": request["command"]}), flush=True)
+            continue
         stdin.read(4 * request["samples"])
         if request["context"] == "crash":
             sys.exit(3)
@@ -66,6 +69,13 @@ try:
     check("a failed pass raises", "nothing", "RuntimeError")
 except RuntimeError as e:
     check("a failed pass raises, and the process goes on", (str(e), engine.alive()), ("RuntimeError: CUDA out of memory", True))
+with engine.lock:
+    check("it is told where to keep the weights between uses (here: only on disk)",
+          engine._request({"command": "park"}), {"ok": True, "home": "--home=drive", "command": "park"})
+engine.park()
+engine.wake()
+check("parking and waking are requests like any other: the next pass still gets its own answer",
+      engine.transcribe(np.zeros(16000, np.float32), "after"), ("16000 samples, told None, after", "English"))
 engine.PASS_LIMIT = 1
 started = time.monotonic()
 try:
@@ -210,6 +220,127 @@ models.download(models_dir, "qwen3-asr-0.6b")
 check("a second Qwen model reuses the environment", len(installs), 3)
 check("the menu: the environment's size only while it isn't installed",
       ("4.7 GB" in first_note and "4.0 GB" in first_note, "1.9 GB" in second_note and "4.0 GB" not in second_note), (True, True))
+
+# --- the extra models on the graphics card only while a dictation in their language needs them ---
+moves = []
+
+
+class Pool:  # CTranslate2's model: on the card, or parked (in RAM with to_cpu/keep_cache, else on disk)
+    def __init__(self):
+        self.model_is_loaded, self.fail = True, None
+
+    def load_model(self, keep_cache=False):
+        if self.fail:
+            raise self.fail
+        moves.append(("sk", "card", keep_cache))
+        self.model_is_loaded = True
+
+    def unload_model(self, to_cpu=False):
+        moves.append(("sk", "off", to_cpu))
+        self.model_is_loaded = False
+
+
+class SlovakWhisper(Whisper):
+    def __init__(self):
+        self.model = Pool()
+
+    def transcribe(self, audio, **kw):
+        calls.append(("slovak", self.model.model_is_loaded))
+        return iter([types.SimpleNamespace(text="slovenske slova")]), None
+
+
+class MovingQwen(StandInQwen):
+    def __init__(self):
+        super().__init__()
+        self.awake, self.wake_fails = True, None
+
+    def wake(self):
+        if self.wake_fails:
+            raise self.wake_fails
+        moves.append(("en", "card"))
+        self.awake = True
+
+    def park(self):
+        moves.append(("en", "off"))
+        self.awake = False
+
+    def transcribe(self, audio, context=""):
+        calls.append(("qwen", self.awake))
+        return "qwen's text", self.heard
+
+
+tr = d.Transcriber(d.load_config())
+tr.model = tr.batched = Whisper()
+tr.slovak = tr.slovak_batched = SlovakWhisper()
+tr.slovak_name, tr.english = "large-v3-turbo-sk", MovingQwen()
+tr.parking, tr.in_ram = True, True
+tr._park_loaded("sk")
+tr._park_loaded("en")
+check("right after loading, both extra models leave the card (in RAM)", (moves, tr.on_card),
+      ([("sk", "off", True), ("en", "off")], None))
+d.speech_only = lambda audio: audio
+moves.clear()
+calls.clear()
+tr.run(speech, "sk")
+check("a Slovak pass: the Slovak model comes to the card first", (moves, calls[-1], tr.on_card),
+      ([("sk", "card", True)], ("slovak", True), "sk"))
+moves.clear()
+tr.run(speech, "en")
+check("then an English pass: the Slovak model leaves before Qwen comes (never both)", (moves, calls[-1], tr.on_card),
+      ([("sk", "off", True), ("en", "card")], ("qwen", True), "en"))
+moves.clear()
+tr.run(speech, "en")
+tr.run(speech, "sk", words=True)
+check("English again, and a live pass (the main model): nothing moves", moves, [])
+tr.park_extras(unless=lambda: True)
+check("parking waits while a dictation is going on", moves, [])
+tr.park_extras()
+check("parking after a while frees the card", (moves, tr.on_card), ([("en", "off")], None))
+moves.clear()
+tr.in_ram = False
+tr.run(speech, "sk")
+tr.park_extras()
+check("kept only on disk: read back without a copy in RAM, and dropped when parked", moves,
+      [("sk", "card", False), ("sk", "off", False)])
+moves.clear()
+calls.clear()
+tr.slovak.model.fail = RuntimeError("CUDA failed with error out of memory")
+check("a Slovak model that can't come to the card: the main model does that dictation",
+      ([seg.text for seg in tr.run(speech, "sk")], calls[-1], tr.on_card), (["whisper's text"], ("whisper", "sk"), None))
+tr.slovak.model.fail = None
+tr.english.wake_fails = RuntimeError("CUDA error: out of memory")
+calls.clear()
+check("Qwen that can't come to the card: Whisper does English, Qwen stays chosen",
+      ([seg.text for seg in tr.run(speech, "en")], calls[-1], tr.english is not None), (["whisper's text"], ("whisper", "en"), True))
+tr.english.wake_fails = None
+moves.clear()
+tr.parking = False
+tr.run(speech, "sk")
+check("extra models that don't move (not an NVIDIA card): nothing is moved", moves, [])
+tr.parking = True
+
+worker = d.Worker(d.load_config(), tr, types.SimpleNamespace(put=lambda item: None), d.Cues(lambda: False, 0.5),
+                  types.SimpleNamespace(busy=lambda n: None, update=lambda **kw: None, event=lambda *a: None))
+moves.clear()
+worker.last_language = "en"
+worker.begin(d.Session(1, None, "auto", False, 0.0))
+end = time.monotonic() + 5
+while tr.on_card != "en" and time.monotonic() < end:
+    time.sleep(0.05)
+check("auto mode, key down: the last dictation's extra model comes to the card in the background", tr.on_card, "en")
+worker.stage("sk")
+end = time.monotonic() + 5
+while tr.on_card != "sk" and time.monotonic() < end:
+    time.sleep(0.05)
+check("the live passes hear Slovak: the Slovak model takes its place", (tr.on_card, moves[-2:]),
+      ("sk", [("en", "off"), ("sk", "card", False)]))
+worker.active = None
+check("not idle long enough yet: nothing leaves", worker._park_due(), False)
+worker.last_used -= worker.PARK_AFTER
+check("idle for a while: the extra model leaves the card", worker._park_due(), True)
+worker._park()
+check("and after that nothing more is due", (tr.on_card, worker._park_due()), (None, False))
+d.speech_only = real_speech_only
 
 for name, good, got, want in checks:
     print(f"{'ok  ' if good else 'FAIL'} {name}" + ("" if good else f": got {got!r}, want {want!r}"))

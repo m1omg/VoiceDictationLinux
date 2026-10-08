@@ -291,6 +291,7 @@ SK: dict[str, str] = {
     "needs an NVIDIA graphics card": "potrebuje grafickú kartu NVIDIA",
     "Model for English: {model}": "Model pre angličtinu: {model}",
     "Model for English": "Model pre angličtinu",
+    "Keep extra models in RAM (faster, uses more memory)": "Držať doplnkové modely v RAM (rýchlejšie, viac pamäte)",
     "Qwen could not start": "Qwen sa nepodarilo spustiť",
     "Qwen stopped working": "Qwen prestal fungovať",
     "English goes to the main model instead. The reason: {error}":

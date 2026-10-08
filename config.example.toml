@@ -34,6 +34,8 @@ backend = "auto"
 # fallback_model = "small"
 # device = "auto"
 #
+# extras_in_ram = false       # NVIDIA: models for Slovak / English wait in RAM between uses (faster)
+#                             # instead of being read from disk again (no memory of their own)
 # language = "en"             # "en", "sk" or "auto"
 # live_typing = true          # type while speaking
 # instant_typing = false      # with live typing: type the words heard so far at once, then correct them

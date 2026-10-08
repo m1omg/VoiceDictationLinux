@@ -771,6 +771,9 @@ class SettingsModel:
                 note = ""
             rows.append(("button", f"english:{name}", f"{name}: {t(info)}{note}", f"radio:{on(english == name)}",
                          on_gpu or english == name, lambda n=name: self.set(english_model=n)))
+        rows.append(("button", "extras_ram", t("Keep extra models in RAM (faster, uses more memory)"),
+                     f"check:{on(ui.extras_in_ram)}", on_gpu and bool(slovak or english),
+                     lambda: self.set(extras_in_ram=not ui.extras_in_ram)))
         rows.append(("heading", t("Run on")))
         rows.append(("button", "device:gpu", t("Graphics card (GPU)") if gpu_ok else t("Graphics card (GPU): none can be used"),
                      f"radio:{on(on_gpu)}", gpu_ok, lambda: self.set(device="gpu")))

@@ -176,6 +176,11 @@ last left it). On Linux and macOS:
   - **Model for English:** Qwen3-ASR (NVIDIA graphics cards), used only for English text written
     after you release the key; see
     [Qwen3-ASR for English](#qwen3-asr-for-english).
+  - **Keep extra models in RAM:** where the models for Slovak and English wait while they aren't
+    needed. Only the main model stays on the graphics card; an extra model joins it while you
+    dictate in its language (and 30 s after), one at a time. Off (the default): they are read from
+    disk again, in about 1 s, and take no memory of their own; on: they wait in RAM and are back in
+    about 0.3 s, but take 2-6 GB of it. Either way this usually happens while you are still speaking.
   - **Status pop-up while dictating:** *Automatic* (the small one, when the model runs on the
     processor), *Small*, *Large, for low vision* (the big panel, see
     [Large text](#large-text-for-low-vision)) or *Off*. It shows *Listening*, then *Transcribing…*
@@ -278,7 +283,9 @@ and the model needs memory of its own.
   only a dictation that wasn't typed live gets the Slovak model's words.
 - They come in Hugging Face's format and are converted on your computer after the download
   (`convert.py`, a few seconds, no extra software); the download is about twice the final size.
-- Dictation keeps both models loaded: on a graphics card about 1.6 GB more of its memory.
+- On an NVIDIA graphics card the Slovak model is on it only while you dictate Slovak (and 30 s
+  after), not all the time: about 1.6 GB of its memory. Otherwise it waits in RAM or on disk (the
+  menu's *Keep extra models in RAM*). On other graphics cards both models stay loaded.
 
 ### Qwen3-ASR for English
 [Qwen3-ASR](https://huggingface.co/Qwen/Qwen3-ASR-1.7B) (Alibaba's Qwen team) gets fewer English
@@ -293,8 +300,9 @@ it is off unless you do (the installer doesn't offer it).
 | qwen3-asr-0.6b | 1.9 GB + 4.0 GB of software, the first time | an NVIDIA graphics card |
 
 - It runs on PyTorch, which the first Qwen model installs into a folder of its own next to the
-  program (`qwen-venv`, 7 GB on disk), and in a process of its own; the main model and Qwen both
-  stay loaded.
+  program (`qwen-venv`, 7 GB on disk), and in a process of its own. It is on the graphics card only
+  while you dictate English (and 30 s after): about 4 GB of its memory. Otherwise its weights wait in
+  RAM (about 4 GB of it) or only on disk, as the menu's *Keep extra models in RAM* says.
 - NVIDIA graphics cards only: on a processor it takes about as long as the speech itself.
 - Only what is transcribed after you let go goes to Qwen; words typed live come from the main
   model (Qwen has no word timings of its own). Silence is cut out before it hears the recording.
