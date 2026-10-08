@@ -350,6 +350,8 @@ SK: dict[str, str] = {
     "Created the settings file {path}": "Vytvoril sa súbor nastavení {path}",
     "The {model} model is already downloaded": "Model {model} je už stiahnutý",
     "Downloading the {model} model ({size})…": "Sťahuje sa model {model} ({size})…",
+    "Dictation stops while the model is checked; the installer starts it again.":
+        "Diktovanie sa počas kontroly modelu zastaví; inštalátor ho potom znova spustí.",
     "Loading the model once to check it:": "Model sa raz načíta na kontrolu:",
     "the GPU could not be used, so the model runs on the CPU (the log has the reason)":
         "grafickú kartu nebolo možné použiť, model teda beží na procesore (dôvod je v zázname)",

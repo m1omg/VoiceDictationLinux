@@ -3596,8 +3596,39 @@ def finish_setup(gpu_model: str | None, cpu_model: str, slovak: str = "") -> int
         elif name in models.MODELS or name in models.SLOVAK:
             print(t("Downloading the {model} model ({size})…", model=name, size=models.size_label(name)), flush=True)
             models.download(MODELS_DIR, name)
+    stopped = stop_for_check()
     print("\n" + t("Loading the model once to check it:"), flush=True)
-    return subprocess.run([sys.executable, str(Path(__file__).resolve()), "--check-model"]).returncode
+    code = subprocess.run([sys.executable, str(Path(__file__).resolve()), "--check-model"]).returncode
+    if code and stopped:  # (the installer stops here, so the dictation that ran comes back)
+        try:
+            update.restart_dictation(lambda text: None)
+        except (OSError, subprocess.SubprocessError):
+            pass
+    return code
+
+
+def stop_for_check() -> bool:
+    """Stop the dictation that runs, so the check has the graphics card to itself as dictation will
+    (with models for Slovak and English, two sets of models didn't fit on a 12 GB card); the
+    installers start it again at the end. Left alone when they won't (DICTATE_NO_AUTOSTART)."""
+    pid = update.running_pid()
+    if not pid or os.environ.get("DICTATE_NO_AUTOSTART") == "1":
+        return False
+    print(t("Dictation stops while the model is checked; the installer starts it again."), flush=True)
+    if LINUX and update.UNIT.is_file():  # (Restart=on-failure: a dictation that quits stays stopped too)
+        try:
+            subprocess.run(["systemctl", "--user", "stop", "dictate.service"], capture_output=True, timeout=60)
+        except (OSError, subprocess.SubprocessError):
+            pass
+    for i in range(40):
+        if not update.alive(pid):
+            return True
+        if i == 0:  # not the service's (or no systemd): asked the way the settings window's Stop button does
+            RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
+            COMMAND_PATH.write_text("quit\n", encoding="utf-8")
+        time.sleep(0.5)
+    COMMAND_PATH.unlink(missing_ok=True)  # (not read: the dictation started at the end mustn't quit at once)
+    return True
 
 
 def run_download(names: list[str]) -> int:

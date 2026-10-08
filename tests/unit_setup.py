@@ -28,6 +28,7 @@ import models  # noqa: E402
 assert d.STATE_PATH.is_relative_to(TMP) and d.CONFIG_PATH.is_relative_to(TMP)
 sys.stdin = open(os.devnull)  # no terminal: every question takes its default
 downloads = []
+real_finish_setup = d.finish_setup
 d.finish_setup = lambda gpu_model, cpu_model, slovak="": downloads.append((gpu_model, cpu_model)) or 0
 LAPTOP = models.Hardware(None, cores=4, ram_gb=16, laptop=True)
 checks = []
@@ -128,6 +129,73 @@ state = setup(models.Hardware("nvidia", vram_gb=12, cores=8, ram_gb=32), "nvidia
 check("a 12 GB graphics card, Slovak: one download serves both",
       (state.get("device"), state["gpu_model"], state["cpu_model"], downloads[-1]),
       (None, "large-v3-turbo", "large-v3-turbo", ("large-v3-turbo", "large-v3-turbo")))
+
+# --- the model check after the questions: the dictation that runs is stopped first, so the check has
+# the graphics card to itself (two sets of models with Slovak and English ones didn't fit on 12 GB) ---
+import subprocess  # noqa: E402
+import threading  # noqa: E402
+import time  # noqa: E402
+
+import update  # noqa: E402
+
+assert update.STATUS_PATH.is_relative_to(TMP) and d.COMMAND_PATH.is_relative_to(TMP) and update.UNIT.is_relative_to(TMP)
+STAND_IN = TMP / "stand_in_dictation.py"  # quits on the settings window's command, or ignores it
+STAND_IN.write_text("""import pathlib, sys, time
+command = pathlib.Path(sys.argv[1])
+for _ in range(600):
+    if sys.argv[2] == "obeys" and command.exists():
+        command.unlink()
+        sys.exit(0)
+    time.sleep(0.05)
+""")
+
+
+def running(mode):
+    proc = subprocess.Popen([sys.executable, str(STAND_IN), str(d.COMMAND_PATH), mode])
+    threading.Thread(target=proc.wait, daemon=True).start()  # (reaped at once: a zombie would count as running)
+    update.STATUS_PATH.parent.mkdir(parents=True, exist_ok=True)
+    update.STATUS_PATH.write_text(json.dumps({"pid": proc.pid, "model": "tiny"}), encoding="utf-8")
+    return proc
+
+
+def stop_quietly():
+    with contextlib.redirect_stdout(io.StringIO()) as out:
+        stopped = d.stop_for_check()
+    return stopped, out.getvalue()
+
+
+update.STATUS_PATH.unlink(missing_ok=True)
+check("no dictation running: nothing to stop, nothing said", stop_quietly(), (False, ""))
+proc = running("obeys")
+os.environ["DICTATE_NO_AUTOSTART"] = "1"
+check("an installer that won't start dictation again leaves it running", (stop_quietly()[0], proc.poll()), (False, None))
+del os.environ["DICTATE_NO_AUTOSTART"]
+stopped, said = stop_quietly()
+proc.wait(10)
+check("a running dictation is asked to quit, and has", (stopped, proc.returncode, bool(said), d.COMMAND_PATH.exists()),
+      (True, 0, True, False))
+proc = running("ignores")
+real_sleep, time.sleep = time.sleep, lambda seconds: real_sleep(0.01)
+try:
+    stopped, _ = stop_quietly()
+finally:
+    time.sleep = real_sleep
+check("one that doesn't react: the command is taken back (the next dictation mustn't quit at once)",
+      (stopped, d.COMMAND_PATH.exists()), (True, False))
+proc.kill()
+proc.wait()
+
+restarts = []
+real_run, real_stop, real_restart = subprocess.run, d.stop_for_check, update.restart_dictation
+d.stop_for_check, update.restart_dictation = (lambda: True), (lambda say: restarts.append("restarted"))
+try:
+    for code in (0, 1):
+        subprocess.run = lambda command, **kw: subprocess.CompletedProcess(command, code)
+        with contextlib.redirect_stdout(io.StringIO()):
+            real_finish_setup(None, "")
+finally:
+    subprocess.run, d.stop_for_check, update.restart_dictation = real_run, real_stop, real_restart
+check("a failed check starts the stopped dictation again (a passed one: the installer does)", restarts, ["restarted"])
 
 for name, good, got, want in checks:
     print(f"{'ok  ' if good else 'FAIL'} {name}" + ("" if good else f": got {got!r}, want {want!r}"))

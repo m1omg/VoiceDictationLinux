@@ -114,6 +114,11 @@ $env:DICTATE_LARGE_UI="off"; powershell -NoProfile -ExecutionPolicy Bypass -File
 - Without `DICTATE_UI_LANGUAGE` and without a terminal, the installers take the saved choice, else
   English for an install from before the question existed (`DICTATE_KEEP=keep`), else the system's
   language. With a terminal they ask first (`Language / Jazyk`), in both languages.
+- Before its model check (`--check-model`), `--setup` stops a dictation that runs (`systemctl --user
+  stop`, else the settings window's quit command), so the check has the graphics card to itself; the
+  installers start it again at the end, and a failed check starts it again at once.
+  `DICTATE_NO_AUTOSTART=1` leaves it alone. (With models for Slovak and English, the running
+  dictation and the check didn't both fit on a 12 GB card: an update failed and rolled back.)
 - It's safe to re-run: it keeps the settings file, the choices (`DICTATE_KEEP=keep` skips the
   "keep your choices?" question) and the models.
 - `DICTATE_NO_AUTOSTART=1` skips start-at-login while testing. Otherwise the installers run
