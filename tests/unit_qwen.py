@@ -199,12 +199,17 @@ def stand_in_download(repo, revision=None, local_dir=None, allow_patterns=None):
 
 
 huggingface_hub.snapshot_download = stand_in_download
+d.MODELS_DIR = models_dir
+first_note = d.TopBar.download_note("qwen3-asr-1.7b", "")
 models.download(models_dir, "qwen3-asr-1.7b")
 check("the download: the environment first, then the model at its pinned revision",
       (len(installs), installs[1], models.installed(models_dir, "qwen3-asr-1.7b")),
       (2, ("Qwen/Qwen3-ASR-1.7B", models.QWEN["qwen3-asr-1.7b"][1]), True))
+second_note = d.TopBar.download_note("qwen3-asr-0.6b", "")
 models.download(models_dir, "qwen3-asr-0.6b")
 check("a second Qwen model reuses the environment", len(installs), 3)
+check("the menu: the environment's size only while it isn't installed",
+      ("4.7 GB" in first_note and "4.0 GB" in first_note, "1.9 GB" in second_note and "4.0 GB" not in second_note), (True, True))
 
 for name, good, got, want in checks:
     print(f"{'ok  ' if good else 'FAIL'} {name}" + ("" if good else f": got {got!r}, want {want!r}"))

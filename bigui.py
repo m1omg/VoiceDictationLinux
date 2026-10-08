@@ -763,7 +763,7 @@ class SettingsModel:
             elif downloading.startswith(name + " "):
                 note = t(", downloading {progress}", progress=downloading.split(" ", 1)[1])
             elif not models.installed(self.d.MODELS_DIR, name):
-                note = t(", download {size}", size=models.size_label(name))
+                note = t(", download {size}", size=models.size_label(name, not models.qwen_runtime_ready(self.d.MODELS_DIR)))
             else:
                 note = ""
             rows.append(("button", f"english:{name}", f"{name}: {t(info)}{note}", f"radio:{on(english == name)}",

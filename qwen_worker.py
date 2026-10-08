@@ -43,6 +43,8 @@ def main() -> int:
         model = Qwen3ASRModel.from_pretrained(sys.argv[1], dtype=dtype, device_map=device, max_inference_batch_size=1,
                                               max_new_tokens=1024)
         model.transcribe(audio=(np.zeros(RATE, dtype=np.float32), RATE), language="English")  # warm-up
+        if device != "cpu":
+            torch.cuda.empty_cache()
     except Exception as e:
         say({"error": f"{type(e).__name__}: {e}"})
         return 1
@@ -58,6 +60,8 @@ def main() -> int:
             say({"text": result.text, "language": result.language})
         except Exception as e:  # one failed pass: dictation falls back to Whisper for it
             say({"error": f"{type(e).__name__}: {e}"})
+        if device != "cpu":  # what PyTorch keeps for the next pass goes back to games and the rest
+            torch.cuda.empty_cache()
     return 0
 
 

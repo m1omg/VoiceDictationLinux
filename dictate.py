@@ -1263,7 +1263,8 @@ class QwenEngine:
             reply = self.replies.get(timeout=timeout)
         except queue.Empty:
             raise TimeoutError(f"Qwen gave no answer within {timeout:.0f} s") from None
-        if reply is None:
+        if reply is None:  # (its output ended; on Windows it may not count as ended yet)
+            self.stop(wait=5)
             raise RuntimeError("the Qwen process ended")
         return reply
 
@@ -2693,8 +2694,8 @@ class TopBar:
     def download_note(name: str, downloading: str) -> str:
         if downloading.startswith(name + " "):
             return " – " + t("downloading {progress}", progress=downloading.split(" ", 1)[1])
-        if not models.installed(MODELS_DIR, name):
-            return " – " + t("download {size}", size=models.size_label(name))
+        if not models.installed(MODELS_DIR, name):  # (Qwen: its environment only the first time)
+            return " – " + t("download {size}", size=models.size_label(name, not models.qwen_runtime_ready(MODELS_DIR)))
         return ""
 
     def menu(self) -> list:

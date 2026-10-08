@@ -313,8 +313,8 @@ input, `windows_paste.py`, and `e2e_desktop.py` / `e2e_x11.py`. It is started by
   Whisper in English. RTX 3060, all loaded: en 2.6 % (0.51 s per sentence), sk 2.1 % (0.69 s),
   Slovak taken for English: 10/10 redone, 1.4 %. Qwen on the CPU: 9 s per sentence. The Qwen
   environment is ~4 GB to download, 7 GB on disk; the install retries a step once and cleans uv's
-  cache (NVIDIA's server timed out once at uv's default 30 s). A choice is 5 parts (device, GPU model, CPU
-  model, GPU Slovak, CPU Slovak); `ModelSwitch.plan()` compares what would run with what runs, and a
+  cache (NVIDIA's server timed out once at uv's default 30 s). A choice is 6 parts (device, GPU model, CPU
+  model, GPU Slovak, CPU Slovak, English); `ModelSwitch.plan()` compares what would run with what runs, and a
   missing Slovak model is downloaded while the general one keeps working without it. Download =
   KInIT's safetensors into `models/.partial-NAME-hf`, `convert.py` into `models/.partial-NAME`,
   `complete()`, rename. `convert.py` fills CTranslate2's `WhisperSpec` from numpy arrays the way
