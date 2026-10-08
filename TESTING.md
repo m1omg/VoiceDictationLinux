@@ -14,8 +14,8 @@ Install over the current version: `bash install.sh` in the unpacked folder. It k
 and models; Enter accepts each suggestion.
 1. In a text editor: hold numpad Del, say a sentence, release: the text is typed, as before. Then
    tap, speak, tap.
-2. The top-bar menu: *Speech model ▸*, *Run on ▸* and *Large text ▸* open as submenus.
-3. *Speech model → base*: a notification announces the download (145 MB), the menu shows its
+2. The top-bar menu: *Main model ▸*, *Run on ▸* and *Large text ▸* open as submenus.
+3. *Main model → base*: a notification announces the download (145 MB), the menu shows its
    progress, then it switches; dictate once. Then switch back to large-v3-turbo.
 4. *Run on → Processor*: dictate once (slower). Then back to *Graphics card*.
 5. *Settings window… → Change it…*, press Ctrl+Alt+D. On GNOME, approve the new shortcut. Dictate
@@ -68,7 +68,7 @@ the key.
 4. Copy something before dictating: after the text is typed, it is back on the clipboard.
 5. Speed: in Terminal, `tail -f ~/Library/"Application Support"/dictate/dictate.log` shows
    `transcribed … in X s` after each dictation. Note X for *base* and for *small* (switch in the
-   menu bar menu, *Speech model*).
+   menu bar menu, *Main model*).
 6. *Large text → Big status panel*: dictate into TextEdit; the panel appears, and the text still
    lands in TextEdit.
 7. Log out and in again: dictation starts by itself (the icon appears in the menu bar).

@@ -62,12 +62,16 @@ top = d.TopBar(ui)
 labels = [item.label for item in top.tray.menu]
 check("the menu exists once the icon does", bool(labels), True)
 check("it starts with the key", labels[0].startswith("Hold "), True)
-check("speech model, run-on, Slovak and English model submenus", [x.split(":")[0] for x in labels if ":" in x],
-      ["Speech model", "Run on", "Model for Slovak", "Model for English"])
-models_menu = next(item for item in top.tray.menu if item.label.startswith("Speech model"))
-check("every model listed, the missing ones with their size",
-      [item.label.split(" ")[0] for item in models_menu.children], list(d.models.MODELS))
-check("a missing model offers its download", "download 76 MB" in models_menu.children[0].label, True)
+check("main model, run-on, Slovak and English model submenus", [x.split(":")[0] for x in labels if ":" in x],
+      ["Main model", "Run on", "Model for Slovak", "Model for English"])
+models_menu = next(item for item in top.tray.menu if item.label.startswith("Main model"))
+choices = [item for item in models_menu.children if item.kind == "radio"]
+check("every model listed, the missing ones with their size", [item.label.split(" ")[0] for item in choices],
+      list(d.models.MODELS))
+check("a missing model offers its download", "download 76 MB" in choices[0].label, True)
+check("the three model submenus start by saying what that model does (a line that can't be clicked)",
+      [(m.children[0].label.split(" ")[0], m.children[0].enabled, m.children[1].kind) for m in top.tray.menu
+       if m.id in (40, 45, 46)], [("Types", False, "separator"), ("Writes", False, "separator"), ("Writes", False, "separator")])
 top.update(key="Press KP_Delete")  # how GNOME reports the shortcut the user approved
 check("the key as GNOME describes it, in plain words", top.how_to(), "Hold numpad Del to dictate, or tap it to start and stop")
 top.update(key="Press <Super>F9")

@@ -1,6 +1,6 @@
 """The top-bar menu over D-Bus, as GNOME's AppIndicator extension and KDE read it: the nested layout
 (GetLayout with recursion depth -1 and 1), properties of submenu items, and clicks. Also checks
-dictate's real menu: unique ids, the Speech model and Run on submenus.
+dictate's real menu: unique ids, the Main model and Run on submenus.
 
 Run it on a private bus, so no icon appears in your top bar:
     dbus-run-session -- ~/.local/share/dictate/venv/bin/python tests/unit_tray.py
@@ -37,7 +37,7 @@ from tray import MenuItem, TrayIcon, walk  # noqa: E402
 clicks = []
 M = MenuItem
 menu = [M(1, "Header_with_underscore", enabled=False), M(2, kind="separator"),
-        M(40, "Speech model: base", children=[M(400, "tiny", "radio"), M(401, "base", "radio", True)]),
+        M(40, "Main model: base", children=[M(400, "tiny", "radio"), M(401, "base", "radio", True)]),
         M(41, "Run on", children=[M(410, "GPU", "radio", enabled=False), M(411, "CPU", "radio", True)]),
         M(31, "Stop")]
 tray = TrayIcon("dictate-test", "Dictate test", lambda: menu, clicks.append)
@@ -75,8 +75,8 @@ real = topbar.menu()
 ids = [i.id for i in walk(real)]
 checks.append(("dictate's menu: ids unique", len(ids) == len(set(ids))))
 labels = {i.id: i.label for i in real}
-checks.append(("dictate's menu: model and device submenus", labels[40].startswith("Speech model")
-               and labels[41].startswith("Run on") and len(next(i for i in real if i.id == 40).children) == len(d.models.MODELS)))
+checks.append(("dictate's menu: model and device submenus", labels[40].startswith("Main model") and labels[41].startswith("Run on")
+               and len([i for i in next(i for i in real if i.id == 40).children if i.kind == "radio"]) == len(d.models.MODELS)))
 
 for label, good in checks:
     print(f"{'ok  ' if good else 'FAIL'} {label}")

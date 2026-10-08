@@ -160,7 +160,7 @@ input, `windows_paste.py`, and `e2e_desktop.py` / `e2e_x11.py`. It is started by
 4. With *Type while speaking* on and a longer sentence, words should appear while the key is
    held. The log says `first live words typed X s after the key went down`.
 5. Check that the tray icon is visible and its menu switches English / Slovenčina / Auto, the
-   speech model and graphics card / processor.
+   main model and graphics card / processor.
 6. **A lone-modifier key** (Right Ctrl, Right Option): a shortcut with it still works (Right
    Ctrl+C copies; on a Slovak Mac layout Right Option+2 types @); the log says the dictation was
    cancelled.

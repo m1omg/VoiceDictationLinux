@@ -1413,7 +1413,7 @@ class Transcriber:
             engine.start()
         except Exception as e:
             log.warning("the Qwen model %s could not start: %s", name, e)
-            notify(t("Qwen could not start"), t("English goes to the speech model instead. The reason: {error}", error=e))
+            notify(t("Qwen could not start"), t("English goes to the main model instead. The reason: {error}", error=e))
             return
         self.english = engine
         log.info("Qwen model ready: %s on %s (%.1f s)", name, engine.device, time.monotonic() - started)
@@ -1445,7 +1445,7 @@ class Transcriber:
                 log.warning("Qwen failed (%s); Whisper does this one", e)
                 if not self.english.alive():  # it ended: Whisper from now on, until the model is chosen again
                     self.english = None
-                    notify(t("Qwen stopped working"), t("English goes to the speech model instead. The reason: {error}",
+                    notify(t("Qwen stopped working"), t("English goes to the main model instead. The reason: {error}",
                                                         error=e))
         if language == "sk" and self.slovak is not None and not words:
             # KInIT's models write plain lowercase words, without a single punctuation mark: their words,
@@ -2710,13 +2710,15 @@ class TopBar:
         english = ui.english_model
         tr = self.switch.worker.transcriber if self.switch else None
         nvidia = self.model_key() == "gpu_model" and (tr is None or tr.platform in (None, "cuda"))  # (None: not loaded yet)
-        english_items = [M(460, t("None: the speech model above does English too"), "radio", not english)]
+        english_items = [M(469, t("Writes English after you release the key (not while typing as you speak)"), enabled=False),
+                         M(468, kind="separator"), M(460, t("None: the main model does English too"), "radio", not english)]
         for name, item_id in self.ENGLISH_IDS.items():
             note = self.download_note(name, downloading) if nvidia else " – " + t("needs an NVIDIA graphics card")
             english_items.append(M(item_id, f"{name} ({t(models.QWEN[name][3])}){note}", "radio", name == english,
                                    enabled=nvidia or name == english))
         slovak = getattr(ui, self.slovak_key())
-        slovak_items = [M(450, t("None: the speech model above does Slovak too"), "radio", not slovak)]
+        slovak_items = [M(459, t("Writes Slovak after you release the key (not while typing as you speak)"), enabled=False),
+                        M(458, kind="separator"), M(450, t("None: the main model does Slovak too"), "radio", not slovak)]
         for name, item_id in self.SLOVAK_IDS.items():
             slovak_items.append(M(item_id, f"{name} ({t(models.SLOVAK[name][4])}){self.download_note(name, downloading)}",
                                   "radio", name == slovak))
@@ -2738,7 +2740,10 @@ class TopBar:
                 M(22, t("Tap to start and stop"), "check", ui.tap),
                 M(21, t("Sounds"), "check", ui.sounds),
                 M(4, kind="separator"),
-                M(40, t("Speech model: {model}", model=current), children=model_items),
+                M(40, t("Main model: {model}", model=current), children=[
+                    M(498, t("Types while you speak and recognizes the language; does what the models below don't"),
+                      enabled=False),
+                    M(497, kind="separator"), *model_items]),
                 M(41, t("Run on: graphics card") if on_gpu else t("Run on: processor"), children=run_on),
                 M(45, t("Model for Slovak: {model}", model=slovak or t("none")), children=slovak_items),
                 M(46, t("Model for English: {model}", model=english or t("none")), children=english_items),

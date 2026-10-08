@@ -727,8 +727,9 @@ class SettingsModel:
                      lambda: self.set(tap=not ui.tap)))
         rows.append(("button", "sounds", t("Sounds"), f"check:{on(ui.sounds)}", True,
                      lambda: self.set(sounds=not ui.sounds)))
-        rows.append(("heading", t("Speech model (runs on the graphics card)") if on_gpu
-                     else t("Speech model (runs on the processor)")))
+        rows.append(("heading", t("Main model (runs on the graphics card)") if on_gpu
+                     else t("Main model (runs on the processor)")))
+        rows.append(("text", t("Types while you speak and recognizes the language; does what the models below don't") + "."))
         downloading = status.get("download") or ""
         for name, (_repo, _mb, info) in models.MODELS.items():
             if downloading.startswith(name + " "):
@@ -741,8 +742,9 @@ class SettingsModel:
                          lambda n=name: self.set(**{model_key: n})))
         slovak_key = "gpu_slovak" if on_gpu else "cpu_slovak"
         slovak = getattr(ui, slovak_key)
-        rows.append(("heading", t("Model for Slovak (used only when you speak Slovak)")))
-        rows.append(("button", "slovak:none", t("None: the speech model above does Slovak too"), f"radio:{on(not slovak)}",
+        rows.append(("heading", t("Model for Slovak")))
+        rows.append(("text", t("Writes Slovak after you release the key (not while typing as you speak)") + "."))
+        rows.append(("button", "slovak:none", t("None: the main model does Slovak too"), f"radio:{on(not slovak)}",
                      True, lambda: self.set(**{slovak_key: ""})))
         for name, (_repo, _revision, _download_mb, _mb, info) in models.SLOVAK.items():
             if downloading.startswith(name + " "):
@@ -754,8 +756,9 @@ class SettingsModel:
             rows.append(("button", f"slovak:{name}", f"{name}: {t(info)}{note}", f"radio:{on(slovak == name)}", True,
                          lambda n=name: self.set(**{slovak_key: n})))
         english = ui.english_model
-        rows.append(("heading", t("Model for English (used only when you speak English)")))
-        rows.append(("button", "english:none", t("None: the speech model above does English too"), f"radio:{on(not english)}",
+        rows.append(("heading", t("Model for English")))
+        rows.append(("text", t("Writes English after you release the key (not while typing as you speak)") + "."))
+        rows.append(("button", "english:none", t("None: the main model does English too"), f"radio:{on(not english)}",
                      True, lambda: self.set(english_model="")))
         for name, (_repo, _revision, _mb, info) in models.QWEN.items():
             if not on_gpu:
