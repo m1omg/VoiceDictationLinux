@@ -47,7 +47,7 @@ def state(model: WebSettings) -> dict:
             "px": round(bigui.BASE_PX * ui.ui_scale) if large else 18, "colors": [fg, bg, accent] if large else None,
             "schemes": {name: list(colours[:2]) for name, colours in bigui.SCHEMES.items()},
             "groups": {"lang": t("Language you dictate in"), "uilang": "Menu language · Jazyk ponúk",
-                       "model": t("Speech model"), "device": t("Run on"), "popup": t("Status pop-up while dictating"),
+                       "model": t("Speech model"), "slovak": t("Model for Slovak"), "english": t("Model for English"), "device": t("Run on"), "popup": t("Status pop-up while dictating"),
                        "pos": t("Where the pop-up shows"), "size": t("Text size"), "colours": t("Colours")},
             "texts": {"capture": t("Press the new dictation key, or a key combination like Ctrl+Alt+D, now. Esc cancels."),
                       "closed": t("This page has ended. Open the settings again from the Dictate menu."),

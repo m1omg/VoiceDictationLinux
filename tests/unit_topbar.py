@@ -62,7 +62,8 @@ top = d.TopBar(ui)
 labels = [item.label for item in top.tray.menu]
 check("the menu exists once the icon does", bool(labels), True)
 check("it starts with the key", labels[0].startswith("Hold "), True)
-check("speech model and run-on submenus", [x.split(":")[0] for x in labels if ":" in x], ["Speech model", "Run on"])
+check("speech model, run-on, Slovak and English model submenus", [x.split(":")[0] for x in labels if ":" in x],
+      ["Speech model", "Run on", "Model for Slovak", "Model for English"])
 models_menu = next(item for item in top.tray.menu if item.label.startswith("Speech model"))
 check("every model listed, the missing ones with their size",
       [item.label.split(" ")[0] for item in models_menu.children], list(d.models.MODELS))

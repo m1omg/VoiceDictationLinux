@@ -128,7 +128,8 @@ bash install.sh
 Set the answers beforehand, for example to install on many computers:
 `DICTATE_LANGUAGE=en|sk|auto`, `DICTATE_MODEL=tiny|base|small|medium|large-v3-turbo`,
 `DICTATE_KEY=KP_Delete|Control_R|Alt_R|"Ctrl+Alt+D"|…`, `DICTATE_LARGE_UI=off|panel|both`,
-`DICTATE_UI_LANGUAGE=en|sk` (the first question);
+`DICTATE_UI_LANGUAGE=en|sk` (the first question),
+`DICTATE_SLOVAK_MODEL=large-v3-turbo-sk|medium-sk|small-sk|base-sk|none`;
 `DICTATE_NO_AUTOSTART=1` skips start-at-login (otherwise it stays as the menu's *Start at login*
 last left it). On Linux and macOS:
 `DICTATE_MODEL=small bash install.sh`; on Windows, in PowerShell:
@@ -167,6 +168,10 @@ last left it). On Linux and macOS:
     its size; picking it downloads it, then switches to it.
   - **Run on: graphics card / processor.** The graphics card is greyed out when there is none that
     can run the model.
+  - **Model for Slovak:** a model fine-tuned for Slovak, used only for Slovak; see
+    [Models fine-tuned for Slovak](#models-fine-tuned-for-slovak).
+  - **Model for English:** Qwen3-ASR for English (NVIDIA graphics cards); see
+    [Qwen3-ASR for English](#qwen3-asr-for-english).
   - **Status pop-up while dictating:** *Automatic* (the small one, when the model runs on the
     processor), *Small*, *Large, for low vision* (the big panel, see
     [Large text](#large-text-for-low-vision)) or *Off*. It shows *Listening*, then *Transcribing…*
@@ -236,6 +241,60 @@ Measured word error rates and times are under [Accuracy and speed](#accuracy-and
   while a model loads still records and waits for it.
 - **Live typing** starts switched off without a graphics card: repeated live passes are too heavy
   for most processors. Switch it on in the menu to try it.
+
+### Models fine-tuned for Slovak
+[KInIT](https://kinit.sk) fine-tuned Whisper on Slovak speech. These models get about a third as
+many Slovak words wrong, but have lost most of their English, and they write plain lowercase words
+without any punctuation. So dictation uses one only for Slovak (chosen in the menu, or detected),
+and only for what is transcribed after you let go: its words, with the punctuation and capitals of
+the speech model above, which still detects the language, writes English and types live. Choose
+one under *Model for Slovak* in the menu or the settings window, or in the installer (it asks when
+you dictate Slovak or both languages).
+
+| Model | Download | Disk | Suits |
+|---|---|---|---|
+| large-v3-turbo-sk | 3.2 GB | 1.6 GB | a graphics card (next to large-v3-turbo) |
+| medium-sk | 3.1 GB | 1.5 GB | fast processors |
+| small-sk | 966 MB | 484 MB | computers without a graphics card (next to small or base) |
+| base-sk | 290 MB | 145 MB | slow processors |
+
+- KInIT's own test (Common Voice 24, Slovak): large-v3-turbo-sk 9.3 % of the words wrong against
+  29.2 % for large-v3-turbo; on their held-out set 5.6 % against 18.4 %, and small-sk 8.6 %
+  against 47.9 % for small. Here, on the FLEURS sentences: large-v3-turbo-sk 2.1 % against 6.4 %
+  (graphics card); on the processor small-sk 1.5 % (1.6 s per sentence) and base-sk 7.4 % (0.7 s).
+  FLEURS was part of their training data, so these flatter them; English with them: 70 % wrong.
+- Counting punctuation and capitals too, large-v3-turbo-sk with large-v3-turbo's punctuation gets
+  5.3 % wrong against 8.9 % for large-v3-turbo alone. Two models transcribe each Slovak dictation:
+  on a graphics card 0.7 s instead of 0.35 s for a sentence.
+- With *Type while speaking*, the words typed live come from the speech model above, as before;
+  only a dictation that wasn't typed live gets the Slovak model's words.
+- They come in Hugging Face's format and are converted on your computer after the download
+  (`convert.py`, a few seconds, no extra software); the download is about twice the final size.
+- Dictation keeps both models loaded: on a graphics card about 1.6 GB more of its memory.
+
+### Qwen3-ASR for English
+[Qwen3-ASR](https://huggingface.co/Qwen/Qwen3-ASR-1.7B) (Alibaba's Qwen team) gets fewer English
+words wrong than Whisper: 2.9 % against large-v3-turbo's 3.9 % on the FLEURS sentences. It doesn't
+know Slovak (Slovak speech comes out as Czech), so like the Slovak models it is used only for
+English, beside the speech model, which detects the language. Choose it under *Model for English*.
+
+| Model | Download | Suits |
+|---|---|---|
+| qwen3-asr-1.7b | 4.7 GB + 4.0 GB of software, the first time | an NVIDIA graphics card |
+| qwen3-asr-0.6b | 1.9 GB + 4.0 GB of software, the first time | an NVIDIA graphics card |
+
+- It runs on PyTorch, which the first Qwen model installs into a folder of its own next to the
+  program (`qwen-venv`, 7 GB on disk), and in a process of its own; the speech model and Qwen both
+  stay loaded.
+- NVIDIA graphics cards only: on a processor it takes about as long as the speech itself.
+- Only what is transcribed after you let go goes to Qwen; words typed live come from the speech
+  model (Qwen has no word timings of its own). Silence is cut out before it hears the recording.
+- If a Qwen pass fails or takes too long, the speech model does that dictation; if Qwen stops, a
+  notification says so and the speech model does English until you choose Qwen again.
+- Qwen isn't told the language. If auto-detect took Slovak for English, Qwen hears it as Czech, and
+  the dictation is transcribed as Slovak instead (10 of 10 such recordings in the tests).
+- Measured with everything loaded on an RTX 3060: English 2.6 % (0.5 s per sentence), Slovak with
+  large-v3-turbo-sk 2.1 % (0.7 s).
 
 ## The dictation key
 - **Defaults:** numpad **Del / "."** on keyboards with a numpad; the installer suggests **Right Ctrl**

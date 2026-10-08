@@ -264,6 +264,32 @@ SK: dict[str, str] = {
         "rovnako presný ako large-v3-turbo, 1,5× pomalší; iba na grafickej karte",
     "slightly better English, worse Slovak, 1.5x slower; graphics card only":
         "o niečo lepšia angličtina, horšia slovenčina, 1,5× pomalší; iba na grafickej karte",
+    "the most accurate; graphics card": "najpresnejší; grafická karta",
+    "very good; slow without a GPU": "veľmi dobrý; bez grafickej karty pomalý",
+    "good, and fast enough for a processor": "dobrý a dosť rýchly pre procesor",
+    "fast; makes more mistakes": "rýchly; robí viac chýb",
+    "None: the speech model above does Slovak too": "Žiadny: slovenčinu robí aj rečový model vyššie",
+    "Model for Slovak: {model}": "Model pre slovenčinu: {model}",
+    "none": "žiadny",
+    "Model for Slovak (used only when you speak Slovak)": "Model pre slovenčinu (len keď hovoríte po slovensky)",
+    "Model for Slovak": "Model pre slovenčinu",
+    "no, the speech model alone": "nie, len rečový model",
+    "Also a model fine-tuned for Slovak (by KInIT)? It makes about a third of the mistakes in Slovak, and is used only "
+    "when you speak Slovak.":
+        "Aj model doladený pre slovenčinu (od KInIT)? V slovenčine robí asi tretinu chýb a používa sa len vtedy, keď "
+        "hovoríte po slovensky.",
+    "the most accurate English": "najpresnejšia angličtina",
+    "smaller and faster, still very good English": "menší a rýchlejší, stále veľmi dobrá angličtina",
+    "{model} + {software} of software": "{model} + {software} softvéru",
+    "None: the speech model above does English too": "Žiadny: angličtinu robí aj rečový model vyššie",
+    "needs an NVIDIA graphics card": "potrebuje grafickú kartu NVIDIA",
+    "Model for English: {model}": "Model pre angličtinu: {model}",
+    "Model for English (used only when you speak English)": "Model pre angličtinu (len keď hovoríte po anglicky)",
+    "Model for English": "Model pre angličtinu",
+    "Qwen could not start": "Qwen sa nepodarilo spustiť",
+    "Qwen stopped working": "Qwen prestal fungovať",
+    "English goes to the speech model instead. The reason: {error}":
+        "Angličtinu namiesto neho prepisuje rečový model. Dôvod: {error}",
     "no usable GPU": "žiadna použiteľná grafická karta",
     "{gpu}; {cores}-core CPU; {ram} GB RAM": "{gpu}; {cores}-jadrový procesor; {ram} GB RAM",
     "laptop": "notebook",

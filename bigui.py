@@ -739,6 +739,35 @@ class SettingsModel:
                 note = ""
             rows.append(("button", f"model:{name}", f"{name}: {t(info)}{note}", f"radio:{on(current == name)}", True,
                          lambda n=name: self.set(**{model_key: n})))
+        slovak_key = "gpu_slovak" if on_gpu else "cpu_slovak"
+        slovak = getattr(ui, slovak_key)
+        rows.append(("heading", t("Model for Slovak (used only when you speak Slovak)")))
+        rows.append(("button", "slovak:none", t("None: the speech model above does Slovak too"), f"radio:{on(not slovak)}",
+                     True, lambda: self.set(**{slovak_key: ""})))
+        for name, (_repo, _revision, _download_mb, _mb, info) in models.SLOVAK.items():
+            if downloading.startswith(name + " "):
+                note = t(", downloading {progress}", progress=downloading.split(" ", 1)[1])
+            elif not models.installed(self.d.MODELS_DIR, name):
+                note = t(", download {size}", size=models.size_label(name))
+            else:
+                note = ""
+            rows.append(("button", f"slovak:{name}", f"{name}: {t(info)}{note}", f"radio:{on(slovak == name)}", True,
+                         lambda n=name: self.set(**{slovak_key: n})))
+        english = ui.english_model
+        rows.append(("heading", t("Model for English (used only when you speak English)")))
+        rows.append(("button", "english:none", t("None: the speech model above does English too"), f"radio:{on(not english)}",
+                     True, lambda: self.set(english_model="")))
+        for name, (_repo, _revision, _mb, info) in models.QWEN.items():
+            if not on_gpu:
+                note = ", " + t("needs an NVIDIA graphics card")
+            elif downloading.startswith(name + " "):
+                note = t(", downloading {progress}", progress=downloading.split(" ", 1)[1])
+            elif not models.installed(self.d.MODELS_DIR, name):
+                note = t(", download {size}", size=models.size_label(name))
+            else:
+                note = ""
+            rows.append(("button", f"english:{name}", f"{name}: {t(info)}{note}", f"radio:{on(english == name)}",
+                         on_gpu or english == name, lambda n=name: self.set(english_model=n)))
         rows.append(("heading", t("Run on")))
         rows.append(("button", "device:gpu", t("Graphics card (GPU)") if gpu_ok else t("Graphics card (GPU): none can be used"),
                      f"radio:{on(on_gpu)}", gpu_ok, lambda: self.set(device="gpu")))

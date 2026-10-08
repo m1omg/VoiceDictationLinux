@@ -49,7 +49,9 @@ import bigui  # noqa: E402
 import dictate  # noqa: E402
 import models  # noqa: E402
 import keys  # noqa: E402
-indirect = ([info for _, _, info in models.MODELS.values()] + list(bigui.SCHEME_LABELS.values())
+indirect = ([info for _, _, info in models.MODELS.values()] + [entry[4] for entry in models.SLOVAK.values()]
+            + [entry[3] for entry in models.QWEN.values()]
+            + list(bigui.SCHEME_LABELS.values())
             + list(dictate.LOGIN_KINDS.values()) + [dictate.LANGUAGES["auto"]]
             + list(keys.LABELS.values()) + list(keys.MAC_LABELS.values()) + list(keys.WIN_LABELS.values())
             + ["the screen is locked", "the computer was asleep", "transcribing took too long",

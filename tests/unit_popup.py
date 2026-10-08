@@ -65,7 +65,8 @@ class StandInPanel:  # records what would go to the pop-up's process
 class StandInSwitch:  # what the menu and the pop-up ask the model switcher
     def __init__(self, gpu):
         self.gpu = gpu
-        self.worker = types.SimpleNamespace(transcriber=types.SimpleNamespace(gpu_available=gpu, on_cpu=not gpu))
+        self.worker = types.SimpleNamespace(transcriber=types.SimpleNamespace(gpu_available=gpu, on_cpu=not gpu,
+                                                                              platform="cuda" if gpu else "cpu"))
 
     def on_gpu(self):
         return self.gpu

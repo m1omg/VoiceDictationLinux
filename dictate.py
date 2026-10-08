@@ -16,6 +16,7 @@ Run with --help for the setup and test modes.
 from __future__ import annotations
 
 import argparse
+import difflib
 import atexit
 import ctypes
 import faulthandler
@@ -40,6 +41,7 @@ import sysconfig
 import threading
 import time
 import tomllib
+import types
 import wave
 from collections import deque
 from dataclasses import dataclass, field
@@ -196,6 +198,8 @@ class UiState:
                           "ui_language": "en",  # menus and messages (the installers ask first)
                           "device": cfg.device if cfg.device in DEVICES else "auto",
                           "gpu_model": cfg.model, "cpu_model": cfg.fallback_model,
+                          "gpu_slovak": "", "cpu_slovak": "",  # a model fine-tuned for Slovak (models.SLOVAK), or none
+                          "english_model": "",  # Qwen3-ASR for English (models.QWEN; NVIDIA only), or none
                           "trigger": cfg.trigger if valid_trigger(cfg.trigger) else DEFAULTS["trigger"],
                           "popup": cfg.status_popup if cfg.status_popup in POPUPS else "auto",
                           "big_panel": cfg.big_panel, "big_settings": cfg.big_settings,
@@ -240,6 +244,10 @@ class UiState:
             return value in LANGUAGES
         if key == "device":
             return value in DEVICES
+        if key in ("gpu_slovak", "cpu_slovak"):
+            return value == "" or value in models.SLOVAK
+        if key == "english_model":
+            return value == "" or value in models.QWEN
         if key.endswith("_model"):  # a folder name in models/
             return bool(value) and not value.startswith(".") and not set("/\\:") & set(value)
         if key == "trigger":
@@ -1158,25 +1166,177 @@ def model_dir(name: str) -> str:
     return path
 
 
+def _styled_like(word: str, model: str) -> str:
+    """word with the capitals of model (all capitals: DVD; a capital first letter: Bratislava)."""
+    core = re.sub(r"[^\w]", "", model)
+    if len(core) > 1 and core.isupper():
+        return word.upper()
+    return word[:1].upper() + word[1:] if core[:1].isupper() else word
+
+
+def transfer_format(styled: str, plain: str) -> str:
+    """plain's words with styled's punctuation and capitals: the two texts are lined up word by word;
+    where they agree styled's form is kept, a different word takes over the capitals and punctuation
+    of the one it replaces, an extra word comes as it is, and a missing word leaves its sentence end."""
+    def norm(word):
+        return re.sub(r"[^\w]", "", word.lower())
+    s, p = styled.split(), plain.split()
+    out: list[str] = []
+    for tag, i1, i2, j1, j2 in difflib.SequenceMatcher(a=[norm(w) for w in s], b=[norm(w) for w in p],
+                                                        autojunk=False).get_opcodes():
+        if tag == "equal":
+            out += s[i1:i2]
+        elif tag == "replace":
+            for k in range(j2 - j1):
+                model = s[i1 + (k * (i2 - i1)) // (j2 - j1)]
+                word = _styled_like(re.sub(r"[^\w'’-]", "", p[j1 + k]) or p[j1 + k], model)
+                lead = re.match(r"^[^\w]*", s[i1]).group() if k == 0 else ""
+                trail = re.search(r"[^\w]*$", s[i2 - 1]).group() if k == j2 - j1 - 1 else ""
+                out.append(lead + word + trail)
+        elif tag == "insert":
+            out += p[j1:j2]
+        else:  # delete: the words go, a sentence end or comma after them stays
+            trail = re.search(r"[.!?…,;:]*$", s[i2 - 1]).group()
+            if trail and out and not re.search(r"[^\w]$", out[-1]):
+                out[-1] += trail
+    return re.sub(r"(^|[.!?…]\s+)(\w)", lambda m: m.group(1) + m.group(2).upper(), " ".join(out))
+
+
+QWEN_SLOVAK = ("Czech", "Slovak", "Polish")  # what Qwen calls Slovak speech
+
+
+def speech_only(audio: np.ndarray) -> np.ndarray:
+    """The audio's speech (Silero VAD, padded), with short gaps instead of the silences: Whisper's own
+    VAD filter does this for Whisper; Qwen gets it done here, so it never hears long silences."""
+    from faster_whisper.vad import VadOptions, get_speech_timestamps
+    stamps = get_speech_timestamps(audio, VadOptions())
+    gap = np.zeros(int(0.2 * RATE), dtype=np.float32)
+    pieces = []
+    for stamp in stamps:
+        pieces += [audio[stamp["start"]:stamp["end"]], gap]
+    return np.concatenate(pieces[:-1]).astype(np.float32) if pieces else np.zeros(0, dtype=np.float32)
+
+
+class QwenEngine:
+    """Qwen3-ASR (English) in a process of its own: qwen_worker.py, run by the Qwen environment's
+    Python (PyTorch, which this program's environment doesn't have). One pass at a time. A pass that
+    fails raises, and dictation uses Whisper for it; one that takes too long ends the process (a late
+    answer would be taken for the next one's)."""
+    START_LIMIT = 300  # seconds: importing PyTorch and loading the model, the first time from disk
+    PASS_LIMIT = 20  # seconds, plus a fifth of the audio's length (below the Watchdog's limit)
+
+    def __init__(self, name: str, python: str | None = None, worker: Path | None = None):
+        self.name = name
+        self.python = python or str(models.qwen_python(MODELS_DIR))
+        self.worker = worker or HERE / "qwen_worker.py"
+        self.proc = None
+        self.replies: queue.Queue = queue.Queue()
+        self.lock = threading.Lock()
+        self.device = ""
+
+    def start(self) -> None:
+        env = {**os.environ, "HF_HUB_OFFLINE": "1", "PYTHONUNBUFFERED": "1", "TRANSFORMERS_NO_ADVISORY_WARNINGS": "1"}
+        stderr = sys.stderr if hasattr(sys.stderr, "fileno") else subprocess.DEVNULL
+        self.proc = subprocess.Popen([self.python, str(self.worker), model_dir(self.name)], stdin=subprocess.PIPE,
+                                     stdout=subprocess.PIPE, stderr=stderr, env=env, creationflags=NO_WINDOW)
+        threading.Thread(target=self._read, args=(self.proc,), name="qwen", daemon=True).start()
+        try:
+            ready = self._reply(self.START_LIMIT)
+        except Exception:
+            self.stop()
+            raise
+        if not ready.get("ready"):
+            self.stop()
+            raise RuntimeError(ready.get("error") or "the Qwen model did not start")
+        self.device = ready.get("device", "")
+
+    def _read(self, proc) -> None:
+        for line in proc.stdout:
+            try:
+                self.replies.put(json.loads(line))
+            except ValueError:
+                continue
+        self.replies.put(None)  # it has ended
+
+    def _reply(self, timeout: float) -> dict:
+        try:
+            reply = self.replies.get(timeout=timeout)
+        except queue.Empty:
+            raise TimeoutError(f"Qwen gave no answer within {timeout:.0f} s") from None
+        if reply is None:
+            raise RuntimeError("the Qwen process ended")
+        return reply
+
+    def alive(self) -> bool:
+        return self.proc is not None and self.proc.poll() is None
+
+    def transcribe(self, audio: np.ndarray, context: str = "") -> tuple[str, str]:
+        """(the text, the language Qwen heard): it isn't told the language, so a recording taken for
+        English by mistake shows (Slovak comes out as "Czech")."""
+        with self.lock:
+            if not self.alive():
+                raise RuntimeError("the Qwen process isn't running")
+            header = json.dumps({"samples": len(audio), "language": None, "context": context}) + "\n"
+            try:
+                self.proc.stdin.write(header.encode() + np.asarray(audio, dtype="<f4").tobytes())
+                self.proc.stdin.flush()
+                reply = self._reply(self.PASS_LIMIT + len(audio) / RATE / 5)
+            except TimeoutError:
+                self.stop(wait=0)  # (it hangs: no point waiting for it to end)
+                raise
+            except OSError as e:
+                raise RuntimeError(f"the Qwen process isn't running ({e})") from None
+            if "error" in reply:
+                raise RuntimeError(reply["error"])
+            return reply.get("text", ""), reply.get("language") or ""
+
+    def stop(self, wait: float = 10) -> None:
+        proc, self.proc = self.proc, None
+        if proc is None:
+            return
+        try:
+            proc.stdin.close()  # (it ends when its input does)
+        except OSError:
+            pass
+        try:
+            proc.wait(timeout=wait)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+
+
 class Transcriber:
     def __init__(self, cfg):
         self.cfg = cfg
         self.model = self.batched = None
+        self.slovak = self.slovak_batched = None  # a model fine-tuned for Slovak: runs Slovak passes only
+        self.slovak_name = None  # the one loaded
+        self.slovak_wanted = ""  # the one asked for (also when it couldn't be loaded: not tried again and again)
+        self.english: QwenEngine | None = None  # Qwen3-ASR for English (NVIDIA only)
+        self.english_wanted = ""
+        self.platform = None  # "cuda", "rocm" or "cpu": which GPU libraries this install has
+        self.heard: str | None = None  # set by run(): Qwen heard Slovak where English was expected
         self.desc, self.name, self.on_cpu = "not loaded", None, False
         self.gpu_available = None  # known after the first load: a GPU this install can use
         self.ready = threading.Event()
         # hotwords are added to every 30 s window (initial_prompt only reaches the first one)
         self.hotwords = ", ".join(cfg.vocabulary) + "." if cfg.vocabulary else None
 
-    def load(self, device: str = "auto", gpu_model: str | None = None, cpu_model: str | None = None) -> None:
+    def load(self, device: str = "auto", gpu_model: str | None = None, cpu_model: str | None = None,
+             gpu_slovak: str = "", cpu_slovak: str = "", english: str = "") -> None:
         """Load the model for `device` ("auto", "gpu" or "cpu"): the GPU model in the best compute type
-        the GPU supports (GTX 10xx cards have no fast float16), else the CPU model. The previous model
-        is freed first, so two models never share the GPU's memory."""
+        the GPU supports (GTX 10xx cards have no fast float16), else the CPU model; and, if one is
+        chosen for that device, a model fine-tuned for Slovak beside it, in the same way. The previous
+        models are freed first, so old and new never share the GPU's memory."""
         self.ready.clear()
-        self.model = self.batched = None
+        self.model = self.batched = self.slovak = self.slovak_batched = None
+        self.slovak_name = None
+        if self.english is not None:
+            self.english.stop()
+            self.english = None
         release_memory()
         gpu_model, cpu_model = gpu_model or self.cfg.model, cpu_model or self.cfg.fallback_model
         platform, _libs = preload_gpu_libraries()
+        self.platform = platform
         import ctranslate2
         from faster_whisper import BatchedInferencePipeline, WhisperModel
         self.gpu_available = platform != "cpu" and ctranslate2.get_cuda_device_count() > 0
@@ -1203,7 +1363,14 @@ class Transcriber:
                 continue
             self.model, self.batched = model, BatchedInferencePipeline(model)
             self.name, self.on_cpu = name, where == "cpu"
-            self.desc = f"{name} on {platform if where == 'cuda' else where}/{compute_type}"
+            self.slovak_wanted = gpu_slovak if where == "cuda" else cpu_slovak
+            if self.slovak_wanted:
+                self._load_slovak(self.slovak_wanted, where, compute_type)
+            self.english_wanted = english if where == "cuda" else ""
+            if self.english_wanted:
+                self._start_english(self.english_wanted, platform)
+            extras = [n for n in (self.slovak_name, self.english.name if self.english else None) if n]
+            self.desc = f"{' + '.join([name, *extras])} on {platform if where == 'cuda' else where}/{compute_type}"
             log.info("model ready: %s (%.1f s)", self.desc, time.monotonic() - started)
             if where == "cpu" and wanted_gpu:
                 notify(t("Dictation is running on the CPU"),
@@ -1212,15 +1379,88 @@ class Transcriber:
             return
         raise RuntimeError("no Whisper model could be loaded")
 
+    def _load_slovak(self, name: str, where: str, compute_type: str) -> None:
+        """The Slovak model beside the general one (which still detects the language and does English).
+        If it can't be loaded, dictation goes on with the general model alone."""
+        from faster_whisper import BatchedInferencePipeline, WhisperModel
+        if not models.installed(MODELS_DIR, name):
+            log.warning("the Slovak model %s is missing or incomplete", MODELS_DIR / name)
+            return
+        started = time.monotonic()
+        try:
+            model = WhisperModel(model_dir(name), device=where, compute_type=compute_type,
+                                 cpu_threads=models.cpu_threads() if where == "cpu" else 0)
+            warmup = np.random.default_rng(0).standard_normal(RATE).astype(np.float32) * 0.01
+            list(model.transcribe(warmup, language="sk", beam_size=1, max_new_tokens=8, without_timestamps=True)[0])
+        except Exception as e:
+            log.warning("loading the Slovak model %s on %s/%s failed: %s", name, where, compute_type, e)
+            return
+        self.slovak, self.slovak_batched, self.slovak_name = model, BatchedInferencePipeline(model), name
+        log.info("Slovak model ready: %s (%.1f s)", name, time.monotonic() - started)
+
+    def _start_english(self, name: str, platform: str) -> None:
+        """Qwen beside Whisper, for English; if it can't start, Whisper does English as before."""
+        if platform != "cuda":
+            log.info("%s needs an NVIDIA graphics card; Whisper does English", name)
+            return
+        if not models.installed(MODELS_DIR, name):
+            log.warning("the Qwen model %s or its environment is missing", name)
+            return
+        started = time.monotonic()
+        engine = QwenEngine(name)
+        try:
+            engine.start()
+        except Exception as e:
+            log.warning("the Qwen model %s could not start: %s", name, e)
+            notify(t("Qwen could not start"), t("English goes to the speech model instead. The reason: {error}", error=e))
+            return
+        self.english = engine
+        log.info("Qwen model ready: %s on %s (%.1f s)", name, engine.device, time.monotonic() - started)
+
     def run(self, audio: np.ndarray, language: str, *, words=False, prompt=None, beam_size=None,
             hotwords=True) -> list:
-        """One model pass; returns the segments (with word timings if words=True). Vocabulary
-        hints are left out for very short audio, where whisper tends to just echo them."""
+        """One model pass; returns the segments (with word timings if words=True). Without word timings
+        (i.e. after release), Slovak goes to the Slovak model and English to Qwen when they are loaded;
+        live passes stay with the general model. Vocabulary hints are left out for very short audio,
+        where whisper tends to just echo them."""
         peak = float(np.abs(audio).max()) if audio.size else 0.0
         if 1e-4 <= peak < 0.3:
             audio = audio * min(0.9 / peak, 10.0)  # lift quiet input
+        if language == "en" and self.english is not None and not words:
+            try:
+                speech = speech_only(audio)
+                if not speech.size:
+                    return []
+                text, heard = self.english.transcribe(speech, self.hotwords if hotwords and self.hotwords else "")
+                if heard in QWEN_SLOVAK:  # (Qwen has no Slovak: it says Czech) taken for English by mistake
+                    log.info("Qwen heard %s, not English: transcribed as Slovak", heard)
+                    self.heard = "sk"
+                    return self.run(audio, "sk", prompt=prompt, beam_size=beam_size, hotwords=hotwords)
+                if heard and heard != "English":  # something else: Whisper, in English, as without Qwen
+                    log.info("Qwen heard %s, not English: Whisper does this one", heard)
+                else:
+                    return [types.SimpleNamespace(text=text, start=0.0, end=len(audio) / RATE, words=None)]
+            except Exception as e:
+                log.warning("Qwen failed (%s); Whisper does this one", e)
+                if not self.english.alive():  # it ended: Whisper from now on, until the model is chosen again
+                    self.english = None
+                    notify(t("Qwen stopped working"), t("English goes to the speech model instead. The reason: {error}",
+                                                        error=e))
+        if language == "sk" and self.slovak is not None and not words:
+            # KInIT's models write plain lowercase words, without a single punctuation mark: their words,
+            # with the general model's punctuation and capitals (FLEURS: 2.1 % of the words wrong, 5.3 %
+            # counting punctuation and capitals, against 6.4 % / 8.9 % for large-v3-turbo alone).
+            styled = " ".join(seg.text.strip() for seg in self._pass(self.model, self.batched, audio, language, words,
+                                                                      prompt, beam_size, hotwords))
+            plain = " ".join(seg.text.strip() for seg in self._pass(self.slovak, self.slovak_batched, audio, language,
+                                                                     words, prompt, beam_size, hotwords))
+            return [types.SimpleNamespace(text=transfer_format(styled, plain), start=0.0, end=len(audio) / RATE,
+                                          words=None)] if plain else []
+        return self._pass(self.model, self.batched, audio, language, words, prompt, beam_size, hotwords)
+
+    def _pass(self, model, batched_model, audio, language, words, prompt, beam_size, hotwords) -> list:
         batched = len(audio) > 30 * RATE and not words
-        fn = self.batched.transcribe if batched else self.model.transcribe
+        fn = batched_model.transcribe if batched else model.transcribe
         beam_size = beam_size or (self.cfg.cpu_beam_size if self.on_cpu else self.cfg.beam_size)
         opts = dict(language=language, beam_size=beam_size, vad_filter=True,
                     condition_on_previous_text=False, without_timestamps=not words, word_timestamps=words,
@@ -1463,6 +1703,8 @@ class PasteItem:
 
 class Worker(threading.Thread):
     """Runs every model pass: live passes while the key is held, the final pass after release."""
+    # A model choice: (device, GPU model, CPU model, Slovak model for the GPU, for the CPU, Qwen for English).
+    NOTHING = ("auto", None, None, "", "", "")
     STEP = 0.4  # seconds of new audio between live passes
     # silence_seconds() above this: the speaker has been quiet for 2 s. Live passes then wait for
     # speech, because whisper invents words ("Thank you.", "Bye.") for windows of silence.
@@ -1480,7 +1722,7 @@ class Worker(threading.Thread):
         self.busy: tuple[float, float] | None = None  # (since, seconds of audio) while a pass runs
         self.loading: float | None = None  # since when a model has been loading
         self.wanted: tuple | None = None  # (device, gpu model, cpu model) to load next
-        self.choice: tuple = ("auto", None, None)  # what was loaded last (or is loading)
+        self.choice: tuple = self.NOTHING  # what was loaded last (or is loading)
         self.last_language: str | None = None  # of the last dictation: short ones in auto mode keep it
         self.pace: float | None = None  # seconds of work per second of audio, for the pop-up's estimate
 
@@ -1724,7 +1966,10 @@ class Worker(threading.Thread):
                 words = st.words_after_commit(self._run(window, s.language, words=True, prompt=st.prompt(),
                                                         hotwords=len(window) >= 2 * RATE), start)
             return s.text.add(words, s.language, final=True), None
+        self.transcriber.heard = None
         segments = self._run(audio, s.language, hotwords=speech >= 1.0)  # below 1 s whisper may echo them
+        if getattr(self.transcriber, "heard", None):  # Qwen: it was Slovak after all
+            s.language = self.transcriber.heard
         text = clean_text(" ".join(seg.text.strip() for seg in segments), self.cfg, s.language)
         return (text, None) if text else ("", "no speech")
 
@@ -1794,24 +2039,33 @@ class ModelSwitch:
         self.downloading: set[str] = set()
         self.lock = threading.Lock()
         # After a GPU hang the CPU is used until the user picks a model or device again.
-        self.held = (ui.device, ui.gpu_model, ui.cpu_model) if os.environ.get("DICTATE_FORCE_CPU") else None
+        self.held = self.menu_choice() if os.environ.get("DICTATE_FORCE_CPU") else None
+
+    def menu_choice(self) -> tuple:
+        ui = self.ui
+        return ui.device, ui.gpu_model, ui.cpu_model, ui.gpu_slovak, ui.cpu_slovak, ui.english_model
 
     def start(self) -> None:
         """The first load. A chosen model that isn't there (dictation restarted during its download,
         say) is replaced by an installed one, and downloaded once it's known which one runs."""
         device = "cpu" if os.environ.get("DICTATE_FORCE_CPU") else self.ui.device  # see Watchdog
-        choice = {"device": device, "gpu_model": self.ui.gpu_model, "cpu_model": self.ui.cpu_model}
+        choice = {"device": device, "gpu_model": self.ui.gpu_model, "cpu_model": self.ui.cpu_model,
+                  "gpu_slovak": self.ui.gpu_slovak, "cpu_slovak": self.ui.cpu_slovak, "english": self.ui.english_model}
         missing = False
         for key, order in self.STAND_INS.items():
             if not models.installed(MODELS_DIR, choice[key]):
                 missing = True
                 choice[key] = next((m for m in order if models.installed(MODELS_DIR, m)), choice[key])
-        self.worker.want((choice["device"], choice["gpu_model"], choice["cpu_model"]))
+        for key in ("gpu_slovak", "cpu_slovak", "english"):  # one not there yet: without it, until it is
+            if choice[key] and not models.installed(MODELS_DIR, choice[key]):
+                missing, choice[key] = True, ""
+        self.worker.want(tuple(choice[k] for k in ("device", "gpu_model", "cpu_model", "gpu_slovak", "cpu_slovak",
+                                                   "english")))
         if missing:
             threading.Thread(target=self._after_first_load, name="models", daemon=True).start()
 
     def _after_first_load(self) -> None:
-        while self.worker.choice == ("auto", None, None) or self.worker.loading or self.worker.wanted:
+        while self.worker.choice == Worker.NOTHING or self.worker.loading or self.worker.wanted:
             time.sleep(0.5)
         self.changed()
 
@@ -1820,32 +2074,54 @@ class ModelSwitch:
         tr = self.worker.transcriber
         return (not tr.on_cpu, tr.name) if tr.ready.is_set() else None
 
+    def loaded_plan(self) -> tuple[bool, str, str, str] | None:
+        """What runs now, with the Slovak and English models asked for (loaded, or tried)."""
+        tr = self.worker.transcriber
+        return ((not tr.on_cpu, tr.name, tr.slovak_wanted or "", getattr(tr, "english_wanted", "") or "")
+                if tr.ready.is_set() else None)
+
     def on_gpu(self) -> bool:
         """Whether the choice in the menu means the GPU (as far as one can be used)."""
-        return self.target((self.ui.device, self.ui.gpu_model, self.ui.cpu_model))[0]
+        return self.target(self.menu_choice())[0]
 
     def target(self, choice: tuple) -> tuple[bool, str]:
         """What a choice means: (on the GPU?, the model that runs)."""
-        device, gpu_model, cpu_model = choice
+        device, gpu_model, cpu_model = choice[:3]
         on_gpu = device != "cpu" and self.worker.transcriber.gpu_available is not False
         return on_gpu, gpu_model if on_gpu else cpu_model
 
+    def plan(self, choice: tuple) -> tuple[bool, str, str, str]:
+        """(on the GPU?, the model, the Slovak model or "", Qwen or "") that a choice runs."""
+        on_gpu, name = self.target(choice)
+        slovak = (choice[3] if on_gpu else choice[4]) if len(choice) > 4 else ""
+        english = choice[5] if on_gpu and len(choice) > 5 else ""
+        return on_gpu, name, slovak or "", english or ""
+
     def changed(self) -> None:
-        choice = (self.ui.device, self.ui.gpu_model, self.ui.cpu_model)
+        choice = self.menu_choice()
         if self.held is not None:
             if choice == self.held:
                 return
             self.held = None
         pending = self.worker.wanted or (self.worker.choice if self.worker.loading else None)
-        if self.target(choice) == (self.target(pending) if pending else self.loaded()):
+        now = self.plan(pending) if pending else self.loaded_plan()
+        if self.plan(choice) == now:
             return  # e.g. a language change, or "auto" -> "gpu" with a GPU already in use
-        on_gpu, name = self.target(choice)
+        on_gpu, name, slovak, english = self.plan(choice)
         if not models.installed(MODELS_DIR, name):
             if name in models.MODELS:
                 self.download(name, "gpu_model" if on_gpu else "cpu_model")
             else:
                 notify(t("Speech model not found"), t("There is no model called {model} in {folder}.", model=name,
                                                       folder=MODELS_DIR))
+            return
+        if slovak and not models.installed(MODELS_DIR, slovak):  # downloaded first; meanwhile without it
+            self.download(slovak, "gpu_slovak" if on_gpu else "cpu_slovak")
+            choice = choice[:3] + ("", "") + choice[5:]
+        if english and not models.installed(MODELS_DIR, english):  # the same for Qwen (and its environment)
+            self.download(english, "english_model")
+            choice = choice[:5] + ("",)
+        if self.plan(choice) == now:
             return
         self.worker.want(choice)
 
@@ -1864,7 +2140,8 @@ class ModelSwitch:
         try:
             proc = subprocess.Popen([sys.executable, str(Path(__file__).resolve()), "--download", name], env=env,
                                     stdin=subprocess.DEVNULL, creationflags=NO_WINDOW, **child_streams())
-            expected = models.MODELS[name][1] * 1e6
+            expected = (models.MODELS[name][1] if name in models.MODELS else models.SLOVAK[name][2] if name in models.SLOVAK
+                        else models.QWEN[name][2] + (0 if models.qwen_runtime_ready(MODELS_DIR) else models.QWEN_RUNTIME_MB)) * 1e6
             while proc.poll() is None:
                 done = models.partial_bytes(MODELS_DIR, name) / expected
                 self.topbar.update(download=f"{name} {min(99, int(done * 100))} %")
@@ -1884,8 +2161,10 @@ class ModelSwitch:
             notify(t("The {model} model could not be downloaded", model=name),
                    t("Check the internet connection. The log has the details."))
             loaded = self.loaded()
-            if loaded and loaded[1] != name and key == ("gpu_model" if loaded[0] else "cpu_model"):
-                self.ui.set(**{key: loaded[1]})  # the menu shows what really runs; picking it again retries
+            if key in ("gpu_slovak", "cpu_slovak", "english_model"):
+                self.ui.set(**{key: ""})  # the menu shows what really runs; picking it again retries
+            elif loaded and loaded[1] != name and key == ("gpu_model" if loaded[0] else "cpu_model"):
+                self.ui.set(**{key: loaded[1]})
 
 
 def restart_self() -> None:
@@ -2400,10 +2679,23 @@ class TopBar:
         self.push()
 
     MODEL_IDS = {name: 400 + i for i, name in enumerate(models.MODELS)}  # 499: a model of your own
+    SLOVAK_IDS = {name: 451 + i for i, name in enumerate(models.SLOVAK)}  # 450: none
+    ENGLISH_IDS = {name: 461 + i for i, name in enumerate(models.QWEN)}  # 460: none
 
     def model_key(self) -> str:
         """The menu choice the model submenu changes: the GPU's model, or the CPU's."""
         return "gpu_model" if self.switch is None or self.switch.on_gpu() else "cpu_model"
+
+    def slovak_key(self) -> str:
+        return "gpu_slovak" if self.model_key() == "gpu_model" else "cpu_slovak"
+
+    @staticmethod
+    def download_note(name: str, downloading: str) -> str:
+        if downloading.startswith(name + " "):
+            return " – " + t("downloading {progress}", progress=downloading.split(" ", 1)[1])
+        if not models.installed(MODELS_DIR, name):
+            return " – " + t("download {size}", size=models.size_label(name))
+        return ""
 
     def menu(self) -> list:
         M, ui = self.MenuItem, self.ui
@@ -2412,13 +2704,21 @@ class TopBar:
         current = getattr(ui, self.model_key())
         model_items = []
         for name, item_id in self.MODEL_IDS.items():
-            if downloading.startswith(name + " "):
-                note = " – " + t("downloading {progress}", progress=downloading.split(" ", 1)[1])
-            elif not models.installed(MODELS_DIR, name):
-                note = " – " + t("download {size}", size=models.size_label(name))
-            else:
-                note = ""
-            model_items.append(M(item_id, f"{name} ({t(models.MODELS[name][2])}){note}", "radio", name == current))
+            model_items.append(M(item_id, f"{name} ({t(models.MODELS[name][2])}){self.download_note(name, downloading)}",
+                                 "radio", name == current))
+        english = ui.english_model
+        tr = self.switch.worker.transcriber if self.switch else None
+        nvidia = self.model_key() == "gpu_model" and (tr is None or tr.platform in (None, "cuda"))  # (None: not loaded yet)
+        english_items = [M(460, t("None: the speech model above does English too"), "radio", not english)]
+        for name, item_id in self.ENGLISH_IDS.items():
+            note = self.download_note(name, downloading) if nvidia else " – " + t("needs an NVIDIA graphics card")
+            english_items.append(M(item_id, f"{name} ({t(models.QWEN[name][3])}){note}", "radio", name == english,
+                                   enabled=nvidia or name == english))
+        slovak = getattr(ui, self.slovak_key())
+        slovak_items = [M(450, t("None: the speech model above does Slovak too"), "radio", not slovak)]
+        for name, item_id in self.SLOVAK_IDS.items():
+            slovak_items.append(M(item_id, f"{name} ({t(models.SLOVAK[name][4])}){self.download_note(name, downloading)}",
+                                  "radio", name == slovak))
         if current not in self.MODEL_IDS:
             model_items.append(M(499, current, "radio", True))
         gpu = self.switch is None or self.switch.worker.transcriber.gpu_available is not False
@@ -2439,6 +2739,8 @@ class TopBar:
                 M(4, kind="separator"),
                 M(40, t("Speech model: {model}", model=current), children=model_items),
                 M(41, t("Run on: graphics card") if on_gpu else t("Run on: processor"), children=run_on),
+                M(45, t("Model for Slovak: {model}", model=slovak or t("none")), children=slovak_items),
+                M(46, t("Model for English: {model}", model=english or t("none")), children=english_items),
                 M(43, t("Status pop-up while dictating"), children=[
                     M(430, t("Automatic: small, when the model runs on the processor"), "radio",
                       not ui.big_panel and ui.popup == "auto"),
@@ -2547,6 +2849,14 @@ class TopBar:
             self.ui.set(**{self.model_key(): name})
         elif item_id in (410, 411):
             self.ui.set(device="gpu" if item_id == 410 else "cpu")
+        elif item_id == 450:
+            self.ui.set(**{self.slovak_key(): ""})
+        elif item_id == 460:
+            self.ui.set(english_model="")
+        elif item_id in self.ENGLISH_IDS.values():
+            self.ui.set(english_model=next(n for n, i in self.ENGLISH_IDS.items() if i == item_id))
+        elif item_id in self.SLOVAK_IDS.values():
+            self.ui.set(**{self.slovak_key(): next(n for n, i in self.SLOVAK_IDS.items() if i == item_id)})
         elif item_id in (430, 431, 433):
             self.ui.set(big_panel=False, popup={430: "auto", 431: "on", 433: "off"}[item_id])
         elif item_id == 432:
@@ -3036,7 +3346,7 @@ def run_selftest(cfg, seconds: float, language: str) -> int:
     transcriber = Transcriber(cfg)
     ui = UiState(cfg)
     started = time.monotonic()
-    transcriber.load(ui.device, ui.gpu_model, ui.cpu_model)
+    transcriber.load(ui.device, ui.gpu_model, ui.cpu_model, ui.gpu_slovak, ui.cpu_slovak, ui.english_model)
     load_time = time.monotonic() - started
     started = time.monotonic()
     if language == "auto":
@@ -3240,6 +3550,17 @@ def run_setup(cfg, gpu: str) -> int:
             gpu_model = chosen
         else:
             cpu_model = chosen
+    slovak_key = "gpu_slovak" if device == "gpu" else "cpu_slovak"
+    slovak = getattr(ui, slovak_key)
+    if language in ("sk", "auto") and asked("DICTATE_SLOVAK_MODEL"):
+        suggestion = models.slovak_for(gpu_model if device == "gpu" else cpu_model)
+        options = [(name, f"{name:<18}{models.size_label(name):>8}   {t(info)}"
+                    + ("   " + t("(suggested for this computer)") if name == suggestion != slovak else ""))
+                   for name, (_, _, _, _, info) in models.SLOVAK.items()] + [("none", t("no, the speech model alone"))]
+        answer = ask(t("Also a model fine-tuned for Slovak (by KInIT)? It makes about a third of the mistakes in Slovak, "
+                       "and is used only when you speak Slovak."),
+                     options, slovak or ("none" if previous else suggestion), "DICTATE_SLOVAK_MODEL", note)
+        slovak = "" if answer == "none" else answer
     trigger = ask_key(hw, ui.trigger if previous else None) if asked("DICTATE_KEY") else ui.trigger
     large_now = "both" if ui.big_settings else "panel" if ui.big_panel else "off"
     large = large_now
@@ -3250,7 +3571,8 @@ def run_setup(cfg, gpu: str) -> int:
                     large_now if previous else "off", "DICTATE_LARGE_UI", note)
     ensure_config(cpu_only=device == "cpu")
     ui = UiState(load_config())
-    changes = {"language": language, "cpu_model": cpu_model, "trigger": trigger, "ui_language": ui_language}
+    changes = {"language": language, "cpu_model": cpu_model, "trigger": trigger, "ui_language": ui_language,
+               slovak_key: slovak}
     if gpu_model:
         changes["gpu_model"] = gpu_model
     if large != large_now:
@@ -3258,14 +3580,14 @@ def run_setup(cfg, gpu: str) -> int:
     if not previous and gpu != "none" and device == "cpu":  # a graphics card too small for the models
         changes["device"] = "cpu"
     ui.set(**changes)
-    return finish_setup(gpu_model if device == "gpu" else None, cpu_model)
+    return finish_setup(gpu_model if device == "gpu" else None, cpu_model, slovak)
 
 
-def finish_setup(gpu_model: str | None, cpu_model: str) -> int:
-    for name in dict.fromkeys(m for m in (gpu_model, cpu_model) if m):
+def finish_setup(gpu_model: str | None, cpu_model: str, slovak: str = "") -> int:
+    for name in dict.fromkeys(m for m in (gpu_model, cpu_model, slovak) if m):
         if models.installed(MODELS_DIR, name):
             print(t("The {model} model is already downloaded", model=name))
-        elif name in models.MODELS:
+        elif name in models.MODELS or name in models.SLOVAK:
             print(t("Downloading the {model} model ({size})…", model=name, size=models.size_label(name)), flush=True)
             models.download(MODELS_DIR, name)
     print("\n" + t("Loading the model once to check it:"), flush=True)
@@ -3274,8 +3596,8 @@ def finish_setup(gpu_model: str | None, cpu_model: str) -> int:
 
 def run_download(names: list[str]) -> int:
     for name in names:
-        if name not in models.MODELS:
-            print(f"Unknown model {name!r}; available: {', '.join(models.MODELS)}")
+        if name not in models.MODELS and name not in models.SLOVAK and name not in models.QWEN:
+            print(f"Unknown model {name!r}; available: {', '.join([*models.MODELS, *models.SLOVAK, *models.QWEN])}")
             return 2
         if models.installed(MODELS_DIR, name):
             print(f"{name}: already downloaded")
@@ -3291,7 +3613,7 @@ def run_check_model(cfg) -> int:
     tr = Transcriber(cfg)
     started = time.monotonic()
     try:
-        tr.load(ui.device, ui.gpu_model, ui.cpu_model)
+        tr.load(ui.device, ui.gpu_model, ui.cpu_model, ui.gpu_slovak, ui.cpu_slovak, ui.english_model)
     except Exception as e:
         print(f"FAIL model: {e}")
         return 1
@@ -3327,7 +3649,8 @@ def main() -> int:
     mode.add_argument("--portal-test", type=float, nargs="?", const=30, metavar="SECONDS",
                       help="bind the key and print press/release events")
     mode.add_argument("--setup", action="store_true", help="choose language and model, download it (installers)")
-    mode.add_argument("--download", nargs="+", metavar="MODEL", help=f"download models: {', '.join(models.MODELS)}")
+    mode.add_argument("--download", nargs="+", metavar="MODEL",
+                      help=f"download models: {', '.join([*models.MODELS, *models.SLOVAK, *models.QWEN])}")
     mode.add_argument("--check-model", action="store_true", help="load the chosen model and time one pass")
     mode.add_argument("--start-at-login", choices=("saved", "off"),
                       help="installers: start at login as last chosen in the menu (on at first), or not")

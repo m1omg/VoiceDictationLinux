@@ -57,7 +57,7 @@ jobs:
           $Py = "$env:LOCALAPPDATA\dictate\venv\Scripts\python.exe"
           foreach ($Test in "unit_keys", "unit_models", "unit_topbar", "unit_windows", "unit_audio", "unit_portability",
                          "unit_setup", "unit_paster", "unit_switch", "unit_capture", "unit_login", "unit_i18n",
-                         "unit_popup", "unit_websettings", "unit_update") {
+                         "unit_popup", "unit_websettings", "unit_update", "unit_convert", "unit_qwen") {
             Write-Host "== $Test"
             & $Py -X utf8 "tests\$Test.py"
             if ($LASTEXITCODE -ne 0) { exit 1 }
@@ -162,7 +162,7 @@ jobs:
         run: |
           PY="$HOME/Library/Application Support/dictate/venv/bin/python"
           for t in unit_keys unit_models unit_topbar unit_macos unit_audio unit_portability unit_setup unit_paster unit_switch \
-                   unit_capture unit_login unit_i18n unit_popup unit_websettings unit_update; do
+                   unit_capture unit_login unit_i18n unit_popup unit_websettings unit_update unit_convert unit_qwen; do
             echo "== $t"
             "$PY" "tests/$t.py"
           done
@@ -234,7 +234,8 @@ jobs:
         run: |
           PY="$HOME/.local/share/dictate/venv/bin/python"
           for t in unit_keys unit_models unit_topbar unit_windows unit_macos unit_audio unit_portability unit_setup \
-                   unit_paster unit_switch unit_capture unit_login unit_i18n unit_popup unit_websettings unit_update; do
+                   unit_paster unit_switch unit_capture unit_login unit_i18n unit_popup unit_websettings unit_update \
+                   unit_convert unit_qwen; do
             echo "== $t"
             "$PY" "tests/$t.py"
           done

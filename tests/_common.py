@@ -33,11 +33,19 @@ def load_dictate():
 
 def load_model(d, cfg):
     """The model dictation would use (the menu's choice), or the one named on the command line, e.g.
-    `bench_asr.py small` (add --cpu to run it on the CPU)."""
+    `bench_asr.py small` (add --cpu to run it on the CPU, --slovak=NAME for a Slovak model beside it,
+    --english=NAME for Qwen for English)."""
     ui = d.UiState(cfg)
     names = [a for a in sys.argv[1:] if not a.startswith("--")]
+    slovak = next((a.split("=", 1)[1] for a in sys.argv[1:] if a.startswith("--slovak=")), None)
+    english = next((a.split("=", 1)[1] for a in sys.argv[1:] if a.startswith("--english=")), None)
     tr = d.Transcriber(cfg)
-    tr.load("cpu" if "--cpu" in sys.argv else ui.device, *(names[:1] * 2 or (ui.gpu_model, ui.cpu_model)))
+    if names:
+        tr.load("cpu" if "--cpu" in sys.argv else ui.device, names[0], names[0], slovak or "", slovak or "", english or "")
+    else:
+        tr.load("cpu" if "--cpu" in sys.argv else ui.device, ui.gpu_model, ui.cpu_model,
+                ui.gpu_slovak if slovak is None else slovak, ui.cpu_slovak if slovak is None else slovak,
+                ui.english_model if english is None else english)
     return tr
 
 

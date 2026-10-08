@@ -28,7 +28,7 @@ import models  # noqa: E402
 assert d.STATE_PATH.is_relative_to(TMP) and d.CONFIG_PATH.is_relative_to(TMP)
 sys.stdin = open(os.devnull)  # no terminal: every question takes its default
 downloads = []
-d.finish_setup = lambda gpu_model, cpu_model: downloads.append((gpu_model, cpu_model)) or 0
+d.finish_setup = lambda gpu_model, cpu_model, slovak="": downloads.append((gpu_model, cpu_model)) or 0
 LAPTOP = models.Hardware(None, cores=4, ram_gb=16, laptop=True)
 checks = []
 
@@ -60,6 +60,23 @@ check("first install, Slovak on a 4-core laptop: turbo on the processor, Right C
       (state["language"], state["cpu_model"], state["trigger"], downloads[-1]),
       ("sk", "large-v3-turbo", "Alt_R" if d.MACOS else "Control_R", (None, "large-v3-turbo")))
 
+
+
+check("and a Slovak model of the same size beside it (only Slovak goes to it)", state["cpu_slovak"], "large-v3-turbo-sk")
+fresh()
+state = setup(models.Hardware("nvidia", gpu_name="RTX 3060", vram_gb=12, cores=6, ram_gb=64), gpu="nvidia",
+              DICTATE_LANGUAGE="auto")
+check("both languages on a graphics card: turbo, and the Slovak turbo for Slovak", (state["gpu_model"], state["gpu_slovak"]),
+      ("large-v3-turbo", "large-v3-turbo-sk"))
+fresh()
+state = setup(LAPTOP, DICTATE_LANGUAGE="auto", DICTATE_MODEL="small")
+check("small on a processor: small-sk beside it", (state["cpu_model"], state["cpu_slovak"]), ("small", "small-sk"))
+fresh()
+state = setup(LAPTOP, DICTATE_LANGUAGE="en")
+check("English only: no Slovak model", state.get("cpu_slovak", ""), "")
+fresh()
+state = setup(LAPTOP, DICTATE_LANGUAGE="sk", DICTATE_SLOVAK_MODEL="none")
+check("DICTATE_SLOVAK_MODEL=none: none", state["cpu_slovak"], "")
 
 
 class EndedInput(io.StringIO):

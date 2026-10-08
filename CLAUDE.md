@@ -92,7 +92,9 @@ FLEURS sentence; README → Accuracy and speed has the per-OS numbers):
 | medium | 3.2 % | 15 % | 3.8–4.8 s |
 | large-v3-turbo | 3.9 % | 7.0 % | 3.9–4.0 s |
 
-English is fine from base up; Slovak needs large-v3-turbo (small gets a third of the words wrong).
+English is fine from base up; Slovak needs large-v3-turbo (small gets a third of the words wrong),
+or a model fine-tuned for Slovak beside the general one (KInIT's `small-sk`: 1.5 % on FLEURS at
+1.6 s per sentence on a 6-core desktop processor; see "Models fine-tuned for Slovak" below).
 Offer the trade-off to the user: speed or accuracy. A 2-core laptop (2017 MacBook Air) hasn't been
 measured and will be slower; `tests/bench_asr.py MODEL --cpu` measures it on their machine.
 
@@ -128,7 +130,7 @@ python3 tests/fetch_fleurs.py
 $D/venv/bin/python tests/bench_asr.py           # GPU targets: en ~4 % WER, sk ~6-7 %, ~0.35-0.5 s per sentence
 $D/venv/bin/python tests/bench_live.py          # GPU targets: live WER ≈ one-shot; first words ~2 s (en)
 for t in unit_keys unit_models unit_audio unit_portability unit_windows unit_macos unit_topbar unit_setup unit_paster unit_switch \
-         unit_capture unit_login unit_i18n unit_popup unit_websettings unit_update
+         unit_capture unit_login unit_i18n unit_popup unit_websettings unit_update unit_convert unit_qwen
 do $D/venv/bin/python tests/$t.py; done
 dbus-run-session -- $D/venv/bin/python tests/unit_tray.py
 XVFB=… $D/venv/bin/python tests/x11_paste.py   # X11 desktops: key grab, combinations, repeats, paste, clipboard
@@ -285,6 +287,43 @@ input, `windows_paste.py`, and `e2e_desktop.py` / `e2e_x11.py`. It is started by
   then renames it. The GPU ladder tries the compute types CTranslate2 reports (float16,
   int8_float16, int8, float32); a failed or hung GPU load (`Watchdog.LOAD_LIMIT`) falls back to
   the processor.
+- **Models fine-tuned for Slovak** (`models.SLOVAK`, KInIT's Whisper fine-tunes at pinned revisions):
+  `state.json` "gpu_slovak" / "cpu_slovak" name one per device (or ""). `Transcriber.load()` loads
+  it beside the general model with the same device and compute type. KInIT's models write plain
+  lowercase words without punctuation (fine-tuned on normalized text; prompting doesn't bring it
+  back), so `run(language="sk")` without word timings runs both models and `transfer_format()` puts
+  the general model's punctuation and capitals on the Slovak model's words (difflib alignment:
+  equal words keep the styled form, a replaced word takes over capitals and punctuation, a missing
+  one leaves its sentence end). FLEURS sk: words 2.1 %, counting punctuation and capitals 5.3 %
+  (turbo alone 6.4 % / 8.9 %), 0.7 s per sentence. Live passes (word timings) stay with the general
+  model: in timestamp mode the fine-tunes drop even more and live typing found no sentence ends
+  (a 60 s instant dictation went from 6.8 % to 18.2 %). `detect()` and every other language use the
+  general model (their language detection is poor: base-sk 0/30, small-sk 12/30; English 70 %).
+- **Qwen3-ASR for English** (`models.QWEN`, `state.json` "english_model", GPU only): `QwenEngine` runs
+  `qwen_worker.py` with the Qwen environment's Python (`models.qwen_venv()`: a uv venv from the
+  program's base Python with PyTorch from download.pytorch.org/whl/cu128, transformers 4.57.6,
+  accelerate, soundfile, librosa, nagisa, and qwen-asr 0.0.6 `--no-deps`: its own list adds gradio
+  and flask). Protocol: a ready line, then per pass a JSON line + float32 samples on stdin, a JSON
+  answer on stdout (the worker moves library prints to stderr). `run(language="en")` without word
+  timings sends `speech_only()` audio (VAD, so no long silences) with the vocabulary as `context`; a
+  failed pass falls back to Whisper; a pass past `PASS_LIMIT` kills the process (a late answer
+  would be taken for the next one). Only `platform == "cuda"`. Qwen isn't told the language: if it
+  hears Czech/Slovak/Polish (`QWEN_SLOVAK`), the recording is done again as Slovak and
+  `Transcriber.heard` tells `Worker._final_text` (s.language = "sk"); another language falls back to
+  Whisper in English. RTX 3060, all loaded: en 2.6 % (0.51 s per sentence), sk 2.1 % (0.69 s),
+  Slovak taken for English: 10/10 redone, 1.4 %. Qwen on the CPU: 9 s per sentence. The Qwen
+  environment is ~4 GB to download, 7 GB on disk; the install retries a step once and cleans uv's
+  cache (NVIDIA's server timed out once at uv's default 30 s). A choice is 5 parts (device, GPU model, CPU
+  model, GPU Slovak, CPU Slovak); `ModelSwitch.plan()` compares what would run with what runs, and a
+  missing Slovak model is downloaded while the general one keeps working without it. Download =
+  KInIT's safetensors into `models/.partial-NAME-hf`, `convert.py` into `models/.partial-NAME`,
+  `complete()`, rename. `convert.py` fills CTranslate2's `WhisperSpec` from numpy arrays the way
+  its PyTorch-based `WhisperLoader` does: the output was byte for byte the same as
+  `ct2-transformers-converter --quantization float16 --copy_files tokenizer.json
+  preprocessor_config.json` for large-v3-turbo-sk (`tests/unit_convert.py` runs a tiny random one).
+  FLEURS (GPU): turbo-sk sk 2.1 % vs turbo 6.4 %; FLEURS is in KInIT's training data, so prefer
+  their held-out numbers for comparisons (turbo-sk 5.6 %, medium-sk 6.3 %, small-sk 8.6 %, base-sk
+  14.0 % vs turbo 18.4 %).
 - **The settings window** writes `state.json`; the daemon's `StateWatcher` polls its mtime every
   0.5 s and applies changes (a new key restarts the program). The daemon writes
   `RUNTIME_DIR/dictate-status.json` for the window, and the window's *Stop dictation* writes `quit`
