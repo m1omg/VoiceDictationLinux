@@ -277,10 +277,11 @@ SK: dict[str, str] = {
     "none": "žiadny",
     "Model for Slovak": "Model pre slovenčinu",
     "no, the speech model alone": "nie, len rečový model",
-    "Also a model fine-tuned for Slovak (by KInIT)? It makes about a third of the mistakes in Slovak, and is used only "
-    "when you speak Slovak.":
-        "Aj model doladený pre slovenčinu (od KInIT)? V slovenčine robí asi tretinu chýb a používa sa len vtedy, keď "
-        "hovoríte po slovensky.",
+    "Also a model fine-tuned for Slovak (by KInIT)? It made fewer mistakes on test recordings, but transcribing Slovak "
+    "takes about twice as long with it. The menu can add it later too.":
+        "Aj model doladený pre slovenčinu (od KInIT)? Na testovacích nahrávkach robil menej chýb, ale prepis slovenčiny "
+        "s ním trvá asi dvakrát dlhšie. Pridať sa dá aj neskôr v ponuke.",
+    "(the size for this computer)": "(veľkosť pre tento počítač)",
     "the most accurate English": "najpresnejšia angličtina",
     "smaller and faster, still very good English": "menší a rýchlejší, stále veľmi dobrá angličtina",
     "{model} + {software} of software": "{model} + {software} softvéru",

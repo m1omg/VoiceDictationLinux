@@ -10,7 +10,7 @@
 # computer that Enter accepts. Without a terminal it takes the suggestions; these answer them too:
 #   DICTATE_LANGUAGE=en|sk|auto   DICTATE_MODEL=tiny|base|small|medium|large-v3-turbo
 #   DICTATE_KEY=KP_Delete|Control_R|"Ctrl+Alt+D"|...   DICTATE_LARGE_UI=off|panel|both   DICTATE_KEEP=keep
-#   DICTATE_SLOVAK_MODEL=large-v3-turbo-sk|medium-sk|small-sk|base-sk|none (asked when Slovak is dictated)
+#   DICTATE_SLOVAK_MODEL=large-v3-turbo-sk|medium-sk|small-sk|base-sk|none (asked when Slovak is dictated; suggests none)
 #
 # Linux: everything goes to ~/.local/share/dictate (program, private Python, models, caches) plus a
 # settings file in ~/.config/dictate, launchers, and a systemd unit or an autostart entry.

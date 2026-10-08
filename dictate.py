@@ -3559,13 +3559,14 @@ def run_setup(cfg, gpu: str) -> int:
     slovak_key = "gpu_slovak" if device == "gpu" else "cpu_slovak"
     slovak = getattr(ui, slovak_key)
     if language in ("sk", "auto") and asked("DICTATE_SLOVAK_MODEL"):
-        suggestion = models.slovak_for(gpu_model if device == "gpu" else cpu_model)
+        fits = models.slovak_for(gpu_model if device == "gpu" else cpu_model)
         options = [(name, f"{name:<18}{models.size_label(name):>8}   {t(info)}"
-                    + ("   " + t("(suggested for this computer)") if name == suggestion != slovak else ""))
+                    + ("   " + t("(the size for this computer)") if name == fits != slovak else ""))
                    for name, (_, _, _, _, info) in models.SLOVAK.items()] + [("none", t("no, the speech model alone"))]
-        answer = ask(t("Also a model fine-tuned for Slovak (by KInIT)? It makes about a third of the mistakes in Slovak, "
-                       "and is used only when you speak Slovak."),
-                     options, slovak or ("none" if previous else suggestion), "DICTATE_SLOVAK_MODEL", note)
+        # Off unless chosen: in everyday dictation the difference was hard to notice, and it costs time and memory.
+        answer = ask(t("Also a model fine-tuned for Slovak (by KInIT)? It made fewer mistakes on test recordings, but "
+                       "transcribing Slovak takes about twice as long with it. The menu can add it later too."),
+                     options, slovak or "none", "DICTATE_SLOVAK_MODEL", note)
         slovak = "" if answer == "none" else answer
     trigger = ask_key(hw, ui.trigger if previous else None) if asked("DICTATE_KEY") else ui.trigger
     large_now = "both" if ui.big_settings else "panel" if ui.big_panel else "off"

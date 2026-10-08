@@ -252,9 +252,12 @@ many Slovak words wrong, but have lost most of their English, and they write pla
 without any punctuation. So dictation uses one only for Slovak (chosen in the menu, or detected),
 and only for what is transcribed after you let go: its words, with the punctuation and capitals of
 the main model (the speech model above), which still detects the language, writes English and
-types live. Choose
-one under *Model for Slovak* in the menu or the settings window, or in the installer (it asks when
-you dictate Slovak or both languages).
+types live. Choose one under *Model for Slovak* in the menu or the settings window, or in the
+installer (it asks when you dictate Slovak or both languages).
+
+They are off unless you choose one, and the installer suggests none: in everyday dictation the
+difference was hard to notice, while each Slovak dictation takes about twice as long to transcribe
+and the model needs memory of its own.
 
 | Model | Download | Disk | Suits |
 |---|---|---|---|
@@ -281,7 +284,8 @@ you dictate Slovak or both languages).
 [Qwen3-ASR](https://huggingface.co/Qwen/Qwen3-ASR-1.7B) (Alibaba's Qwen team) gets fewer English
 words wrong than Whisper: 2.9 % against large-v3-turbo's 3.9 % on the FLEURS sentences. It doesn't
 know Slovak (Slovak speech comes out as Czech), so like the Slovak models it is used only for
-English, beside the main model, which detects the language. Choose it under *Model for English*.
+English, beside the main model, which detects the language. Choose it under *Model for English*;
+it is off unless you do (the installer doesn't offer it).
 
 | Model | Download | Suits |
 |---|---|---|

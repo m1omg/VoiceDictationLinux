@@ -94,7 +94,9 @@ FLEURS sentence; README → Accuracy and speed has the per-OS numbers):
 
 English is fine from base up; Slovak needs large-v3-turbo (small gets a third of the words wrong),
 or a model fine-tuned for Slovak beside the general one (KInIT's `small-sk`: 1.5 % on FLEURS at
-1.6 s per sentence on a 6-core desktop processor; see "Models fine-tuned for Slovak" below).
+1.6 s per sentence on a 6-core desktop processor; see "Models fine-tuned for Slovak" below). Those
+are off by default: the owner didn't notice a real difference in daily use, and Slovak then takes
+twice as long.
 Offer the trade-off to the user: speed or accuracy. A 2-core laptop (2017 MacBook Air) hasn't been
 measured and will be slower; `tests/bench_asr.py MODEL --cpu` measures it on their machine.
 
@@ -293,6 +295,11 @@ input, `windows_paste.py`, and `e2e_desktop.py` / `e2e_x11.py`. It is started by
   int8_float16, int8, float32); a failed or hung GPU load (`Watchdog.LOAD_LIMIT`) falls back to
   the processor.
 - **Models fine-tuned for Slovak** (`models.SLOVAK`, KInIT's Whisper fine-tunes at pinned revisions):
+  off unless chosen in the menu, and the installer's question suggests none (2026-10-08: on the
+  owner's PC the gain wasn't noticeable in daily dictation, while Slovak took twice as long and the
+  extra models held 2-6.5 GB of graphics memory; Qwen likewise). Keeping them parked in system memory
+  between dictations was measured (CTranslate2 `unload_model(to_cpu=True)` / `load_model(keep_cache=True)`:
+  back in 0.2 s; from the file instead, 0.86 s and no extra RAM) but not built, since they're off.
   `state.json` "gpu_slovak" / "cpu_slovak" name one per device (or ""). `Transcriber.load()` loads
   it beside the general model with the same device and compute type. KInIT's models write plain
   lowercase words without punctuation (fine-tuned on normalized text; prompting doesn't bring it

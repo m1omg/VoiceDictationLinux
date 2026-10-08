@@ -63,15 +63,16 @@ check("first install, Slovak on a 4-core laptop: turbo on the processor, Right C
 
 
 
-check("and a Slovak model of the same size beside it (only Slovak goes to it)", state["cpu_slovak"], "large-v3-turbo-sk")
+check("and no model fine-tuned for Slovak beside it unless one is asked for (off by default)", state["cpu_slovak"], "")
 fresh()
 state = setup(models.Hardware("nvidia", gpu_name="RTX 3060", vram_gb=12, cores=6, ram_gb=64), gpu="nvidia",
               DICTATE_LANGUAGE="auto")
-check("both languages on a graphics card: turbo, and the Slovak turbo for Slovak", (state["gpu_model"], state["gpu_slovak"]),
-      ("large-v3-turbo", "large-v3-turbo-sk"))
+check("both languages on a graphics card: turbo alone", (state["gpu_model"], state["gpu_slovak"]), ("large-v3-turbo", ""))
 fresh()
-state = setup(LAPTOP, DICTATE_LANGUAGE="auto", DICTATE_MODEL="small")
-check("small on a processor: small-sk beside it", (state["cpu_model"], state["cpu_slovak"]), ("small", "small-sk"))
+state = setup(LAPTOP, DICTATE_LANGUAGE="auto", DICTATE_MODEL="small", DICTATE_SLOVAK_MODEL="small-sk")
+check("DICTATE_SLOVAK_MODEL=small-sk: small-sk beside small", (state["cpu_model"], state["cpu_slovak"]), ("small", "small-sk"))
+state = setup(LAPTOP)
+check("an update keeps a Slovak model chosen before", state["cpu_slovak"], "small-sk")
 fresh()
 state = setup(LAPTOP, DICTATE_LANGUAGE="en")
 check("English only: no Slovak model", state.get("cpu_slovak", ""), "")
