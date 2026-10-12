@@ -110,6 +110,7 @@ DEFAULTS = {
     "beam_size": 5,
     "cpu_beam_size": 2,  # on the CPU a narrower beam saves time for little accuracy
     "vocabulary": ["Claude", "Claude Code", "GNOME", "Wayland", "Python", "Git", "GitHub", "Linux"],
+    "replacements": {},  # spelling fixes, "what Whisper writes" = "what to type"; "en"/"sk" = {...}: only there
     "trailing_space": True,
     "remove_fillers": True,
     "sound_volume": 0.5,
@@ -1319,9 +1320,62 @@ def _drop_fillers(text: str, language: str = "en") -> str:
     return " ".join(cleaned.split())
 
 
+SLOVAK_LETTERS = frozenset("áäčďéíĺľňóôŕšťúýž")
+
+
+def looks_slovak(text: str) -> bool:
+    """Has letters English never writes (a Slovak sentence nearly always has one)."""
+    return not SLOVAK_LETTERS.isdisjoint(text.lower())
+
+
+@functools.lru_cache(maxsize=8)
+def _spelling_rules(table: str, language: str | None) -> list:
+    """The fixes for every language and for this one (from the settings, as JSON so it can be
+    cached), longest first: [(pattern, replacement)]."""
+    replacements = json.loads(table)
+    fixes = {k: v for k, v in replacements.items() if isinstance(v, str)}
+    if language and isinstance(replacements.get(language), dict):
+        fixes.update({k: v for k, v in replacements[language].items() if isinstance(v, str)})
+    rules = []
+    for wrong in sorted(fixes, key=len, reverse=True):
+        words = [re.escape(w) for w in wrong.split()]
+        if words:  # (a space also matches a hyphen, or nothing: "Cashew-OS", "cashewOS")
+            rules.append((re.compile(r"(?<![\w])" + r"[\s-]*".join(words) + r"(?![\w])", re.IGNORECASE), fixes[wrong]))
+    return rules
+
+
+def fix_spelling(text: str, cfg, language: str = "en", starts_sentence: bool = True, context: str = "") -> str:
+    """The settings' spelling fixes (`replacements`): whole words, any capitals; a fix that starts a
+    sentence starts with a capital. Unlike the vocabulary, which Whisper may hear in similar words
+    (CachyOS for "kešu"), these change only what was written. The fixes for one language apply to
+    the sentences that look like it (Slovak letters or none), whatever language the pass was in: a
+    short Slovak sentence can sit in a part taken for English. context: the unfinished sentence
+    before `text` (live typing)."""
+    table = getattr(cfg, "replacements", None)
+    if not table or not text:
+        return text
+    table = json.dumps(table, sort_keys=True)
+    out = []
+    for k, sentence in enumerate(re.split(r"(?<=[.!?…])(?=\s)", text)):
+        judged = (context if k == 0 else "") + sentence
+        sentence_language = "sk" if looks_slovak(judged) else "en" if re.search(r"[^\W\d_]", judged) else language
+        starts = starts_sentence if k == 0 else True
+
+        def fix(match, right):
+            if match.group()[:1].isupper() and (not sentence[:match.start()].strip() and starts):
+                return right[:1].upper() + right[1:]
+            return right
+        for pattern, right in _spelling_rules(table, sentence_language):
+            sentence = pattern.sub(lambda m: fix(m, right), sentence)
+        out.append(sentence)
+    return "".join(out)
+
+
 def clean_text(text: str, cfg, language: str = "en") -> str:
-    """One tidy line: no control characters (no Enter or ESC reaches a terminal), no um/uh."""
+    """One tidy line: no control characters (no Enter or ESC reaches a terminal), the settings'
+    spelling fixes, no um/uh."""
     text = " ".join("".join(ch if ch.isprintable() else " " for ch in text).split())
+    text = fix_spelling(text, cfg, language)
     if cfg.remove_fillers:
         text = _drop_fillers(text, language)
     if text and cfg.trailing_space:
@@ -1351,6 +1405,11 @@ class LiveText:
             if self.capitalize or not so_far or so_far[-1] in ".!?…":  # sentence start
                 word, self.capitalize = word[0].upper() + word[1:], False
             piece += (" " if so_far else "") + word
+        if piece:  # (a fix can't reach over two pieces typed apart)
+            before = self.typed.rstrip()
+            starts = not before or before[-1] in ".!?…"
+            unfinished = "" if starts else re.split(r"[.!?…]\s", before)[-1]
+            piece = fix_spelling(piece, self.cfg, language, starts_sentence=starts, context=unfinished)
         if final and self.cfg.trailing_space and (self.typed + piece):
             piece += " "
         self.typed += piece

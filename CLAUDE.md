@@ -415,6 +415,14 @@ input, `windows_paste.py`, and `e2e_desktop.py` / `e2e_x11.py`. It is started by
   - No vocabulary hints on windows shorter than 2 s (Whisper echoes them).
   - Earlier, simpler variants were clearly worse (Slovak WER 15.9 %, invented words). Re-run
     `tests/bench_live.py` after any change.
+- **Vocabulary and spelling fixes.** `vocabulary` goes to every pass as faster-whisper `hotwords` (a
+  prompt), so Whisper also writes those words for similar sounds: on the user's recordings
+  "CachyOS" took "kešu" (Slovak cashew) and "cashew nuts" ("Cachy Orešky", "CachyOS nuts").
+  Without CachyOS in it, "cashew" stayed itself and a spoken "CachyOS" came out "Cashew OS", which
+  `replacements` (`fix_spelling()`: whole words, any capitals, a space also matching a hyphen or
+  nothing, longest first, a capital at a sentence start; `[replacements.sk]` only in Slovak text)
+  turns into CachyOS. It runs in `clean_text` and on each piece `LiveText.add` types (a phrase
+  split over two typed pieces isn't fixed). Put look-alike words there, not in `vocabulary`.
 - **Recordings to test on** (`keep_recordings = N` in config.toml, default 0): `Worker._final` keeps
   the last N dictations as 16 kHz WAV files in `APP_DIR/recordings` (mode 0700; the name says the
   mode, the language decided and the length), deleting older ones. Only with the user's consent;

@@ -246,6 +246,30 @@ field, _, s = live(recording(("en", 5.0), (None, 0.5), ("en", 3.0), (None, 0.5))
 check("live, one language: no switch", [lang for _, lang in s.parts], ["en"])
 check("... all of it typed, once, in order", [w.lower().strip(".") for w in field.split()], [f"en{i}" for i in range(16)])
 
+# --- spelling fixes (settings: replacements) -------------------------------------------------------
+fixes = types.SimpleNamespace(**{**vars(cfg), "replacements": {"cashew OS": "CachyOS", "cachy OS": "CachyOS",
+                                                              "sk": {"cashew": "kešu"}}})
+check("CachyOS heard as \"Cashew OS\" is fixed; cashew nuts stay in English",
+      d.fix_spelling("I really like Cashew nuts. It showed Cashew OS, then cashew-OS and CashewOS.", fixes, "en"),
+      "I really like Cashew nuts. It showed CachyOS, then CachyOS and CachyOS.")
+check("in Slovak, \"Cashew\" is kešu (the longer fix goes first)",
+      d.fix_spelling("A potom si dám Cashew Orešky. A dalo to Cachy OS.", fixes, "sk"),
+      "A potom si dám kešu Orešky. A dalo to CachyOS.")
+check("a fix at the start of a sentence starts with a capital", d.fix_spelling("Cashew sú dobré.", fixes, "sk"),
+      "Kešu sú dobré.")
+check("only whole words", d.fix_spelling("Cashews, cashewnut.", fixes, "sk"), "Cashews, cashewnut.")
+check("the final text gets them", d.clean_text("A potom Cashew orešky.", fixes, "sk").strip(), "A potom kešu orešky.")
+live_text = d.LiveText(fixes)
+typed = [live_text.add([(0, 1, " Mám"), (1, 2, " rád")], "sk"), live_text.add([(2, 3, " Cashew"), (3, 4, " oriešky.")], "sk")]
+check("live typing gets them too, mid-sentence without a capital", typed, ["Mám rád", " kešu oriešky."])
+check("no fixes in the settings: nothing changes", d.fix_spelling("Cashew OS", cfg, "en"), "Cashew OS")
+check("the Slovak fixes go by how a sentence looks: a Slovak sentence in a pass taken for English gets them",
+      d.fix_spelling("Okay, let's do it. A potom si dám Cashew Orešky. I like cashew nuts.", fixes, "en"),
+      "Okay, let's do it. A potom si dám kešu Orešky. I like cashew nuts.")
+live_text = d.LiveText(fixes)
+typed = [live_text.add([(0, 1, " Dám"), (1, 2, " si")], "en"), live_text.add([(2, 3, " Cashew.")], "en")]
+check("... live, judged with the unfinished sentence typed before", typed, ["Dám si", " kešu."])
+
 for name, good, got, want in checks:
     print(f"{'ok  ' if good else 'FAIL'} {name}" + ("" if good else f": got {got!r}, want {want!r}"))
 sys.exit(0 if all(c[1] for c in checks) else 1)
