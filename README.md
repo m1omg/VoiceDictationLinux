@@ -142,13 +142,16 @@ last left it). On Linux and macOS:
   - Low double beep: nothing heard, or the microphone is muted.
 - **The microphone icon** (Linux: top bar; Windows: notification area; macOS: menu bar) shows the
   language: **EN**, **SK** or **AUTO**, and a filled circle while it records. Its menu:
-  - **English / Slovenčina / Auto-detect (English / Slovak).** Auto-detect decides per dictation
-    and only chooses between those two (plain Whisper might pick Czech or Polish). It waits for
-    about 1.5 s of speech before deciding; Slovak can be mistaken for English below that. Until
-    the first word is typed it keeps checking, and with *Type while speaking* on it types nothing
-    before 3 s of speech (real Slovak can look English for about 2 s, and typed words can't be
-    taken back). With *Type while speaking* off, or before anything has been typed, the whole
-    recording decides again at the end. For the fastest start, pick the language yourself.
+  - **English / Slovenčina / Auto-detect (English / Slovak).** Auto-detect only chooses between
+    those two (plain Whisper might pick Czech or Polish), and one dictation may switch between
+    them: every stretch of speech between pauses gets its language checked, and each part is
+    written in its own language instead of being translated into the other. It waits for about
+    1.5 s of speech before deciding; Slovak can be mistaken for English below that, so a short
+    phrase that only seems English (under about 2 s) stays in the language around it. With *Type
+    while speaking* on it types nothing before 3 s of speech, and after a pause the first words of
+    the next stretch wait until its language is checked (about 1.5 s), since typed words can't be
+    taken back. Switching language live needs a graphics card; on the processor a dictation is
+    split into languages only after you let go. For the fastest start, pick the language yourself.
   - **Type while speaking.** Words are typed while you talk, about 1–2 s behind your voice; when
     you pause after a sentence, its last word follows within about a second, and the rest lands
     when you let go. Accuracy is the same as waiting for the whole sentence (see
@@ -159,7 +162,8 @@ last left it). On Linux and macOS:
     Slovak too) and are corrected with Backspace while they settle, so the start of a sentence can
     visibly change a few times. It only ever deletes what it typed itself in that dictation;
     don't click elsewhere while dictating. In auto-detect it keeps checking the language for the
-    first 6 s and retypes in the other one if it guessed wrong.
+    first 6 s and retypes in the other one if it guessed wrong; a later switch of language retypes
+    the words since the pause where it happened.
   - **Tap to start and stop:** whether a quick tap starts a dictation that lasts until the next
     press. Holding the key works either way.
   - **Sounds:** the beeps, on or off.
@@ -412,6 +416,15 @@ Instant typing ends with the same text as live typing (same error rates); on the
 about 20 characters per English sentence and 90 per Slovak one (the start of a Slovak sentence
 settles later). Auto-detect with live typing (not instant) types nothing before 3 s of speech, so
 its first words come after about 5–6 s.
+
+**Dictations that switch language** (auto-detect; `tests/bench_mixed.py`: FLEURS sentences joined
+across English and Slovak with pauses of 0.35–1 s, RTX 3060). Words wrong without live typing, when
+the whole dictation was transcribed in one language → now, each part in its own: 44 % → 5 % with
+large-v3-turbo, 41 % → 5 % with large-v3; with a short part of 1–2.5 s, 34 % → 8–14 %. With live
+typing (safe or instant) 6 %, and a dictation in one language is typed as fast as before (96–100 %
+of it before you let go). Dictations in one language come out the same. One that switches takes
+longer after you let go, as each part gets its own pass: about 1.3 s instead of 0.8 s for 20 s of
+speech with large-v3-turbo (2.5 s instead of 1.7 s with large-v3).
 
 **Bigger models on the RTX 3060** (one-shot, same sentences): large-v3 3.9 % English / 6.6 % Slovak
 at ~0.54 / 0.72 s per sentence; large-v2 3.2 % / 10.2 % at ~0.55 / 0.73 s. Neither beats

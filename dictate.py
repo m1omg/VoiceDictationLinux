@@ -26,6 +26,7 @@ import inspect
 import itertools
 import json
 import logging
+import math
 import os
 import queue
 import re
@@ -1242,6 +1243,70 @@ class Transcriber:
         best = max(allowed, key=lambda lang: probs.get(lang, 0.0))
         return best, probs.get(best, 0.0) / (sum(probs.get(lang, 0.0) for lang in allowed) or 1.0)
 
+    # Language detection runs the encoder on 30 s of audio, the speech padded with silence: a third of
+    # a pass. Padded to 10 s instead it is 4x cheaper and as accurate from 1.5 s of speech on (FLEURS;
+    # 5 s, or the piece alone, took most Slovak for English). One piece is at most 8 s of speech.
+    PIECE_FRAMES = 1000  # 10 s of features
+    DETECTIONS = (12, 3)  # stretches whose language is detected in one recording: graphics card, processor
+
+    def shares(self, piece: np.ndarray, frames: int = PIECE_FRAMES, allowed=AUTO_LANGUAGES) -> dict[str, float] | None:
+        """The allowed languages' shares of their combined probability for a piece of speech, padded to
+        `frames` (None: this model can't tell, e.g. an English-only one)."""
+        from faster_whisper.audio import pad_or_trim
+        try:
+            features = self.model.feature_extractor(piece[: 8 * RATE] if frames < 3000 else piece)
+            encoded = self.model.encode(pad_or_trim(features, frames))
+            probs = {token[2:-2]: p for token, p in self.model.model.detect_language(encoded)[0]}
+        except Exception as e:
+            log.debug("language detection failed: %s", e)
+            return None
+        total = sum(probs.get(lang, 0.0) for lang in allowed) or 1.0
+        return {lang: probs.get(lang, 0.0) / total for lang in allowed}
+
+    def language_parts(self, audio: np.ndarray, known: list | None = None) -> list[tuple[int, int, str]]:
+        """The recording's parts in one language each: [(first sample, end, "en" or "sk")], covering it
+        all (one part: no switch). Every stretch of speech between pauses gets a language detection
+        (on a processor only the first, the last and the longest), the evidence is weighed by
+        decide_languages(), and a part in a language other than most of the recording's is checked once
+        more on all of its speech, padded to 30 s (fewer confident mistakes on short pieces): if that
+        doesn't agree, the part stays in the main language. Empty if there is no speech. known: stretches
+        checked while recording, [(first sample, end, shares)], used where a stretch is the same
+        (within 0.15 s)."""
+        regions = speech_regions(audio)
+        if not regions:
+            return []
+        seconds = [(end - start) / RATE for start, end in regions]
+        candidates = [i for i, length in enumerate(seconds) if length >= 0.5]
+        budget = self.DETECTIONS[1 if self.on_cpu else 0]
+        if len(candidates) > budget:  # the first, the last and the longest ones
+            keep = {candidates[0], candidates[-1], *sorted(candidates, key=lambda i: -seconds[i])[:budget - 2]}
+            candidates = [i for i in candidates if i in keep]
+        evidence = [0.0] * len(regions)
+        near = 0.15 * RATE
+        for i in candidates:
+            start, end = regions[i]
+            shares = next((shares for k_start, k_end, shares in known or () if abs(k_start - start) <= near
+                           and abs(k_end - end) <= near), None) or self.shares(audio[start:end])
+            evidence[i] = language_evidence(seconds[i], shares)
+        labels = decide_languages(evidence)
+        main = max(AUTO_LANGUAGES, key=lambda lang: sum(s for s, label in zip(seconds, labels) if label == lang))
+        for run_start, run_end, language in language_runs(regions, labels, len(audio)):
+            if language == main:
+                continue
+            inside = [i for i, (start, end) in enumerate(regions) if run_start <= start and end <= run_end]
+            sure = sum(evidence[i] for i in inside) * (1 if language == "sk" else -1)
+            if sum(seconds[i] for i in inside) >= 3.0 and sure >= 3.0:  # no mistakes this sure on 3 s (FLEURS)
+                log.info("language part: %s %.1f-%.1f s (the rest: %s)", language, run_start / RATE, run_end / RATE, main)
+                continue
+            speech = np.concatenate([audio[regions[i][0]:regions[i][1]] for i in inside])
+            check = self.shares(speech, frames=3000)
+            log.info("language part: %s %.1f-%.1f s (%.0f%% %s on its own; the rest: %s)", language, run_start / RATE,
+                     run_end / RATE, 100 * (check or {}).get(language, 0.0), language, main)
+            if check is None or check.get(language, 0.0) < 0.75:
+                for i in inside:
+                    labels[i] = main
+        return language_runs(regions, labels, len(audio))
+
 
 _FILLERS = {"en": r"(?:u+h+m*|u+m+|e+r+m+)",  # um, umm, uh, uhh, uhm, erm (not "uh-oh", "umbrella")
             "sk": r"(?:e+h*m+|e{3,}|h+m+)"}  # ehm, eee, hmm
@@ -1355,6 +1420,79 @@ def silence_seconds(audio: np.ndarray) -> float:
     return (len(audio) - stamps[-1]["end"]) / RATE if stamps else len(audio) / RATE
 
 
+# --- dictations that switch language (auto mode) -------------------------------------------------
+# Whisper transcribes a recording in one language and translates speech in any other, so auto mode
+# finds the language of each stretch of speech between pauses and transcribes each part in its own
+# (tests/bench_mixed.py: FLEURS sentences joined with pauses).
+PART_PAUSE = 0.3  # seconds: a pause this long can separate two languages (0.2 s split inside sentences)
+SWITCH_COST = 0.75  # evidence (log-odds) a change of language needs beyond the stretches around it
+
+
+def speech_regions(audio: np.ndarray, pause: float = PART_PAUSE) -> list[tuple[int, int]]:
+    """The stretches of speech (sample offsets) between pauses of at least `pause` seconds (Silero VAD,
+    unpadded)."""
+    from faster_whisper.vad import VadOptions, get_speech_timestamps
+    stamps = get_speech_timestamps(audio, VadOptions(min_silence_duration_ms=int(pause * 1000), speech_pad_ms=0))
+    return [(stamp["start"], stamp["end"]) for stamp in stamps]
+
+
+def language_evidence(seconds: float, shares: dict[str, float] | None) -> float:
+    """How strongly a stretch of speech says Slovak (positive) or English (negative): the log-odds of
+    the language detection, clipped and weighted by the stretch's length. Whisper takes short Slovak
+    for English (a fifth of 1 s pieces, often confidently) but not short English for Slovak, so an
+    English verdict on less than 2 s of speech counts for little."""
+    if not shares:
+        return 0.0
+    odds = math.log(max(shares.get("sk", 0.0), 1e-6) / max(shares.get("en", 0.0), 1e-6))
+    odds = max(-5.0, min(5.0, odds))
+    if odds > 0:
+        return odds * min(1.0, seconds / 2.0)
+    return odds * min(1.0, seconds / 3.0) * (0.4 if seconds < 2.0 else 1.0)
+
+
+def decide_languages(evidence: list[float], switch: float = SWITCH_COST) -> list[str]:
+    """The language of each stretch: the sequence that agrees best with the evidence when each change
+    of language costs `switch` (Viterbi over English and Slovak), so a single weak stretch doesn't
+    switch, and a language returns after a stretch in the other one only on strong evidence."""
+    if not evidence:
+        return []
+    best, back = [-evidence[0] / 2, evidence[0] / 2], []  # (English, Slovak)
+    for e in evidence[1:]:
+        row, came = [], []
+        for state, sign in ((0, -1), (1, 1)):
+            stay, move = best[state], best[1 - state] - switch
+            row.append(max(stay, move) + sign * e / 2)
+            came.append(state if stay >= move else 1 - state)
+        best, back = row, back + [came]
+    state = 0 if best[0] >= best[1] else 1
+    states = [state]
+    for came in reversed(back):
+        state = came[state]
+        states.append(state)
+    return ["sk" if state else "en" for state in reversed(states)]
+
+
+def language_runs(regions: list[tuple[int, int]], labels: list[str], length: int) -> list[tuple[int, int, str]]:
+    """Stretches in the same language joined into parts that cover the whole recording, each ending
+    in the middle of the pause before the next part: [(first sample, end, language)]."""
+    runs: list[list] = []
+    for (start, end), language in zip(regions, labels):
+        if runs and runs[-1][2] == language:
+            runs[-1][1] = end
+            continue
+        if runs:
+            start = runs[-1][1] = (runs[-1][1] + start) // 2
+        runs.append([0 if not runs else start, end, language])
+    if runs:
+        runs[-1][1] = length
+    return [tuple(run) for run in runs]
+
+
+def describe_parts(parts: list[tuple[int, int, str]]) -> str:
+    """For the log: "sk 0.0-7.9 s, en 7.9-15.2 s"."""
+    return ", ".join(f"{language} {start / RATE:.1f}-{end / RATE:.1f} s" for start, end, language in parts)
+
+
 def _norm(word: str) -> str:
     return re.sub(r"[^\w]", "", word.lower())
 
@@ -1376,13 +1514,22 @@ class Streamer:
         self.committed: list[tuple[float, float, str]] = []
         self.pending: list[tuple[float, float, str]] = []
         self.window_start = 0.0
+        self.prompt_from = 0.0  # where the language part began: earlier words (another language) are no prompt
 
     @property
     def commit_time(self) -> float:
         return self.committed[-1][1] if self.committed else 0.0
 
     def prompt(self) -> str | None:
-        return "".join(w[2] for w in self.committed if w[1] <= self.window_start).strip()[-200:] or None
+        return "".join(w[2] for w in self.committed
+                       if self.prompt_from <= w[0] and w[1] <= self.window_start).strip()[-200:] or None
+
+    def restart_at(self, at: float) -> None:
+        """Another language from `at` seconds on: the words from there on go (none of them was typed),
+        and the window and the prompt start there."""
+        self.committed = [w for w in self.committed if w[0] < at]
+        self.pending = []
+        self.window_start = self.prompt_from = at
 
     @property
     def preview(self) -> str:
@@ -1436,7 +1583,12 @@ class Session:
     language: str | None = None  # None until auto-detect has decided
     text: LiveText | None = None
     streamer: Streamer = field(default_factory=Streamer)
-    held: list = field(default_factory=list)  # settled words not typed yet (auto mode, first seconds)
+    held: list = field(default_factory=list)  # settled words not typed yet (auto mode: language not checked yet)
+    verified: float = 0.0  # auto mode, live: the speech up to here (seconds) is in `language`, or was typed
+    hold_from: float | None = None  # auto mode, live: a stretch from here on waits for its language check
+    parts: list = field(default_factory=list)  # auto mode, live: (seconds, language) where a language began
+    settled: bool = False  # auto mode: the first language is decided; from now on, stretch by stretch
+    checked: list = field(default_factory=list)  # auto mode: (first sample, end, shares) of stretches checked live
     passed_at: float = 0.0  # seconds of audio at the last live pass
     live_ok: bool = True  # switched off for this session if a live pass fails
     instant: bool = False  # live words are shown at once and corrected with Backspace
@@ -1470,6 +1622,7 @@ class Worker(threading.Thread):
     AUTO_TYPE_AFTER = 3.0  # auto mode: seconds of speech before the first live word is typed (safe mode)
     AUTO_SETTLED = 6.0  # auto mode, instant typing: the language is checked again until this much speech
     SHORT = 2.0  # less speech than this: too little to tell Slovak from English
+    CHECK_AFTER = 1.5  # auto mode, live: seconds of a stretch of speech after a pause before its language is checked
 
     def __init__(self, cfg, transcriber: Transcriber, paster, cues: Cues, topbar):
         super().__init__(name="transcribe", daemon=True)
@@ -1582,9 +1735,16 @@ class Worker(threading.Thread):
         s.passed_at = seconds
         hold = False
         # Auto mode: the language can still change until a word is typed (instant mode, which takes
-        # words back, keeps checking for the first AUTO_SETTLED seconds of speech).
-        speech = speech_seconds(audio) if s.mode == "auto" and (s.instant or not s.typed) else None
-        if speech is not None and (not s.typed or speech < self.AUTO_SETTLED):
+        # words back, and the preview without live typing keep checking for the first AUTO_SETTLED
+        # seconds of speech). After that each new stretch of speech gets a check of its own.
+        speech = None
+        if s.mode == "auto" and not s.settled:
+            speech = speech_seconds(audio)
+            if s.language and (s.typed or not s.live) and speech >= self.AUTO_SETTLED:
+                s.settled, speech = True, None
+        if s.mode == "auto" and s.live and not s.instant and s.typed:
+            s.settled, speech = True, None
+        if speech is not None:
             if speech < 1.5:
                 return
             language, share = self.transcriber.detect(audio)
@@ -1595,12 +1755,16 @@ class Worker(threading.Thread):
                     log.info("language: %s after all (%.0f%% sure after %.1f s of speech)", language, share * 100, speech)
                     s.streamer, s.held = Streamer(), []
                 s.language = language
+                s.parts = [(0.0, language)]
                 self.topbar.update(detected=language)
+            s.verified = seconds  # (the detection heard all of it)
             if share < 0.9 and speech < 2.5:
                 return
             # Real Slovak can look like English for ~2 s. The safe mode can't take typed words back,
             # so it waits; instant mode corrects itself.
             hold = not s.instant and speech < self.AUTO_TYPE_AFTER
+        elif s.mode == "auto" and s.language and not self.transcriber.on_cpu:
+            self._follow_language(s, audio)
         st = s.streamer
         start = st.window_start
         window = audio[int(start * RATE):]
@@ -1616,14 +1780,59 @@ class Worker(threading.Thread):
             return
         if s.live:
             s.held += new
-        if s.live and s.held and not hold:
+        # (words of a stretch whose language isn't checked yet wait)
+        ready = s.held if s.hold_from is None else [w for w in s.held if w[0] < s.hold_from]
+        if s.live and ready and not hold:
             with self.cond:
                 if s.dropped:
                     return
-                piece = s.text.add(s.held, s.language)
-                s.held = []
+                piece = s.text.add(ready, s.language)
+                s.held = s.held[len(ready):]
                 if piece:
                     self.paster.put(PasteItem(piece, s, final=False))
+
+    def _follow_language(self, s: Session, audio: np.ndarray, final: bool = False) -> None:
+        """Auto mode while typing live: each stretch of speech that starts after a pause gets its
+        language checked once it has CHECK_AFTER s of speech, or has ended. One in the other language
+        (confirmed on its own, padded to 30 s, as in Transcriber.language_parts) starts a new part
+        from the middle of the pause before it. Until a stretch is checked, s.hold_from keeps its
+        words from being typed (safe mode), so none are typed in the wrong language. final: the key
+        is up, so every stretch has ended."""
+        s.hold_from = None
+        origin = max(0, int((s.verified - 1.0) * RATE))  # (from a second before: the pause before a new stretch)
+        regions = [(origin + start, origin + end) for start, end in speech_regions(audio[origin:])]
+        previous_end = None
+        for start, end in regions:
+            ended = final or len(audio) - end >= PART_PAUSE * RATE
+            if start < s.verified * RATE:  # the stretch checked already, still going on
+                s.verified = max(s.verified, (end if ended else len(audio)) / RATE)
+                previous_end = end
+                continue
+            seconds = (end - start) / RATE
+            if seconds < self.CHECK_AFTER and not ended:
+                s.hold_from = start / RATE
+                return
+            other = "en" if s.language == "sk" else "sk"
+            if seconds >= 0.5:
+                shares = self.transcriber.shares(audio[start:end])
+                if ended:  # (the final pass needn't check it again)
+                    s.checked.append((start, end, shares))
+                evidence = language_evidence(seconds, shares)
+                if (evidence > SWITCH_COST) if other == "sk" else (evidence < -SWITCH_COST):
+                    check = self.transcriber.shares(audio[start:end], frames=3000)
+                    if check and check.get(other, 0.0) >= 0.75:
+                        at = ((previous_end if previous_end is not None else start) + start) / 2 / RATE
+                        log.info("language: %s from %.1f s on (%.0f%% sure on %.1f s of speech)", other, at,
+                                 100 * check[other], seconds)
+                        s.language = other
+                        s.parts.append((at, other))
+                        s.streamer.restart_at(at)
+                        s.held = [w for w in s.held if w[0] < at]
+                        self.topbar.update(detected=other)
+            s.verified = (end if ended else len(audio)) / RATE
+            previous_end = end
+            if not ended:
+                return
 
     def _show(self, s: Session, target: str, final: bool = False) -> None:
         """Instant mode: make the app show `target`. Deletes only the end of what this dictation typed
@@ -1681,15 +1890,19 @@ class Worker(threading.Thread):
 
     def _final_instant(self, s: Session) -> tuple[str, None]:
         """Instant mode after release: the whole text, with the end transcribed once more. In auto mode
-        the whole recording may overrule the language guessed from its start; then it is retyped."""
-        audio, st = s.audio, s.streamer
+        the languages of the whole recording's parts may overrule those the live passes used; then all
+        of it is retyped."""
+        audio = s.audio
         if s.mode == "auto" and speech_total(audio) >= self.SHORT:
-            language, share = self.transcriber.detect(audio)
-            if language != s.language and share >= 0.9:
-                log.info("language: %s after all (%.0f%% sure on the whole recording); retyping", language, share * 100)
-                s.language = language
-                return clean_text(" ".join(seg.text.strip() for seg in self._run(audio, language)),
-                                  self.cfg, language), None
+            parts = self.transcriber.language_parts(audio, known=s.checked)
+            if any(language != self._live_language(s, (start + end) / 2 / RATE) for start, end, language in parts):
+                log.info("languages: %s after all (the whole recording); retyping", describe_parts(parts))
+                text, _problem = self._final_parts(s, audio, parts)
+                if text:  # (nothing heard after all: what it showed stays)
+                    return text, None
+            if not self.transcriber.on_cpu:
+                self._follow_language(s, audio, final=True)
+        st = s.streamer
         window = audio[int(st.window_start * RATE):]
         words = []
         if len(window) >= RATE // 4 and (st.pending or silence_seconds(window[-30 * RATE:]) <= self.QUIET):
@@ -1704,29 +1917,64 @@ class Worker(threading.Thread):
         speech = speech_total(audio)
         if s.mode == "auto" and not typed_live:  # nothing typed yet: the whole recording decides
             first = s.language  # guessed from the first ~2 s of speech, if the live passes got that far
-            s.language, share = self.transcriber.detect(audio)
+            parts = self.transcriber.language_parts(audio, known=s.checked)
+            if len({language for _start, _end, language in parts}) > 1:  # it switches language
+                log.info("languages: %s", describe_parts(parts))
+                return self._final_parts(s, audio, parts)
+            s.language = parts[0][2] if parts else self.transcriber.detect(audio)[0]
             # Whisper takes short or unclear non-English speech for English (real Slovak dictation was
             # read as English at 95-100 %), but hardly the other way round: so a short clip that only
             # seems English keeps the previous dictation's language.
             if speech < self.SHORT and s.language == "en" and self.last_language not in (None, "en"):
-                s.language, share = self.last_language, 0.0
+                s.language = self.last_language
                 log.info("language: %s as last time (only %.1f s of speech, which seemed English)", s.language, speech)
-            if first and first != s.language and share:
-                log.info("language: %s after all (%.0f%% sure on the whole recording)", s.language, share * 100)
+            elif first and first != s.language:
+                log.info("language: %s after all (the whole recording)", s.language)
         elif s.language is None:
             s.language = s.mode
         if typed_live:  # only the part after the last typed word is left
+            if s.mode == "auto" and not self.transcriber.on_cpu:
+                self._follow_language(s, audio, final=True)
             st = s.streamer
+            held = s.held  # words that waited for a language check: transcribed again with the rest
+            if held and st.committed[-len(held):] == held:
+                del st.committed[-len(held):]
+            s.held = []
             start = st.window_start
             window = audio[int(start * RATE):]
             words = []
-            if len(window) >= RATE // 4 and (st.pending or silence_seconds(window[-30 * RATE:]) <= self.QUIET):
+            if len(window) >= RATE // 4 and (held or st.pending or silence_seconds(window[-30 * RATE:]) <= self.QUIET):
                 words = st.words_after_commit(self._run(window, s.language, words=True, prompt=st.prompt(),
                                                         hotwords=len(window) >= 2 * RATE), start)
             return s.text.add(words, s.language, final=True), None
         segments = self._run(audio, s.language, hotwords=speech >= 1.0)  # below 1 s whisper may echo them
         text = clean_text(" ".join(seg.text.strip() for seg in segments), self.cfg, s.language)
         return (text, None) if text else ("", "no speech")
+
+    def _final_parts(self, s: Session, audio: np.ndarray, parts: list[tuple[int, int, str]]) -> tuple[str, str | None]:
+        """A recording that switches language: each part transcribed in its own language, the texts
+        joined. The dictation counts as being in the language most of it was in."""
+        texts = []
+        for start, end, language in parts:
+            piece = audio[start:end]
+            segments = self._run(piece, language, hotwords=speech_total(piece) >= 1.0)
+            text = " ".join(seg.text.strip() for seg in segments)
+            texts.append(clean_text(text, self.cfg, language).strip())
+        s.language = max(AUTO_LANGUAGES, key=lambda lang: sum(end - start for start, end, language in parts
+                                                              if language == lang))
+        text = " ".join(t for t in texts if t)
+        if not text:
+            return "", "no speech"
+        return text + (" " if self.cfg.trailing_space else ""), None
+
+    @staticmethod
+    def _live_language(s: Session, at: float) -> str | None:
+        """The language the live passes used at `at` seconds."""
+        language = s.parts[0][1] if s.parts else s.language
+        for start, part_language in s.parts:
+            if start <= at:
+                language = part_language
+        return language
 
     def _run(self, audio, language, **kw):
         """A model pass that survives a dead CUDA context (e.g. after suspend) by reloading once."""

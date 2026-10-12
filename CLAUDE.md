@@ -132,12 +132,13 @@ python3 tests/fetch_fleurs.py
 $D/venv/bin/python tests/bench_asr.py           # GPU targets: en ~4 % WER, sk ~6-7 %, ~0.35-0.5 s per sentence
 $D/venv/bin/python tests/bench_live.py          # GPU targets: live WER ≈ one-shot; first words ~2 s (en)
 for t in unit_keys unit_models unit_audio unit_portability unit_windows unit_macos unit_topbar unit_setup unit_paster unit_switch \
-         unit_capture unit_login unit_i18n unit_popup unit_websettings unit_update
+         unit_capture unit_login unit_i18n unit_popup unit_websettings unit_update unit_languages
 do $D/venv/bin/python tests/$t.py; done
 dbus-run-session -- $D/venv/bin/python tests/unit_tray.py
 XVFB=… $D/venv/bin/python tests/x11_paste.py   # X11 desktops: key grab, combinations, repeats, paste, clipboard
 XVFB=… $D/venv/bin/python tests/bigui_test.py  # large text: panel, focus, settings window by keyboard
 XVFB=… $D/venv/bin/python tests/bigui_window.py  # settings window: redraws, keys, clicks, scrolling, timings
+$D/venv/bin/python tests/bench_mixed.py --live   # auto mode on dictations that switch language
 XVFB=… $D/venv/bin/python tests/e2e_x11.py     # a whole dictation with a stand-in recorder
 journalctl --user -u dictate -n 30              # or: tail $D/dictate.log  (autostart desktops)
 ```
@@ -323,11 +324,46 @@ input, `windows_paste.py`, and `e2e_desktop.py` / `e2e_x11.py`. It is started by
   - On the processor with live typing off, no preview passes run (they would delay the final one).
   - Auto-detect waits for 1.5 s of speech; `tests/bench_detect.py` shows Slovak is confidently
     misread as English below that. Real Slovak dictation was still read as English at 95-100 %
-    after ~2 s, and whisper then translates. So when nothing was typed live, the final pass
-    detects again on the whole recording (log: `language: sk after all`). With live typing, until
-    the first word is typed every pass checks the language again (a flip restarts the streamer,
-    which costs nothing as nothing was typed), and no word is typed before 3 s of speech
-    (`Worker.AUTO_TYPE_AFTER`; settled words wait in `Session.held`).
+    after ~2 s, and whisper then translates. With live typing, until the first word is typed
+    every pass checks the language again (a flip restarts the streamer, which costs nothing as
+    nothing was typed), and no word is typed before 3 s of speech (`Worker.AUTO_TYPE_AFTER`;
+    settled words wait in `Session.held`). Instant mode and the preview without live typing keep
+    checking for the first `AUTO_SETTLED` (6 s) of speech (`Session.settled`).
+  - **Dictations that switch language** (auto mode). Whisper transcribes a pass in one language and
+    translates everything else, so one language per recording turned every switch into a
+    translation (`tests/bench_mixed.py`, large-v3-turbo, no live typing: 44 % of the words wrong
+    on FLEURS sentences joined across languages). Now:
+    - `speech_regions()` splits the recording at pauses of `PART_PAUSE` (0.3 s; 0.2 s split inside
+      sentences and caused false switches). `Transcriber.shares()` detects each stretch's language
+      (first 8 s of it) padded to 10 s (`PIECE_FRAMES`) instead of 30 s: ~80 ms instead of ~300 ms
+      on the RTX 3060, as accurate from 1.5 s of speech. Padded to 5 s, unpadded, or sliced out of
+      one encoder pass over the whole recording, Whisper took nearly all Slovak for English;
+      batching pieces saved nothing (the GPU is busy already).
+    - `language_evidence()` turns a detection into clipped log-odds weighted by length, an English
+      verdict on less than 2 s counting 0.4x (short Slovak is often heard as English, short English
+      never as Slovak). `decide_languages()` is a two-state Viterbi with `SWITCH_COST` 0.75 per
+      change: a stretch in the middle switches only on strong evidence, so a short English-seeming
+      phrase inside Slovak stays Slovak. A part in a language other than most of the recording's is
+      confirmed once more on all its speech padded to 30 s (>= 75 %), unless it has >= 3 s of
+      speech and sure evidence; otherwise it stays in the main language (log: `language part:`).
+      On the processor only the first, the last and the longest stretch are detected (`DETECTIONS`).
+    - Without live typing, `_final_text` transcribes each part on its own (`_final_parts`; log:
+      `languages: sk 0.0-7.9 s, en 7.9-15.2 s`); one part: one pass, as before. Stretches the
+      previews already checked are reused (`Session.checked`, within 0.15 s).
+    - Live typing (graphics card only): after the start, `_follow_language` checks each stretch that
+      starts after a pause once it has `CHECK_AFTER` (1.5 s) of speech or has ended. Until then
+      `Session.hold_from` keeps its words from being typed (safe mode). A stretch in the other
+      language starts a new part in the middle of the pause before it: `Streamer.restart_at()` drops
+      the untyped words from there and starts the window and the prompt there (`prompt_from`: a
+      prompt in the other language pulls Whisper back into it); `Session.parts` records the
+      switches. After release the same check runs on the tail, and held words are transcribed
+      again with it. Instant mode just retypes; after release it compares `language_parts()` of
+      the whole recording with the live parts and retypes all of it if they disagree.
+    - Measured (`tests/bench_mixed.py`, FLEURS, RTX 3060): see README → Accuracy and speed.
+      Single-language dictations of three FLEURS sentences show the same WER before and after;
+      their WER includes Whisper sometimes dropping one of two sentences by different speakers
+      (FLEURS), which happens with or without parts. `tests/unit_languages.py` covers the
+      decisions, the parts and live switching with a stand-in model.
   - A tap (shorter than `Controller.TAP`) latches the dictation only while the menu's *Tap to start
     and stop* is on (`state.json` "tap", config `tap_to_toggle`); off, a short press is just a
     short hold.
