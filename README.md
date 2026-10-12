@@ -145,7 +145,8 @@ last left it). On Linux and macOS:
   - **English / Slovenčina / Auto-detect (English / Slovak).** Auto-detect only chooses between
     those two (plain Whisper might pick Czech or Polish), and one dictation may switch between
     them: every stretch of speech between pauses gets its language checked, and each part is
-    written in its own language instead of being translated into the other. It waits for about
+    written in its own language instead of being translated into the other (a part switches only
+    if Whisper writes it more confidently in the other language). It waits for about
     1.5 s of speech before deciding; Slovak can be mistaken for English below that, so a short
     phrase that only seems English (under about 2 s) stays in the language around it. With *Type
     while speaking* on it types nothing before 3 s of speech, and after a pause the first words of

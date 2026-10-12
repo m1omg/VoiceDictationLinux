@@ -1264,14 +1264,13 @@ class Transcriber:
         return {lang: probs.get(lang, 0.0) / total for lang in allowed}
 
     def language_parts(self, audio: np.ndarray, known: list | None = None) -> list[tuple[int, int, str]]:
-        """The recording's parts in one language each: [(first sample, end, "en" or "sk")], covering it
-        all (one part: no switch). Every stretch of speech between pauses gets a language detection
-        (on a processor only the first, the last and the longest), the evidence is weighed by
-        decide_languages(), and a part in a language other than most of the recording's is checked once
-        more on all of its speech, padded to 30 s (fewer confident mistakes on short pieces): if that
-        doesn't agree, the part stays in the main language. Empty if there is no speech. known: stretches
-        checked while recording, [(first sample, end, shares)], used where a stretch is the same
-        (within 0.15 s)."""
+        """The recording's parts in one language each, as the language detection hears them:
+        [(first sample, end, "en" or "sk")], covering it all (one part: no switch). Every stretch of
+        speech between pauses gets a detection (on a processor only the first, the last and the
+        longest), weighed by decide_languages(). Empty if there is no speech. known: stretches checked
+        while recording, [(first sample, end, shares)], used where a stretch is the same (within
+        0.15 s). (A part in another language than most of the recording is confirmed by decoding it:
+        Worker._better_language.)"""
         regions = speech_regions(audio)
         if not regions:
             return []
@@ -1288,24 +1287,7 @@ class Transcriber:
             shares = next((shares for k_start, k_end, shares in known or () if abs(k_start - start) <= near
                            and abs(k_end - end) <= near), None) or self.shares(audio[start:end])
             evidence[i] = language_evidence(seconds[i], shares)
-        labels = decide_languages(evidence)
-        main = max(AUTO_LANGUAGES, key=lambda lang: sum(s for s, label in zip(seconds, labels) if label == lang))
-        for run_start, run_end, language in language_runs(regions, labels, len(audio)):
-            if language == main:
-                continue
-            inside = [i for i, (start, end) in enumerate(regions) if run_start <= start and end <= run_end]
-            sure = sum(evidence[i] for i in inside) * (1 if language == "sk" else -1)
-            if sum(seconds[i] for i in inside) >= 3.0 and sure >= 3.0:  # no mistakes this sure on 3 s (FLEURS)
-                log.info("language part: %s %.1f-%.1f s (the rest: %s)", language, run_start / RATE, run_end / RATE, main)
-                continue
-            speech = np.concatenate([audio[regions[i][0]:regions[i][1]] for i in inside])
-            check = self.shares(speech, frames=3000)
-            log.info("language part: %s %.1f-%.1f s (%.0f%% %s on its own; the rest: %s)", language, run_start / RATE,
-                     run_end / RATE, 100 * (check or {}).get(language, 0.0), language, main)
-            if check is None or check.get(language, 0.0) < 0.75:
-                for i in inside:
-                    labels[i] = main
-        return language_runs(regions, labels, len(audio))
+        return language_runs(regions, decide_languages(evidence), len(audio))
 
 
 _FILLERS = {"en": r"(?:u+h+m*|u+m+|e+r+m+)",  # um, umm, uh, uhh, uhm, erm (not "uh-oh", "umbrella")
@@ -1488,6 +1470,14 @@ def language_runs(regions: list[tuple[int, int]], labels: list[str], length: int
     return [tuple(run) for run in runs]
 
 
+def confidence(segments) -> float:
+    """How sure a pass was of its text: the average log-probability per token (-inf: no text)."""
+    tokens = sum(len(seg.tokens or ()) for seg in segments)
+    if not tokens:
+        return float("-inf")
+    return sum(seg.avg_logprob * len(seg.tokens or ()) for seg in segments) / tokens
+
+
 def describe_parts(parts: list[tuple[int, int, str]]) -> str:
     """For the log: "sk 0.0-7.9 s, en 7.9-15.2 s"."""
     return ", ".join(f"{language} {start / RATE:.1f}-{end / RATE:.1f} s" for start, end, language in parts)
@@ -1623,6 +1613,7 @@ class Worker(threading.Thread):
     AUTO_SETTLED = 6.0  # auto mode, instant typing: the language is checked again until this much speech
     SHORT = 2.0  # less speech than this: too little to tell Slovak from English
     CHECK_AFTER = 1.5  # auto mode, live: seconds of a stretch of speech after a pause before its language is checked
+    SWITCH_MARGIN = 0.1  # log-probability per token by which a part's own language must beat the dictation's
 
     def __init__(self, cfg, transcriber: Transcriber, paster, cues: Cues, topbar):
         super().__init__(name="transcribe", daemon=True)
@@ -1794,8 +1785,8 @@ class Worker(threading.Thread):
     def _follow_language(self, s: Session, audio: np.ndarray, final: bool = False) -> None:
         """Auto mode while typing live: each stretch of speech that starts after a pause gets its
         language checked once it has CHECK_AFTER s of speech, or has ended. One in the other language
-        (confirmed on its own, padded to 30 s, as in Transcriber.language_parts) starts a new part
-        from the middle of the pause before it. Until a stretch is checked, s.hold_from keeps its
+        (if it is also written better in it: _better_language) starts a new part from the middle of
+        the pause before it. Until a stretch is checked, s.hold_from keeps its
         words from being typed (safe mode), so none are typed in the wrong language. final: the key
         is up, so every stretch has ended."""
         s.hold_from = None
@@ -1818,17 +1809,15 @@ class Worker(threading.Thread):
                 if ended:  # (the final pass needn't check it again)
                     s.checked.append((start, end, shares))
                 evidence = language_evidence(seconds, shares)
-                if (evidence > SWITCH_COST) if other == "sk" else (evidence < -SWITCH_COST):
-                    check = self.transcriber.shares(audio[start:end], frames=3000)
-                    if check and check.get(other, 0.0) >= 0.75:
-                        at = ((previous_end if previous_end is not None else start) + start) / 2 / RATE
-                        log.info("language: %s from %.1f s on (%.0f%% sure on %.1f s of speech)", other, at,
-                                 100 * check[other], seconds)
-                        s.language = other
-                        s.parts.append((at, other))
-                        s.streamer.restart_at(at)
-                        s.held = [w for w in s.held if w[0] < at]
-                        self.topbar.update(detected=other)
+                says_other = (evidence > SWITCH_COST) if other == "sk" else (evidence < -SWITCH_COST)
+                if says_other and self._better_language(audio[start:end], s.language, other)[0] == other:
+                    at = ((previous_end if previous_end is not None else start) + start) / 2 / RATE
+                    log.info("language: %s from %.1f s on (%.1f s of speech)", other, at, seconds)
+                    s.language = other
+                    s.parts.append((at, other))
+                    s.streamer.restart_at(at)
+                    s.held = [w for w in s.held if w[0] < at]
+                    self.topbar.update(detected=other)
             s.verified = (end if ended else len(audio)) / RATE
             previous_end = end
             if not ended:
@@ -1953,19 +1942,39 @@ class Worker(threading.Thread):
 
     def _final_parts(self, s: Session, audio: np.ndarray, parts: list[tuple[int, int, str]]) -> tuple[str, str | None]:
         """A recording that switches language: each part transcribed in its own language, the texts
-        joined. The dictation counts as being in the language most of it was in."""
+        joined; a part in another language than most of it only if it is written better in that
+        language (_better_language). The dictation counts as being in the language most of it was in."""
+        main = max(AUTO_LANGUAGES, key=lambda lang: sum(end - start for start, end, language in parts
+                                                        if language == lang))
         texts = []
         for start, end, language in parts:
             piece = audio[start:end]
-            segments = self._run(piece, language, hotwords=speech_total(piece) >= 1.0)
+            if language == main:
+                segments = self._run(piece, language, hotwords=speech_total(piece) >= 1.0)
+            else:
+                language, segments = self._better_language(piece, main, language)
             text = " ".join(seg.text.strip() for seg in segments)
             texts.append(clean_text(text, self.cfg, language).strip())
-        s.language = max(AUTO_LANGUAGES, key=lambda lang: sum(end - start for start, end, language in parts
-                                                              if language == lang))
+        s.language = main
         text = " ".join(t for t in texts if t)
         if not text:
             return "", "no speech"
         return text + (" " if self.cfg.trailing_space else ""), None
+
+    def _better_language(self, piece: np.ndarray, main: str, other: str) -> tuple[str, list]:
+        """Is this piece, which the language detection puts in `other`, written better in it than in
+        the dictation's `main` language? Decoded in both, without the vocabulary (a pass in the wrong
+        language copies it into its guesses), `other` must be more confident by SWITCH_MARGIN and say
+        something else; otherwise it stays in `main`. (The detection put real Slovak at 100 % English,
+        and an English pass then made up "Give me a CachyOS to get some now".) Returns the language
+        and its pass's segments."""
+        kept, tried = self._run(piece, main, hotwords=False), self._run(piece, other, hotwords=False)
+        sure_kept, sure_tried = confidence(kept), confidence(tried)
+        same = [_norm(w) for seg in kept for w in seg.text.split()] == [_norm(w) for seg in tried for w in seg.text.split()]
+        switch = sure_tried >= sure_kept + self.SWITCH_MARGIN and not same
+        log.info("language part of %.1f s: %s (%s %.2f, %s %.2f per token%s)", len(piece) / RATE, other if switch
+                 else main, main, sure_kept, other, sure_tried, ", the same words" if same else "")
+        return (other, tried) if switch else (main, kept)
 
     @staticmethod
     def _live_language(s: Session, at: float) -> str | None:

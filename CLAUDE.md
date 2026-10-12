@@ -343,17 +343,26 @@ input, `windows_paste.py`, and `e2e_desktop.py` / `e2e_x11.py`. It is started by
       verdict on less than 2 s counting 0.4x (short Slovak is often heard as English, short English
       never as Slovak). `decide_languages()` is a two-state Viterbi with `SWITCH_COST` 0.75 per
       change: a stretch in the middle switches only on strong evidence, so a short English-seeming
-      phrase inside Slovak stays Slovak. A part in a language other than most of the recording's is
-      confirmed once more on all its speech padded to 30 s (>= 75 %), unless it has >= 3 s of
-      speech and sure evidence; otherwise it stays in the main language (log: `language part:`).
-      On the processor only the first, the last and the longest stretch are detected (`DETECTIONS`).
+      phrase inside Slovak stays Slovak. On the processor only the first, the last and the longest
+      stretch are detected (`DETECTIONS`).
+    - A part in another language than most of the recording is kept in it only if it is *written*
+      better in it (`Worker._better_language`): decoded both ways without the vocabulary, its own
+      language must be more confident by `SWITCH_MARGIN` (0.1 log-probability per token,
+      `confidence()`) and say other words; otherwise it stays in the main language (log:
+      `language part of 3.7 s: sk (sk -0.25, en -0.61 per token)`). Why: in the user's real
+      dictation the detection put 3.7 s of Slovak at 100 % English even padded to 30 s, and the
+      English pass made up "Give me a CachyOS to get some now" (the vocabulary as a guess). On
+      FLEURS the right language was always the more confident on 1.5 s pieces (45/45); on whole
+      sentences large-v3-turbo writes what it hears whatever the language token (both passes give
+      the same words, so staying in the main language costs nothing).
     - Without live typing, `_final_text` transcribes each part on its own (`_final_parts`; log:
       `languages: sk 0.0-7.9 s, en 7.9-15.2 s`); one part: one pass, as before. Stretches the
       previews already checked are reused (`Session.checked`, within 0.15 s).
     - Live typing (graphics card only): after the start, `_follow_language` checks each stretch that
       starts after a pause once it has `CHECK_AFTER` (1.5 s) of speech or has ended. Until then
       `Session.hold_from` keeps its words from being typed (safe mode). A stretch in the other
-      language starts a new part in the middle of the pause before it: `Streamer.restart_at()` drops
+      language (confirmed by `_better_language` too) starts a new part in the middle of the pause
+      before it: `Streamer.restart_at()` drops
       the untyped words from there and starts the window and the prompt there (`prompt_from`: a
       prompt in the other language pulls Whisper back into it); `Session.parts` records the
       switches. After release the same check runs on the tail, and held words are transcribed
