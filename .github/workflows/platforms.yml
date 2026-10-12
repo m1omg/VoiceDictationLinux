@@ -127,6 +127,11 @@ jobs:
         run: |
           & "$env:LOCALAPPDATA\dictate\venv\Scripts\python.exe" -X utf8 tests\e2e_desktop.py
 
+      - name: Large-text settings window
+        timeout-minutes: 5
+        run: |
+          & "$env:LOCALAPPDATA\dictate\venv\Scripts\python.exe" -X utf8 tests\bigui_window.py
+
       - name: Screenshots
         if: always()
         uses: actions/upload-artifact@v4
@@ -207,6 +212,11 @@ jobs:
         run: |
           "$HOME/Library/Application Support/dictate/venv/bin/python" tests/e2e_desktop.py
 
+      - name: Large-text settings window
+        timeout-minutes: 5
+        run: |
+          "$HOME/Library/Application Support/dictate/venv/bin/python" tests/bigui_window.py
+
       - name: Screenshots
         if: always()
         uses: actions/upload-artifact@v4
@@ -254,6 +264,7 @@ jobs:
           PY="$HOME/.local/share/dictate/venv/bin/python"
           "$PY" tests/x11_paste.py
           "$PY" tests/bigui_test.py
+          "$PY" tests/bigui_window.py
           "$PY" tests/e2e_x11.py
 
       - name: Screenshots

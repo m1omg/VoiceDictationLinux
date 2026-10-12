@@ -137,6 +137,7 @@ do $D/venv/bin/python tests/$t.py; done
 dbus-run-session -- $D/venv/bin/python tests/unit_tray.py
 XVFB=… $D/venv/bin/python tests/x11_paste.py   # X11 desktops: key grab, combinations, repeats, paste, clipboard
 XVFB=… $D/venv/bin/python tests/bigui_test.py  # large text: panel, focus, settings window by keyboard
+XVFB=… $D/venv/bin/python tests/bigui_window.py  # settings window: redraws, keys, clicks, scrolling, timings
 XVFB=… $D/venv/bin/python tests/e2e_x11.py     # a whole dictation with a stand-in recorder
 journalctl --user -u dictate -n 30              # or: tail $D/dictate.log  (autostart desktops)
 ```
@@ -264,11 +265,18 @@ input, `windows_paste.py`, and `e2e_desktop.py` / `e2e_x11.py`. It is started by
     window activates whenever it is shown; an AppKit `NSPanel` with
     `NSWindowStyleMaskNonactivatingPanel` on macOS (a Tk window brings its app to the front). All
     its timing uses `after()` or `callLater` with wall-clock delays, never frames.
-  - The settings window's buttons are `tk.Label`s with two pictures each (with and without the
-    focus frame), so they look the same on every system (Aqua ignores most `tk.Button` options).
-    It polls `state.json` and `dictate-status.json` every second and rebuilds when what it shows
-    changes. On a Retina Mac its pictures are scaled up by Tk (slightly soft); the panel is drawn
-    at the screen's pixel density.
+  - The settings window draws every row as a picture on one canvas (`Row`; no widget per row), so
+    it looks the same on every system (Aqua ignores most `tk.Button` options). The canvas has the
+    keyboard focus; `_navigate` moves the focus frame (a second picture of the focused button) and
+    Space/Enter choose. Pictures are kept by what they show (`Settings.pictures`), so a choice draws
+    only the rows that changed, and `photo()` hands them to Tk through Pillow's ImageTk, else raw
+    PPM, else PNG. Before (a `tk.Label` and fresh PNGs for every row on every change) one click took
+    0.5 s on the CachyOS PC and seconds on the 2017 MacBook Air, and every passive rebuild scrolled
+    back to the focused button. It polls `state.json` and `dictate-status.json` every second and
+    rebuilds when what it shows changes, keeping the buttons in view where they are. Scroll events
+    are added up and applied once per idle moment. `tests/bigui_window.py` (CI on all three
+    systems) checks this and prints the timings. On a Retina Mac its pictures are scaled up by Tk
+    (slightly soft); the panel is drawn at the screen's pixel density.
   - Key capture reads the key's code where Tk's key name is unreliable: on Windows the virtual-key
     code (`event.keycode`) and the extended flag (0x40000 in `event.state`), because Tk names the
     numpad by its character, and with NumLock off its Del is Delete without the extended flag; on
@@ -408,7 +416,9 @@ input, `windows_paste.py`, and `e2e_desktop.py` / `e2e_x11.py`. It is started by
   `NSWorkspace.isVoiceOverEnabled`) makes `bigui.py settings` open the page instead
   (`tests/unit_websettings.py`).
 - **Touchpads in the settings window:** Tk 9 on macOS reports two-finger scrolling as
-  `<TouchpadScroll>` (dx and dy packed into one number, `touchpad_dy`), not `<MouseWheel>`.
+  `<TouchpadScroll>` (dx and dy packed into one number, `touchpad_dy`), not `<MouseWheel>`. Tk 8.6
+  on macOS sends a touchpad as many `<MouseWheel>` events of a line or two each; `wheel_pixels`
+  scrolls by the delta (a third of the window per event made a swipe fly past everything).
 - **AMD (ROCm):**
   - CTranslate2's ROCm build isn't on PyPI. install.sh and install.ps1 extract it from the
     release zip (checksums pinned; update them with the version in requirements.txt), and install

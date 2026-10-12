@@ -225,6 +225,24 @@ check("touchpad: fingers down 5 pixels", bigui.touchpad_dy(5), 5)
 check("touchpad: up 3 pixels", bigui.touchpad_dy(0xFFFD), -3)
 check("touchpad: sideways movement is left out", bigui.touchpad_dy((7 << 16) | 0xFFFE), -2)
 
+# --- the mouse wheel: three lines a notch, however the system reports it ---
+check("wheel: X11's button 4 is a notch up", bigui.wheel_pixels(4, 0, 30), 90)
+check("wheel: X11's button 5 is a notch down", bigui.wheel_pixels(5, 0, 30), -90)
+check("wheel: Windows and Tk 9 count 120 a notch", (bigui.wheel_pixels(0, 120, 30), bigui.wheel_pixels(0, -240, 30)),
+      (90, -180))
+check("wheel: Tk 8.6 on macOS counts lines; a touchpad's single line is one line, not a third of the window",
+      bigui.wheel_pixels(0, -1, 30), -30)
+
+# --- the settings window's rows ---
+button = ("button", "Sounds", "check:on", "#ffff00", "#000000", 600, 22, 7, 4, "#000000", "#ff6060")
+plain, focused = bigui.row_image(button), bigui.row_image(button, focused=True)
+check("a button's picture is as wide as the window's rows", plain.width, 600)
+check("the focused one has the accent colour's frame, the other the background's",
+      (plain.getpixel((1, 1)), focused.getpixel((1, 1))), ((0, 0, 0), (255, 96, 96)))
+text = ("text", "A heading long enough to wrap onto a second line here", "#ffff00", "#000000", 300, 22, 280, 7)
+check("a long text row wraps onto more lines", bigui.row_image(text).height > bigui.row_image(text[:1] + ("Short",) + text[2:]).height,
+      True)
+
 for name, good, got, want in checks:
     print(f"{'ok  ' if good else 'FAIL'} {name}" + ("" if good else f": got {got!r}, want {want!r}"))
 sys.exit(0 if all(c[1] for c in checks) else 1)

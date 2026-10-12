@@ -22,6 +22,7 @@ import sys
 import threading
 import time
 import tkinter as tk
+from dataclasses import dataclass
 from pathlib import Path
 
 from PIL import Image, ImageDraw, ImageFont
@@ -101,10 +102,36 @@ def wrap(text: str, f, width: int) -> list[str]:
     return lines
 
 
-def photo(image: Image.Image) -> tk.PhotoImage:
+def _photo_imagetk(image: Image.Image):
+    from PIL import ImageTk
+    return ImageTk.PhotoImage(image)
+
+
+def _photo_ppm(image: Image.Image) -> tk.PhotoImage:
+    buf = io.BytesIO()
+    image.save(buf, "PPM")
+    return tk.PhotoImage(data=buf.getvalue(), format="ppm")
+
+
+def _photo_png(image: Image.Image) -> tk.PhotoImage:
     buf = io.BytesIO()
     image.save(buf, "PNG", compress_level=1)
     return tk.PhotoImage(data=base64.b64encode(buf.getvalue()))
+
+
+# How pictures reach Tk, fastest first: Pillow copies the pixels straight in (0.2 ms for a settings
+# row), raw PPM data (0.6 ms), PNG (1.2 ms, but every Tk reads it). One that fails here (a Tk that
+# Pillow wasn't built for) is dropped for good.
+PHOTO_WAYS = [_photo_imagetk, _photo_ppm, _photo_png]
+
+
+def photo(image: Image.Image):
+    while len(PHOTO_WAYS) > 1:
+        try:
+            return PHOTO_WAYS[0](image)
+        except Exception:
+            del PHOTO_WAYS[0]
+    return PHOTO_WAYS[0](image)
 
 
 def draw_mark(draw: ImageDraw.ImageDraw, mark: str, x: int, y: int, size: int, colour: str, bg: str) -> None:
@@ -525,6 +552,36 @@ def touchpad_dy(delta: int) -> int:
     return dy - 0x10000 if dy & 0x8000 else dy
 
 
+def wheel_pixels(num: int, delta: int, line: int) -> int:
+    """How far one mouse-wheel event scrolls, in pixels (positive: towards the top). A wheel's notch
+    moves three lines of text. X11 reports a notch as button 4 or 5, Windows and Tk 9 as 120 of delta;
+    Tk 8.6 on macOS gives lines, a touchpad or a Magic Mouse many small ones (each used to scroll a
+    third of the window: a swipe flew past everything)."""
+    if num in (4, 5):
+        notches = 1.0 if num == 4 else -1.0
+    elif abs(delta) >= 120:
+        notches = delta / 120
+    else:
+        notches = delta / 3
+    return round(notches * 3 * line)
+
+
+def row_image(look: tuple, focused: bool = False) -> Image.Image:
+    """A settings row's picture. look is ("text", text, colour, background, width, px, wrap width,
+    pad) for a heading or a line of text, or ("button", label, mark, colour, background, width, px,
+    pad, ring, frame, focus frame): a button sits in a frame ring pixels wide, of the window's
+    background, or of the accent colour while it has the focus."""
+    if look[0] == "text":
+        _, text, fg, bg, width, px, room, pad = look
+        lines = [(line, fg) for line in wrap(text, font(px), room)] or [("", fg)]
+        return text_image(lines, width, px, bg, pad)
+    _, label, mark, colour, bg, width, px, pad, ring, frame, focus_frame = look
+    inner = width - 2 * ring
+    lines = wrap(label, font(px), inner - 2 * pad - mark_width(px))
+    image = text_image([(line, colour) for line in lines], inner, px, bg, pad, mark)
+    return framed(image, ring, focus_frame if focused else frame)
+
+
 def signature(rows: list[tuple]) -> list[tuple]:
     """What a list of rows shows (without the buttons' actions): rebuilt only when this changes."""
     return [row[:5] if row[0] == "button" else row for row in rows]
@@ -791,10 +848,23 @@ class SettingsModel:
         rows.append(("button", "close", t("Close this window"), "", True, self.close))
         return rows
 
+@dataclass
+class Row:
+    """A row of the settings window: its picture on the canvas and where it is."""
+    look: tuple  # what row_image() draws
+    top: int
+    height: int
+    item: int  # the canvas item
+    row_id: str | None = None  # buttons only
+    action: object = None  # what choosing the button does (None: greyed out)
+
+
 class Settings(SettingsModel):
     """Every choice of the tray menu as large buttons, driven fully by the keyboard: Tab or the
-    arrow keys move, Space or Enter choose, Esc closes. The buttons are pictures with a thick
-    frame around the focused one, so they look the same on every system."""
+    arrow keys move, Space or Enter choose, Esc closes. The rows are pictures on one canvas, with a
+    thick frame around the focused button, so they look the same on every system. A change draws
+    only the rows that changed, and scrolling only moves pictures: with a widget and fresh pictures
+    for every row, each click took seconds on a 2017 MacBook Air."""
 
     def __init__(self):
         super().__init__()
@@ -806,29 +876,33 @@ class Settings(SettingsModel):
         root.bind("<Escape>", self._escape)
         root.bind("<KeyPress>", self._key, add=True)
         root.bind("<KeyRelease>", self._key_up, add=True)
-        self.canvas = tk.Canvas(root, highlightthickness=0, bd=0)
+        self.canvas = tk.Canvas(root, highlightthickness=0, bd=0, takefocus=1)
         self.canvas.pack(fill="both", expand=True)
-        self.frame = tk.Frame(self.canvas, bd=0)
-        self.canvas.create_window(0, 0, window=self.frame, anchor="nw")
+        self.canvas.bind("<Button-1>", self._click)
+        self.canvas.bind("<Motion>", self._hover)
         for sequence in ("<MouseWheel>", "<Button-4>", "<Button-5>"):
             root.bind_all(sequence, self._wheel)
         try:  # Tk 9 on macOS reports two-finger scrolling on a touchpad as this, not as <MouseWheel>
             root.bind_all("<TouchpadScroll>", self._touchpad)
         except tk.TclError:  # Tk 8.6
             pass
-        self.images: list = []
-        self.buttons: list[tk.Label] = []
+        self.pictures: dict[tuple, object] = {}  # (look, focused): picture, for the rows on screen
+        self.rows_on_screen: list[Row] = []
+        self.buttons: list[Row] = []
+        self.focused: Row | None = None  # the button with the focus frame
         self.shown: list = []  # signature() of the rows on screen
+        self.line = BASE_PX  # a line of text's height, in pixels (how far the mouse wheel scrolls)
+        self.cursor = ""
+        self.pending_dy, self.scroll_job = 0, None  # scrolling not done yet (see scroll_pixels)
         self.down: dict[int, str | None] = {}  # during a key capture: the keys held down (code: name)
         self.lone: str | None = None  # a modifier pressed on its own: the key, if it is released so
-        self.focus_target = None
         self.placed_scale = None  # the text size the window was last centred for
         self.build()
         root.after(1000, self._watch)
         root.lift()
-        # Take the keyboard focus once the window is up, onto the first choice (a focus on the window
-        # itself would leave the arrow keys and Space with nothing to act on).
-        root.after(200, lambda: (self.focus_target or root).focus_force())
+        # Take the keyboard focus once the window is up (the keys go to the canvas, which passes them
+        # to the focused button).
+        root.after(200, self.canvas.focus_force)
 
     def refresh(self) -> None:
         self.build()
@@ -845,77 +919,86 @@ class Settings(SettingsModel):
 
     def _watch(self):
         """Show what changed elsewhere: a choice made in the tray menu, what dictation is doing, a
-        finished download."""
+        finished download. The view stays where it is (it may have been scrolled away from the focus)."""
         if not self.capturing:
             self.reload()
             if signature(self.rows()) != self.shown:
-                self.build()
+                self.build(follow=False)
         self.root.after(1000, self._watch)
 
     # --- layout ---
-    def build(self) -> None:
+    def _picture(self, look: tuple, focused: bool = False):
+        """A row's picture: drawn once, then reused while the row is on screen."""
+        picture = self.pictures.get((look, focused))
+        if picture is None:
+            picture = self.pictures[(look, focused)] = photo(row_image(look, focused))
+        return picture
+
+    def build(self, follow: bool = True) -> None:
+        """Lay out the rows, drawing only those not on screen before. follow: keep the focused button
+        in view (after a choice: rows above it may have come or gone); otherwise the first button in
+        view stays where it is on the screen."""
         self.root.title(t("Dictate settings"))  # (the interface language may have changed)
         focus_id = self.focus_id or self.last_focus_id
         self.focus_id = None
-        for child in self.frame.winfo_children():
-            child.destroy()
-        self.images.clear()
-        self.buttons.clear()
+        anchor = None
+        view_top = self.canvas.canvasy(0)
+        if not follow and view_top > 0:
+            first = next((b for b in self.buttons if b.top >= view_top), None)
+            if first is not None:
+                anchor = (first.row_id, first.top - view_top)
         fg, bg, accent = SCHEMES.get(self.ui.ui_colors, SCHEMES["yellow-on-black"])
         px = int(BASE_PX * self.ui.ui_scale * self.root.winfo_fpixels("1i") / 96)
+        self.line = int(px * 1.3)
         _x0, _y0, sw, sh = primary_monitor(self.root)
         width = int(min(sw * 0.9, px * 30))
         pad, ring = px // 3, max(3, px // 6)
+        gap = max(1, ring // 2)  # above and below every row
         self.root.configure(bg=bg)
         self.canvas.configure(bg=bg)
-        self.frame.configure(bg=bg)
         rows = self.rows()
         self.shown = signature(rows)
+        self.canvas.delete("all")
+        laid: list[Row] = []
+        y = 0
         for row in rows:
+            row_id = action = None
             if row[0] in ("heading", "text"):
                 kind, text = row
                 size = int(px * 1.2) if kind == "heading" else px
-                lines = [(line, fg) for line in wrap(text, font(size), width - 2 * pad)] or [("", fg)]
-                image = photo(text_image(lines, width, size, bg, pad // 2 if kind == "text" else pad))
-                widget = tk.Label(self.frame, image=image, bd=0, bg=bg, highlightthickness=0)
-                self.images.append(image)
+                look = ("text", text, fg, bg, width, size, width - 2 * pad, pad // 2 if kind == "text" else pad)
             else:
                 _, row_id, label, mark, enabled, action, *scheme = row
                 own_fg, own_bg = SCHEMES[scheme[0]][:2] if scheme else (fg, bg)
                 colour = own_fg if enabled else mix(own_fg, own_bg)  # greyed out
-                inner = width - 2 * ring
-                lines = wrap(label, font(px), inner - 2 * pad - mark_width(px))
-                image = text_image([(line, colour) for line in lines], inner, px, own_bg, pad, mark)
-                images = (photo(framed(image, ring, bg)), photo(framed(image, ring, accent)))  # (focused: framed)
-                widget = tk.Label(self.frame, image=images[0], bd=0, bg=bg, highlightthickness=0, takefocus=1,
-                                  cursor="hand2")
-                widget.row_id, widget.images, widget.action = row_id, images, action if enabled else None
-                widget.bind("<FocusIn>", self._focus_in)
-                widget.bind("<FocusOut>", lambda e: e.widget.configure(image=e.widget.images[0]))
-                widget.bind("<Button-1>", self._click)
-                for key in ("<Return>", "<KP_Enter>", "<space>"):  # "break": the key stops here, so it
-                    widget.bind(key, self._press)  # can't start a key capture
-                widget.bind("<Down>", lambda e: self._move(e.widget, 1))
-                widget.bind("<Up>", lambda e: self._move(e.widget, -1))
-                self.buttons.append(widget)
-                self.images.extend(images)
-            widget.pack(anchor="w", padx=0, pady=max(1, ring // 2))
-        self.root.update_idletasks()
-        height = min(self.frame.winfo_reqheight(), int(sh * 0.9))
-        self.canvas.configure(width=self.frame.winfo_reqwidth(), height=height,
-                              scrollregion=(0, 0, self.frame.winfo_reqwidth(), self.frame.winfo_reqheight()))
-        self.root.update_idletasks()  # (the view's new size, before a focus change scrolls it)
+                look = ("button", label, mark, colour, own_bg, width, px, pad, ring, bg, accent)
+                action = action if enabled else None
+            picture = self._picture(look)
+            y += gap
+            laid.append(Row(look, y, picture.height(), self.canvas.create_image(0, y, image=picture, anchor="nw"),
+                            row_id, action))
+            y += picture.height() + gap
+        self.rows_on_screen = laid
+        self.buttons = [r for r in laid if r.row_id is not None]
+        self.canvas.configure(width=width, height=min(y, int(sh * 0.9)), scrollregion=(0, 0, width, y))
+        self.focused = None
+        target = None if self.capturing else next((b for b in self.buttons if b.row_id == focus_id),
+                                                   self.buttons[0] if self.buttons else None)
+        self._set_focus(target, scroll=False)  # (keys go to the capture then, not to a button)
+        used = {(r.look, False) for r in laid} | ({(target.look, True)} if target else set())
+        self.pictures = {k: v for k, v in self.pictures.items() if k in used}
+        self.root.update_idletasks()  # (the view's new size, before it is scrolled)
         if self.placed_scale != self.ui.ui_scale:  # opened, or the text size changed
             self.placed_scale = self.ui.ui_scale
             self._place()
-        if self.capturing:  # keys go to the capture, not to a button (Space or Enter would press it)
-            self.canvas.focus_set()
-            self._scroll_to(None, next((b for b in self.buttons if b.row_id == "key:change"), None))
-            return
-        target = next((b for b in self.buttons if b.row_id == focus_id), self.buttons[0] if self.buttons else None)
-        self.focus_target = target
-        if target is not None:
-            target.focus_set()
+        if anchor is not None:
+            row = next((b for b in self.buttons if b.row_id == anchor[0]), None)
+            if row is not None and y > 0:
+                self.canvas.yview_moveto(max(0, row.top - anchor[1]) / y)
+        if self.capturing:
+            self._scroll_to(next((b for b in self.buttons if b.row_id == "key:change"), None))
+        elif follow:
+            self._scroll_to(target)
 
     def _place(self) -> None:
         """Centre the window on the primary monitor's usable area (Windows opens it where it opens
@@ -924,35 +1007,76 @@ class Settings(SettingsModel):
         w, h = self.root.winfo_reqwidth(), self.root.winfo_reqheight()
         self.root.geometry(f"+{x0 + max(0, (sw - w) // 2)}+{y0 + max(0, (sh - h) // 2)}")
 
-    def _focus_in(self, event) -> None:
-        event.widget.configure(image=event.widget.images[1])
-        self.last_focus_id = event.widget.row_id
-        self._scroll_to(event)
+    def _set_focus(self, row: Row | None, scroll: bool = True) -> None:
+        """Move the focus frame to this button (None: to none of them)."""
+        if self.focused is not None and self.focused is not row:
+            self.canvas.itemconfigure(self.focused.item, image=self._picture(self.focused.look))
+        self.focused = row
+        if row is not None:
+            self.last_focus_id = row.row_id
+            self.canvas.itemconfigure(row.item, image=self._picture(row.look, True))
+            if scroll:
+                self._scroll_to(row)
+
+    def _row_at(self, event) -> Row | None:
+        y = self.canvas.canvasy(event.y)
+        return next((b for b in self.buttons if b.top <= y < b.top + b.height), None)
 
     def _click(self, event) -> None:
-        event.widget.focus_set()
-        self._press(event)
+        self.canvas.focus_set()
+        if self.capturing:  # (a click is no key: the capture ends, as with Esc)
+            self.cancel_capture()
+            return
+        row = self._row_at(event)
+        if row is not None:
+            self._set_focus(row, scroll=False)  # (it is under the pointer: no scrolling under it)
+            self._press(row)
+
+    def _hover(self, event) -> None:
+        row = self._row_at(event)
+        cursor = "hand2" if row is not None and row.action is not None else ""
+        if cursor != self.cursor:
+            self.cursor = cursor
+            self.canvas.configure(cursor=cursor)
 
     @staticmethod
-    def _press(event) -> str:
-        if event.widget.action is not None:
-            event.widget.action()
+    def _press(row: Row | None) -> None:
+        if row is not None and row.action is not None:
+            row.action()
+
+    def _navigate(self, event) -> str | None:
+        """The keys that move the focus frame (Tab and Shift+Tab, the arrows, Home and End, Page Up and
+        Page Down) and choose (Space, Enter)."""
+        name = event.keysym
+        if name in ("Return", "KP_Enter", "space"):
+            self._press(self.focused)
+            return "break"
+        if not self.buttons:
+            return None
+        last = len(self.buttons) - 1
+        i = self.buttons.index(self.focused) if self.focused in self.buttons else 0
+        if name == "Tab" and event.state & 0x1:  # Shift (X11 names Shift+Tab ISO_Left_Tab)
+            name = "ISO_Left_Tab"
+        if name in ("Tab", "ISO_Left_Tab"):  # round from the last to the first, as Tab goes elsewhere
+            i = (i + (1 if name == "Tab" else -1)) % len(self.buttons)
+        elif name in ("Down", "Up", "KP_Down", "KP_Up"):  # (not round)
+            i = max(0, min(last, i + (1 if name.endswith("Down") else -1)))
+        elif name in ("Home", "End"):
+            i = 0 if name == "Home" else last
+        elif name in ("Prior", "Next"):  # about a window's height up or down
+            y = self.buttons[i].top + (1 if name == "Next" else -1) * self.canvas.winfo_height() * 0.8
+            i = min(range(len(self.buttons)), key=lambda k: abs(self.buttons[k].top - y))
+        else:
+            return None
+        self._set_focus(self.buttons[i])
         return "break"
 
-    def _move(self, widget, step: int) -> str:
-        """Up and Down move to the button above or below (not round from the last to the first)."""
-        i = self.buttons.index(widget) + step if widget in self.buttons else -1
-        if 0 <= i < len(self.buttons):
-            self.buttons[i].focus_set()
-        return "break"
-
-    def _scroll_to(self, event, widget=None) -> None:
-        """Keep the focused button (and the message just above it) in view."""
-        widget = widget or (event.widget if event is not None else None)
-        if widget is None or not self.canvas.winfo_viewable():  # macOS Tk focuses before the window
+    def _scroll_to(self, row: Row | None) -> None:
+        """Keep a button (and the message just above it) in view."""
+        if row is None or not self.canvas.winfo_viewable():  # macOS Tk focuses before the window
             return  # shows, when the view isn't its real size yet (it starts at the top anyway)
-        total = max(1, self.frame.winfo_reqheight())
-        top, bottom = widget.winfo_y(), widget.winfo_y() + widget.winfo_height()
+        total = max(1, self.rows_on_screen[-1].top + self.rows_on_screen[-1].height if self.rows_on_screen else 1)
+        top, bottom = row.top, row.top + row.height
         view_top, view_bottom = (f * total for f in self.canvas.yview())
         if top < view_top:  # scrolling up: leave a third of the view above it (its heading, a message)
             self.canvas.yview_moveto(max(0.0, top - (view_bottom - view_top) / 3) / total)
@@ -960,14 +1084,22 @@ class Settings(SettingsModel):
             self.canvas.yview_moveto((bottom - (view_bottom - view_top)) / total)
 
     def _wheel(self, event) -> None:
-        delta = -1 if getattr(event, "num", 0) == 4 or getattr(event, "delta", 0) > 0 else 1
-        self.canvas.yview_scroll(delta * 3, "units")
+        self.scroll_pixels(wheel_pixels(getattr(event, "num", 0), getattr(event, "delta", 0), self.line))
 
     def _touchpad(self, event) -> None:
         self.scroll_pixels(touchpad_dy(event.delta))
 
     def scroll_pixels(self, dy: int) -> None:
-        """Move the content by dy pixels, as the fingers moved (positive: down, towards the top)."""
+        """Move the content by dy pixels, as the fingers moved (positive: down, towards the top). The
+        movements that come in faster than the window draws are added up and made at once, so the
+        view never lags behind the fingers."""
+        self.pending_dy += dy
+        if self.scroll_job is None:
+            self.scroll_job = self.root.after_idle(self._scroll_now)
+
+    def _scroll_now(self) -> None:
+        self.scroll_job = None
+        dy, self.pending_dy = self.pending_dy, 0
         region = str(self.canvas.cget("scrollregion")).split()
         total = float(region[3]) if len(region) == 4 else 0.0
         if dy and total > 0:
@@ -988,7 +1120,7 @@ class Settings(SettingsModel):
 
     def _key(self, event) -> str | None:
         if not self.capturing:
-            return None
+            return self._navigate(event)
         code = event.keycode >> 24 if MACOS else event.keycode
         if code in self.down:  # still held: a repeat (Windows repeats held modifiers too)
             return "break"
