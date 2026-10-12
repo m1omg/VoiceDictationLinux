@@ -892,6 +892,7 @@ class Settings(SettingsModel):
         self.focused: Row | None = None  # the button with the focus frame
         self.shown: list = []  # signature() of the rows on screen
         self.line = BASE_PX  # a line of text's height, in pixels (how far the mouse wheel scrolls)
+        self.total = 0  # the rows' height, in pixels (the scroll region's)
         self.cursor = ""
         self.pending_dy, self.scroll_job = 0, None  # scrolling not done yet (see scroll_pixels)
         self.down: dict[int, str | None] = {}  # during a key capture: the keys held down (code: name)
@@ -978,7 +979,7 @@ class Settings(SettingsModel):
             laid.append(Row(look, y, picture.height(), self.canvas.create_image(0, y, image=picture, anchor="nw"),
                             row_id, action))
             y += picture.height() + gap
-        self.rows_on_screen = laid
+        self.rows_on_screen, self.total = laid, y
         self.buttons = [r for r in laid if r.row_id is not None]
         self.canvas.configure(width=width, height=min(y, int(sh * 0.9)), scrollregion=(0, 0, width, y))
         self.focused = None
@@ -1075,7 +1076,7 @@ class Settings(SettingsModel):
         """Keep a button (and the message just above it) in view."""
         if row is None or not self.canvas.winfo_viewable():  # macOS Tk focuses before the window
             return  # shows, when the view isn't its real size yet (it starts at the top anyway)
-        total = max(1, self.rows_on_screen[-1].top + self.rows_on_screen[-1].height if self.rows_on_screen else 1)
+        total = max(1, self.total)
         top, bottom = row.top, row.top + row.height
         view_top, view_bottom = (f * total for f in self.canvas.yview())
         if top < view_top:  # scrolling up: leave a third of the view above it (its heading, a message)
@@ -1100,10 +1101,8 @@ class Settings(SettingsModel):
     def _scroll_now(self) -> None:
         self.scroll_job = None
         dy, self.pending_dy = self.pending_dy, 0
-        region = str(self.canvas.cget("scrollregion")).split()
-        total = float(region[3]) if len(region) == 4 else 0.0
-        if dy and total > 0:
-            self.canvas.yview_moveto(max(0.0, self.canvas.yview()[0] - dy / total))
+        if dy and self.total > 0:
+            self.canvas.yview_moveto(max(0.0, self.canvas.yview()[0] - dy / self.total))
 
     # --- actions ---
     def key_name(self, event) -> str | None:
