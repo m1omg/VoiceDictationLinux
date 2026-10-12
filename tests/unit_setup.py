@@ -29,7 +29,7 @@ assert d.STATE_PATH.is_relative_to(TMP) and d.CONFIG_PATH.is_relative_to(TMP)
 sys.stdin = open(os.devnull)  # no terminal: every question takes its default
 downloads = []
 real_finish_setup = d.finish_setup
-d.finish_setup = lambda gpu_model, cpu_model, slovak="": downloads.append((gpu_model, cpu_model)) or 0
+d.finish_setup = lambda gpu_model, cpu_model: downloads.append((gpu_model, cpu_model)) or 0
 LAPTOP = models.Hardware(None, cores=4, ram_gb=16, laptop=True)
 checks = []
 
@@ -61,24 +61,6 @@ check("first install, Slovak on a 4-core laptop: turbo on the processor, Right C
       (state["language"], state["cpu_model"], state["trigger"], downloads[-1]),
       ("sk", "large-v3-turbo", "Alt_R" if d.MACOS else "Control_R", (None, "large-v3-turbo")))
 
-
-
-check("and no model fine-tuned for Slovak beside it unless one is asked for (off by default)", state["cpu_slovak"], "")
-fresh()
-state = setup(models.Hardware("nvidia", gpu_name="RTX 3060", vram_gb=12, cores=6, ram_gb=64), gpu="nvidia",
-              DICTATE_LANGUAGE="auto")
-check("both languages on a graphics card: turbo alone", (state["gpu_model"], state["gpu_slovak"]), ("large-v3-turbo", ""))
-fresh()
-state = setup(LAPTOP, DICTATE_LANGUAGE="auto", DICTATE_MODEL="small", DICTATE_SLOVAK_MODEL="small-sk")
-check("DICTATE_SLOVAK_MODEL=small-sk: small-sk beside small", (state["cpu_model"], state["cpu_slovak"]), ("small", "small-sk"))
-state = setup(LAPTOP)
-check("an update keeps a Slovak model chosen before", state["cpu_slovak"], "small-sk")
-fresh()
-state = setup(LAPTOP, DICTATE_LANGUAGE="en")
-check("English only: no Slovak model", state.get("cpu_slovak", ""), "")
-fresh()
-state = setup(LAPTOP, DICTATE_LANGUAGE="sk", DICTATE_SLOVAK_MODEL="none")
-check("DICTATE_SLOVAK_MODEL=none: none", state["cpu_slovak"], "")
 
 
 class EndedInput(io.StringIO):
@@ -132,7 +114,7 @@ check("a 12 GB graphics card, Slovak: one download serves both",
       (None, "large-v3-turbo", "large-v3-turbo", ("large-v3-turbo", "large-v3-turbo")))
 
 # --- the model check after the questions: the dictation that runs is stopped first, so the check has
-# the graphics card to itself (two sets of models with Slovak and English ones didn't fit on 12 GB) ---
+# the graphics card to itself ---
 import subprocess  # noqa: E402
 import threading  # noqa: E402
 import time  # noqa: E402

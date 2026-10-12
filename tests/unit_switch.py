@@ -36,19 +36,15 @@ d.notify = lambda summary, body="": notes.append(summary)
 
 class Worker:
     def __init__(self):
-        self.wanted, self.choice, self.loading = None, d.Worker.NOTHING, None
-        self.transcriber = SimpleNamespace(ready=threading.Event(), name=None, on_cpu=False, gpu_available=None,
-                                           slovak_wanted="")
+        self.wanted, self.choice, self.loading = None, ("auto", None, None), None
+        self.transcriber = SimpleNamespace(ready=threading.Event(), name=None, on_cpu=False, gpu_available=None)
 
     def want(self, choice):
         self.wanted = choice
 
     def loaded(self, choice, name, on_cpu=True):  # what the worker thread does after a load
         self.choice, self.wanted = choice, None
-        self.transcriber.name, self.transcriber.on_cpu, self.transcriber.gpu_available = name, on_cpu, not on_cpu
-        self.transcriber.slovak_wanted = choice[3] if not on_cpu else choice[4]
-        self.transcriber.english_wanted = choice[5] if not on_cpu else ""
-        self.transcriber.in_ram = choice[6]
+        self.transcriber.name, self.transcriber.on_cpu, self.transcriber.gpu_available = name, on_cpu, False
         self.transcriber.ready.set()
 
 
@@ -59,7 +55,7 @@ switch = d.ModelSwitch(ui, worker, SimpleNamespace(update=lambda **changes: None
 downloads = []
 switch.download = lambda name, key: downloads.append((name, key))
 switch.start()
-check("start-up: installed models stand in for missing ones", worker.wanted, ("cpu", "small", "small", "", "", "", False))
+check("start-up: installed models stand in for missing ones", worker.wanted, ("cpu", "small", "small"))
 worker.loaded(worker.wanted, "small")
 end = time.monotonic() + 5
 while not downloads and time.monotonic() < end:
@@ -86,64 +82,7 @@ switch.changed()
 check("picking it again retries", downloads[-1], ("large-v3-turbo", "cpu_model"))
 ui.set(cpu_model="base")
 switch.changed()
-check("an installed model is simply loaded", worker.wanted, ("cpu", ui.gpu_model, "base", "", "", "", False))
-
-# A model for Slovak, beside the general one: downloaded first (dictation goes on without it), then loaded.
-worker.loaded(worker.wanted, "base")
-downloads.clear()
-ui.set(cpu_slovak="small-sk")
-switch.changed()
-check("a Slovak model that isn't there is downloaded, nothing reloads meanwhile", (downloads, worker.wanted),
-      ([("small-sk", "cpu_slovak")], None))
-INSTALLED.add("small-sk")
-switch.changed()
-check("once it is there, it is loaded beside the general model", worker.wanted,
-      ("cpu", ui.gpu_model, "base", "", "small-sk", "", False))
-worker.loaded(worker.wanted, "base")
-worker.wanted = None
-switch.changed()
-check("nothing more to do while it runs", worker.wanted, None)
-ui.set(cpu_slovak="")
-switch.changed()
-check("none again: the general model alone", worker.wanted, ("cpu", ui.gpu_model, "base", "", "", "", False))
-worker.loaded(worker.wanted, "base")
-ui.set(cpu_slovak="base-sk")
-d.ModelSwitch._download(switch, "base-sk", "cpu_slovak")
-check("a failed Slovak download: the menu shows none again", (ui.cpu_slovak, notes[-1]),
-      ("", "The base-sk model could not be downloaded"))
-
-# Qwen for English: only on the graphics card; downloaded (with its environment) first.
-ui.set(english_model="qwen3-asr-1.7b")
-worker.wanted = None
-switch.changed()
-check("Qwen on the processor: nothing to load (it runs on NVIDIA graphics cards only)", worker.wanted, None)
-downloads.clear()
-worker.transcriber.gpu_available = True
-ui.set(device="gpu", gpu_model="small")
-switch.changed()
-check("on the graphics card: Qwen is downloaded first, the general model loads meanwhile",
-      (downloads, worker.wanted), ([("qwen3-asr-1.7b", "english_model")], ("gpu", "small", "base", "", "", "", False)))
-INSTALLED.add("qwen3-asr-1.7b")
-worker.loaded(worker.wanted, "small", on_cpu=False)
-worker.transcriber.english_wanted = ""
-switch.changed()
-check("once it is there, it is started beside the general model", worker.wanted,
-      ("gpu", "small", "base", "", "", "qwen3-asr-1.7b", False))
-
-# Where the extra models wait between uses (RAM, or only on disk): switching it loads them again that way.
-worker.loaded(worker.wanted, "small", on_cpu=False)
-ui.set(extras_in_ram=True)
-switch.changed()
-check("the extra models kept in RAM instead: they load again that way", worker.wanted,
-      ("gpu", "small", "base", "", "", "qwen3-asr-1.7b", True))
-worker.loaded(worker.wanted, "small", on_cpu=False)
-ui.set(english_model="")
-switch.changed()
-worker.loaded(worker.wanted, "small", on_cpu=False)
-worker.wanted = None
-ui.set(extras_in_ram=False)
-switch.changed()
-check("without extra models the switch changes nothing (nothing reloads)", worker.wanted, None)
+check("an installed model is simply loaded", worker.wanted, ("cpu", ui.gpu_model, "base"))
 
 for name, good, got, want in checks:
     print(f"{'ok  ' if good else 'FAIL'} {name}" + ("" if good else f": got {got!r}, want {want!r}"))

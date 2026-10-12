@@ -727,9 +727,8 @@ class SettingsModel:
                      lambda: self.set(tap=not ui.tap)))
         rows.append(("button", "sounds", t("Sounds"), f"check:{on(ui.sounds)}", True,
                      lambda: self.set(sounds=not ui.sounds)))
-        rows.append(("heading", t("Main model (runs on the graphics card)") if on_gpu
-                     else t("Main model (runs on the processor)")))
-        rows.append(("text", t("Types while you speak and recognizes the language; does what the models below don't") + "."))
+        rows.append(("heading", t("Speech model (runs on the graphics card)") if on_gpu
+                     else t("Speech model (runs on the processor)")))
         downloading = status.get("download") or ""
         for name, (_repo, _mb, info) in models.MODELS.items():
             if downloading.startswith(name + " "):
@@ -740,40 +739,6 @@ class SettingsModel:
                 note = ""
             rows.append(("button", f"model:{name}", f"{name}: {t(info)}{note}", f"radio:{on(current == name)}", True,
                          lambda n=name: self.set(**{model_key: n})))
-        slovak_key = "gpu_slovak" if on_gpu else "cpu_slovak"
-        slovak = getattr(ui, slovak_key)
-        rows.append(("heading", t("Model for Slovak")))
-        rows.append(("text", t("Writes Slovak after you release the key (not while typing as you speak)") + "."))
-        rows.append(("button", "slovak:none", t("None: the main model does Slovak too"), f"radio:{on(not slovak)}",
-                     True, lambda: self.set(**{slovak_key: ""})))
-        for name, (_repo, _revision, _download_mb, _mb, info) in models.SLOVAK.items():
-            if downloading.startswith(name + " "):
-                note = t(", downloading {progress}", progress=downloading.split(" ", 1)[1])
-            elif not models.installed(self.d.MODELS_DIR, name):
-                note = t(", download {size}", size=models.size_label(name))
-            else:
-                note = ""
-            rows.append(("button", f"slovak:{name}", f"{name}: {t(info)}{note}", f"radio:{on(slovak == name)}", True,
-                         lambda n=name: self.set(**{slovak_key: n})))
-        english = ui.english_model
-        rows.append(("heading", t("Model for English")))
-        rows.append(("text", t("Writes English after you release the key (not while typing as you speak)") + "."))
-        rows.append(("button", "english:none", t("None: the main model does English too"), f"radio:{on(not english)}",
-                     True, lambda: self.set(english_model="")))
-        for name, (_repo, _revision, _mb, info) in models.QWEN.items():
-            if not on_gpu:
-                note = ", " + t("needs an NVIDIA graphics card")
-            elif downloading.startswith(name + " "):
-                note = t(", downloading {progress}", progress=downloading.split(" ", 1)[1])
-            elif not models.installed(self.d.MODELS_DIR, name):
-                note = t(", download {size}", size=models.size_label(name, not models.qwen_runtime_ready(self.d.MODELS_DIR)))
-            else:
-                note = ""
-            rows.append(("button", f"english:{name}", f"{name}: {t(info)}{note}", f"radio:{on(english == name)}",
-                         on_gpu or english == name, lambda n=name: self.set(english_model=n)))
-        rows.append(("button", "extras_ram", t("Keep extra models in RAM (faster, uses more memory)"),
-                     f"check:{on(ui.extras_in_ram)}", on_gpu and bool(slovak or english),
-                     lambda: self.set(extras_in_ram=not ui.extras_in_ram)))
         rows.append(("heading", t("Run on")))
         rows.append(("button", "device:gpu", t("Graphics card (GPU)") if gpu_ok else t("Graphics card (GPU): none can be used"),
                      f"radio:{on(on_gpu)}", gpu_ok, lambda: self.set(device="gpu")))

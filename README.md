@@ -128,8 +128,7 @@ bash install.sh
 Set the answers beforehand, for example to install on many computers:
 `DICTATE_LANGUAGE=en|sk|auto`, `DICTATE_MODEL=tiny|base|small|medium|large-v3-turbo`,
 `DICTATE_KEY=KP_Delete|Control_R|Alt_R|"Ctrl+Alt+D"|…`, `DICTATE_LARGE_UI=off|panel|both`,
-`DICTATE_UI_LANGUAGE=en|sk` (the first question),
-`DICTATE_SLOVAK_MODEL=large-v3-turbo-sk|medium-sk|small-sk|base-sk|none`;
+`DICTATE_UI_LANGUAGE=en|sk` (the first question);
 `DICTATE_NO_AUTOSTART=1` skips start-at-login (otherwise it stays as the menu's *Start at login*
 last left it). On Linux and macOS:
 `DICTATE_MODEL=small bash install.sh`; on Windows, in PowerShell:
@@ -164,23 +163,10 @@ last left it). On Linux and macOS:
   - **Tap to start and stop:** whether a quick tap starts a dictation that lasts until the next
     press. Holding the key works either way.
   - **Sounds:** the beeps, on or off.
-  - **Main model:** the speech model that types while you speak, recognizes the language, and does
-    whatever the models for Slovak and English below don't (with neither chosen, everything); see
-    [Speech models](#speech-models). A model that isn't downloaded yet shows its size; picking it
-    downloads it, then switches to it.
+  - **Speech model:** see [Speech models](#speech-models). A model that isn't downloaded yet shows
+    its size; picking it downloads it, then switches to it.
   - **Run on: graphics card / processor.** The graphics card is greyed out when there is none that
     can run the model.
-  - **Model for Slovak:** a model fine-tuned for Slovak, used only for Slovak text written after
-    you release the key; see
-    [Models fine-tuned for Slovak](#models-fine-tuned-for-slovak).
-  - **Model for English:** Qwen3-ASR (NVIDIA graphics cards), used only for English text written
-    after you release the key; see
-    [Qwen3-ASR for English](#qwen3-asr-for-english).
-  - **Keep extra models in RAM:** where the models for Slovak and English wait while they aren't
-    needed. Only the main model stays on the graphics card; an extra model joins it while you
-    dictate in its language (and 30 s after), one at a time. Off (the default): they are read from
-    disk again, in about 1 s, and take no memory of their own; on: they wait in RAM and are back in
-    about 0.3 s, but take 2-6 GB of it. Either way this usually happens while you are still speaking.
   - **Status pop-up while dictating:** *Automatic* (the small one, when the model runs on the
     processor), *Small*, *Large, for low vision* (the big panel, see
     [Large text](#large-text-for-low-vision)) or *Off*. It shows *Listening*, then *Transcribing…*
@@ -245,73 +231,11 @@ Measured word error rates and times are under [Accuracy and speed](#accuracy-and
   auto-detect: large-v3-turbo with 4 or more cores and 6 GB of memory (about 4 s per sentence),
   otherwise small. Tiny or base with very little memory. On a graphics card it also downloads that
   model for the processor, in case the card can't be used.
-- **Switching:** *Main model* in the menu or the settings window. The menu lists the model for
+- **Switching:** *Speech model* in the menu or the settings window. The menu lists the model for
   where dictation runs now: switch *Run on* first to choose the other one. A dictation started
   while a model loads still records and waits for it.
 - **Live typing** starts switched off without a graphics card: repeated live passes are too heavy
   for most processors. Switch it on in the menu to try it.
-
-### Models fine-tuned for Slovak
-[KInIT](https://kinit.sk) fine-tuned Whisper on Slovak speech. These models get about a third as
-many Slovak words wrong, but have lost most of their English, and they write plain lowercase words
-without any punctuation. So dictation uses one only for Slovak (chosen in the menu, or detected),
-and only for what is transcribed after you let go: its words, with the punctuation and capitals of
-the main model (the speech model above), which still detects the language, writes English and
-types live. Choose one under *Model for Slovak* in the menu or the settings window, or in the
-installer (it asks when you dictate Slovak or both languages).
-
-They are off unless you choose one, and the installer suggests none: in everyday dictation the
-difference was hard to notice, while each Slovak dictation takes about twice as long to transcribe
-and the model needs memory of its own.
-
-| Model | Download | Disk | Suits |
-|---|---|---|---|
-| large-v3-turbo-sk | 3.2 GB | 1.6 GB | a graphics card (next to large-v3-turbo) |
-| medium-sk | 3.1 GB | 1.5 GB | fast processors |
-| small-sk | 966 MB | 484 MB | computers without a graphics card (next to small or base) |
-| base-sk | 290 MB | 145 MB | slow processors |
-
-- KInIT's own test (Common Voice 24, Slovak): large-v3-turbo-sk 9.3 % of the words wrong against
-  29.2 % for large-v3-turbo; on their held-out set 5.6 % against 18.4 %, and small-sk 8.6 %
-  against 47.9 % for small. Here, on the FLEURS sentences: large-v3-turbo-sk 2.1 % against 6.4 %
-  (graphics card); on the processor small-sk 1.5 % (1.6 s per sentence) and base-sk 7.4 % (0.7 s).
-  FLEURS was part of their training data, so these flatter them; English with them: 70 % wrong.
-- Counting punctuation and capitals too, large-v3-turbo-sk with large-v3-turbo's punctuation gets
-  5.3 % wrong against 8.9 % for large-v3-turbo alone. Two models transcribe each Slovak dictation:
-  on a graphics card 0.7 s instead of 0.35 s for a sentence.
-- With *Type while speaking*, the words typed live come from the main model, as before;
-  only a dictation that wasn't typed live gets the Slovak model's words.
-- They come in Hugging Face's format and are converted on your computer after the download
-  (`convert.py`, a few seconds, no extra software); the download is about twice the final size.
-- On an NVIDIA graphics card the Slovak model is on it only while you dictate Slovak (and 30 s
-  after), not all the time: about 1.6 GB of its memory. Otherwise it waits in RAM or on disk (the
-  menu's *Keep extra models in RAM*). On other graphics cards both models stay loaded.
-
-### Qwen3-ASR for English
-[Qwen3-ASR](https://huggingface.co/Qwen/Qwen3-ASR-1.7B) (Alibaba's Qwen team) gets fewer English
-words wrong than Whisper: 2.9 % against large-v3-turbo's 3.9 % on the FLEURS sentences. It doesn't
-know Slovak (Slovak speech comes out as Czech), so like the Slovak models it is used only for
-English, beside the main model, which detects the language. Choose it under *Model for English*;
-it is off unless you do (the installer doesn't offer it).
-
-| Model | Download | Suits |
-|---|---|---|
-| qwen3-asr-1.7b | 4.7 GB + 4.0 GB of software, the first time | an NVIDIA graphics card |
-| qwen3-asr-0.6b | 1.9 GB + 4.0 GB of software, the first time | an NVIDIA graphics card |
-
-- It runs on PyTorch, which the first Qwen model installs into a folder of its own next to the
-  program (`qwen-venv`, 7 GB on disk), and in a process of its own. It is on the graphics card only
-  while you dictate English (and 30 s after): about 4 GB of its memory. Otherwise its weights wait in
-  RAM (about 4 GB of it) or only on disk, as the menu's *Keep extra models in RAM* says.
-- NVIDIA graphics cards only: on a processor it takes about as long as the speech itself.
-- Only what is transcribed after you let go goes to Qwen; words typed live come from the main
-  model (Qwen has no word timings of its own). Silence is cut out before it hears the recording.
-- If a Qwen pass fails or takes too long, the main model does that dictation; if Qwen stops, a
-  notification says so and the main model does English until you choose Qwen again.
-- Qwen isn't told the language. If auto-detect took Slovak for English, Qwen hears it as Czech, and
-  the dictation is transcribed as Slovak instead (10 of 10 such recordings in the tests).
-- Measured with everything loaded on an RTX 3060: English 2.6 % (0.5 s per sentence), Slovak with
-  large-v3-turbo-sk 2.1 % (0.7 s).
 
 ## The dictation key
 - **Defaults:** numpad **Del / "."** on keyboards with a numpad; the installer suggests **Right Ctrl**
