@@ -415,6 +415,11 @@ input, `windows_paste.py`, and `e2e_desktop.py` / `e2e_x11.py`. It is started by
   - No vocabulary hints on windows shorter than 2 s (Whisper echoes them).
   - Earlier, simpler variants were clearly worse (Slovak WER 15.9 %, invented words). Re-run
     `tests/bench_live.py` after any change.
+- **Recordings to test on** (`keep_recordings = N` in config.toml, default 0): `Worker._final` keeps
+  the last N dictations as 16 kHz WAV files in `APP_DIR/recordings` (mode 0700; the name says the
+  mode, the language decided and the length), deleting older ones. Only with the user's consent;
+  switch it off and delete them when the tests are done. Run them through `Transcriber` like the
+  FLEURS files, at low priority and after asking (the user notices GPU load while working).
 - **Updates** (`update.py`, standard library only): *Check for updates* asks GitHub's API for main's
   newest commit and the git blob SHA-1 of its root files, and compares them with the installed
   program files (`PROGRAM`: what the installers copy), so it works however the program was

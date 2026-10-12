@@ -70,6 +70,7 @@ else:
     STATE_PATH = Path(os.environ.get("XDG_STATE_HOME") or Path.home() / ".local/state") / "dictate/state.json"
     RUNTIME_DIR = Path(os.environ.get("XDG_RUNTIME_DIR") or f"/run/user/{os.getuid()}")
 MODELS_DIR = APP_DIR / "models"
+RECORDINGS_DIR = APP_DIR / "recordings"  # config keep_recordings: the last dictations, as 16 kHz WAV files
 # Between dictation and its settings window (RUNTIME_DIR is shared with other programs on Linux):
 STATUS_PATH = RUNTIME_DIR / "dictate-status.json"  # what dictation is doing, for the window
 COMMAND_PATH = RUNTIME_DIR / "dictate-command"  # "quit" from the window's Stop button
@@ -116,6 +117,7 @@ DEFAULTS = {
     "paste_chunk_chars": 750,
     "tail_ms": 200,
     "max_seconds": 300,
+    "keep_recordings": 0,  # keep the last N dictations as audio files (recordings/), to test changes on your voice
     "status_popup": "auto",  # a small pop-up while dictating: "auto" (when the model runs on the processor), "on", "off"
     "big_panel": False,  # large-text mode (low vision): a big status panel while dictating (instead),
     "big_settings": False,  # clicking the tray icon opens the big settings window,
@@ -1478,6 +1480,24 @@ def confidence(segments) -> float:
     return sum(seg.avg_logprob * len(seg.tokens or ()) for seg in segments) / tokens
 
 
+def keep_recording(cfg, audio: np.ndarray, label: str, folder: Path | None = None) -> None:
+    """Save a dictation's audio when the settings ask for it (keep_recordings = N: the last N are kept,
+    older ones deleted), in a folder only this user can read: real recordings to test changes on."""
+    keep = getattr(cfg, "keep_recordings", 0)
+    if keep <= 0 or audio is None or not audio.size:
+        return
+    folder = folder or RECORDINGS_DIR
+    folder.mkdir(mode=0o700, parents=True, exist_ok=True)
+    path = folder / f"{time.strftime('%Y-%m-%d_%H-%M-%S')}_{label}.wav"
+    with wave.open(str(path), "wb") as out:
+        out.setnchannels(1)
+        out.setsampwidth(2)
+        out.setframerate(RATE)
+        out.writeframes((np.clip(audio, -1.0, 1.0) * 32767).astype("<i2").tobytes())
+    for old in sorted(folder.glob("*.wav"))[:-keep]:
+        old.unlink(missing_ok=True)
+
+
 def describe_parts(parts: list[tuple[int, int, str]]) -> str:
     """For the log: "sk 0.0-7.9 s, en 7.9-15.2 s"."""
     return ", ".join(f"{language} {start / RATE:.1f}-{end / RATE:.1f} s" for start, end, language in parts)
@@ -1876,6 +1896,10 @@ class Worker(threading.Thread):
             self._show(s, piece, final=True)
         elif piece or typed_live:
             self.paster.put(PasteItem(piece, s, final=True))
+        try:
+            keep_recording(self.cfg, s.audio, f"{s.mode}-{s.language or 'none'}-{seconds:.1f}s")
+        except OSError as e:
+            log.warning("could not keep the recording: %s", e)
 
     def _final_instant(self, s: Session) -> tuple[str, None]:
         """Instant mode after release: the whole text, with the end transcribed once more. In auto mode

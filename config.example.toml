@@ -16,6 +16,7 @@ sound_volume = 0.5            # 0.0 - 1.0 (sounds themselves are switched on/off
 
 tail_ms = 200                 # keep recording this long after you let go, so the last word isn't cut off
 max_seconds = 300             # safety limit for a single dictation
+keep_recordings = 0           # keep the last N dictations as audio files in recordings/ (to test on your voice)
 
 # Linux: "auto" picks "wayland" (GNOME, KDE: global-shortcut portal + /dev/uinput) or "x11"
 # (Cinnamon, XFCE, MATE: X11 key grab + XTEST) from the session type.
