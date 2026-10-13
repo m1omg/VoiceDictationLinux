@@ -1338,36 +1338,10 @@ def _spelling_rules(table: str, language: str | None) -> list:
         fixes.update({k: v for k, v in replacements[language].items() if isinstance(v, str)})
     rules = []
     for wrong in sorted(fixes, key=len, reverse=True):
-        pattern = _fix_pattern(wrong)
-        if pattern:
-            rules.append((pattern, fixes[wrong]))
+        words = [re.escape(w) for w in wrong.split()]
+        if words:  # (a space also matches a hyphen, or nothing: "Cashew-OS", "cashewOS")
+            rules.append((re.compile(r"(?<![\w])" + r"[\s-]*".join(words) + r"(?![\w])", re.IGNORECASE), fixes[wrong]))
     return rules
-
-
-def _fix_pattern(wrong: str):
-    """A fix's left side as a pattern: its words with a space matching a hyphen or nothing too
-    ("Cashew-OS", "cashewOS"); a word ending in * matches any ending; words in [brackets] at its
-    start or end must be there (a comma between allowed) but stay as they are. None if malformed."""
-    def word(w: str) -> str:
-        return re.escape(w[:-1]) + r"\w*" if w.endswith("*") and len(w) > 1 else re.escape(w)
-    before, core, after = [], [], []
-    for w in wrong.split():
-        if len(w) > 2 and w[0] == "[" and w[-1] == "]":
-            if core:
-                after.append(word(w[1:-1]))
-            else:
-                before.append(word(w[1:-1]))
-        elif after:  # (the context must be at the start or the end)
-            return None
-        else:
-            core.append(word(w))
-    if not core:
-        return None
-    between = r"[\s,;:–-]+"  # (between a context word and the rest)
-    pattern = (r"(?<![\w])" + (r"(?P<before>" + between.join(before) + between + ")" if before else "")
-               + r"(?P<core>" + r"[\s-]*".join(core) + ")"
-               + (r"(?P<after>" + between + between.join(after) + ")" if after else "") + r"(?![\w])")
-    return re.compile(pattern, re.IGNORECASE)
 
 
 def fix_spelling(text: str, cfg, language: str = "en", starts_sentence: bool = True, context: str = "") -> str:
@@ -1388,11 +1362,9 @@ def fix_spelling(text: str, cfg, language: str = "en", starts_sentence: bool = T
         starts = starts_sentence if k == 0 else True
 
         def fix(match, right):
-            groups = match.groupdict()
-            kept_before, kept_after = groups.get("before") or "", groups.get("after") or ""
-            if match.group("core")[:1].isupper() and not kept_before and not sentence[:match.start()].strip() and starts:
-                right = right[:1].upper() + right[1:]
-            return kept_before + right + kept_after
+            if match.group()[:1].isupper() and (not sentence[:match.start()].strip() and starts):
+                return right[:1].upper() + right[1:]
+            return right
         for pattern, right in _spelling_rules(table, sentence_language):
             sentence = pattern.sub(lambda m: fix(m, right), sentence)
         out.append(sentence)

@@ -4,8 +4,8 @@
 # Every setting is optional; deleting a line restores its default.
 
 # Words Whisper should spell exactly like this (names, jargon). Keep the list short: Whisper also
-# hears them in words that only sound alike (CachyOS for "cashew"). Spelling fixes ([replacements]
-# at the end of this file) can undo such guesses, and fix a word without a hint.
+# hears them in words that only sound alike (CachyOS for "cashew"). For a word like that, use a
+# spelling fix instead ([replacements] at the end of this file).
 vocabulary = ["Claude", "Claude Code", "GNOME", "Wayland", "Python", "Git", "GitHub", "Linux"]
 
 beam_size = 5                 # on a graphics card: 1 = fastest, 5 = most accurate
@@ -58,17 +58,11 @@ backend = "auto"
 # panel_position = "bottom"
 
 # Spelling fixes: when Whisper writes the left side, the right side is typed instead. Whole words,
-# any capitals; a space also matches a hyphen or no space; a word ending in * matches any ending;
-# words in [brackets] at the start or end must be there (a comma may stand between) but stay as they
-# are. A table under [replacements.sk] or [replacements.en] applies only to sentences in that
-# language. (A table, so it goes last in this file.)
+# any capitals; a space also matches a hyphen or no space. A table under [replacements.sk] or
+# [replacements.en] applies only to text in that language. (A table, so it goes last in this file.)
 # [replacements]
-# "cache OS" = "CachyOS"
+# "cachy OS" = "CachyOS"
 # "cashew OS" = "CachyOS"
 #
-# [replacements.en]
-# "CachyOS nuts" = "cashew nuts"
-#
 # [replacements.sk]
-# "Cachy" = "kešu"
-# "[oriešk*] CachyOS" = "kešu"      # (only right after oriešky, orieškov, ...)
+# "cashew" = "kešu"
