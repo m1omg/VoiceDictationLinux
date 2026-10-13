@@ -419,13 +419,15 @@ input, `windows_paste.py`, and `e2e_desktop.py` / `e2e_x11.py`. It is started by
   prompt), so Whisper also writes those words for similar sounds: on the user's recordings
   "CachyOS" took "kešu" (Slovak cashew) and "cashew nuts" ("Cachy Orešky", "CachyOS nuts").
   Without CachyOS in it, "cashew" stayed itself and a spoken "CachyOS" came out "Cashew OS", which
-  `replacements` (`fix_spelling()`: whole words, any capitals, a space also matching a hyphen or
-  nothing, longest first, a capital at a sentence start; `[replacements.sk]` only in Slovak text)
+  `replacements` (`fix_spelling()`, `_fix_pattern()`: whole words, any capitals, a space also
+  matching a hyphen or nothing, `word*` any ending, `[context]` words at the start or end required
+  but kept (punctuation allowed between), longest first, a capital at a sentence start;
+  `[replacements.sk]` only in sentences that look Slovak)
   turns into CachyOS. It runs in `clean_text` and on each piece `LiveText.add` types (a phrase
   split over two typed pieces isn't fixed). But without the hint the user's spoken CachyOS was
   mostly unusable ("Catch you all this", "What is she always?", 0/5), so the hint stays and their
-  config.toml's `replacements` undo its guesses ("Cachy" → kešu in Slovak sentences, "CachyOS nuts"
-  → cashew nuts) and catch the spellings that come without it ("Cache iOS", "CacheOS", "Cachou"):
+  config.toml's `replacements` undo its guesses ("Cachy" → kešu in Slovak sentences, CachyOS next
+  to oriešky/orechy in either order → kešu, "CachyOS nuts" → cashew nuts) and catch the spellings that come without it ("Cache iOS", "CacheOS", "Cachou"):
   4/5 and 5/5 with that fix, kešu/cashew right (measured on their kept recordings, 2026-10-13). The
   hint written as an English sentence instead of a list got 5/5 but translated a Slovak dictation
   into English: keep it a list.

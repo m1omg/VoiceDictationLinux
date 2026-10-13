@@ -269,6 +269,17 @@ check("the Slovak fixes go by how a sentence looks: a Slovak sentence in a pass 
 live_text = d.LiveText(fixes)
 typed = [live_text.add([(0, 1, " Dám"), (1, 2, " si")], "en"), live_text.add([(2, 3, " Cashew.")], "en")]
 check("... live, judged with the unfinished sentence typed before", typed, ["Dám si", " kešu."])
+context = types.SimpleNamespace(**{**vars(cfg), "replacements": {
+    "sk": {"orešky": "oriešky", "[orešk*] CachyOS": "kešu", "[oriešk*] CachyOS": "kešu", "CachyOS [oriešk*]": "kešu",
+           "CachyOS [orech*]": "kešu"},
+    "en": {"CachyOS [nut*]": "cashew"}}})
+check("a word in [brackets] must be there and stays; * matches any ending; a comma may stand between",
+      d.fix_spelling("Hello, hello, Orešky, CachyOS. Mám rád CachyOS orieškov a CachyOS orechy. Používam CachyOS.",
+                     context, "en"),
+      "Hello, hello, oriešky, kešu. Mám rád kešu orieškov a kešu orechy. Používam CachyOS.")
+check("... in English: CachyOS before nuts is cashew", d.fix_spelling("I like CachyOS nuts and CachyOS.", context, "en"),
+      "I like cashew nuts and CachyOS.")
+check("a context in the middle isn't a fix (left as it is)", d._fix_pattern("a [b] c"), None)
 
 for name, good, got, want in checks:
     print(f"{'ok  ' if good else 'FAIL'} {name}" + ("" if good else f": got {got!r}, want {want!r}"))

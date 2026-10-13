@@ -58,8 +58,10 @@ backend = "auto"
 # panel_position = "bottom"
 
 # Spelling fixes: when Whisper writes the left side, the right side is typed instead. Whole words,
-# any capitals; a space also matches a hyphen or no space. A table under [replacements.sk] or
-# [replacements.en] applies only to text in that language. (A table, so it goes last in this file.)
+# any capitals; a space also matches a hyphen or no space; a word ending in * matches any ending;
+# words in [brackets] at the start or end must be there (a comma may stand between) but stay as they
+# are. A table under [replacements.sk] or [replacements.en] applies only to sentences in that
+# language. (A table, so it goes last in this file.)
 # [replacements]
 # "cache OS" = "CachyOS"
 # "cashew OS" = "CachyOS"
@@ -69,3 +71,4 @@ backend = "auto"
 #
 # [replacements.sk]
 # "Cachy" = "kešu"
+# "[oriešk*] CachyOS" = "kešu"      # (only right after oriešky, orieškov, ...)

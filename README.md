@@ -307,7 +307,7 @@ window, or by the installer's last question:
 | Setting | Default | Meaning |
 |---|---|---|
 | `vocabulary` | a few tech words | words to spell exactly like this (keep it short: Whisper also hears them in words that only sound alike) |
-| `replacements` | none | spelling fixes, `"what Whisper writes" = "what to type"`; under `[replacements.sk]` / `.en` only in that language (see `config.example.toml`) |
+| `replacements` | none | spelling fixes, `"what Whisper writes" = "what to type"`; `*` ends a word with any ending, `[words]` at the start or end must be there and stay; under `[replacements.sk]` / `.en` only in that language (see `config.example.toml`) |
 | `beam_size` | `5` | on a graphics card: 1 = fastest, 5 = most accurate |
 | `cpu_beam_size` | `2` | the same on the processor, where a narrower search saves time |
 | `remove_fillers` | `true` | drop um/uh/erm (ehm/eee in Slovak) |
