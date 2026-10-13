@@ -422,7 +422,13 @@ input, `windows_paste.py`, and `e2e_desktop.py` / `e2e_x11.py`. It is started by
   `replacements` (`fix_spelling()`: whole words, any capitals, a space also matching a hyphen or
   nothing, longest first, a capital at a sentence start; `[replacements.sk]` only in Slovak text)
   turns into CachyOS. It runs in `clean_text` and on each piece `LiveText.add` types (a phrase
-  split over two typed pieces isn't fixed). Put look-alike words there, not in `vocabulary`.
+  split over two typed pieces isn't fixed). But without the hint the user's spoken CachyOS was
+  mostly unusable ("Catch you all this", "What is she always?", 0/5), so the hint stays and their
+  config.toml's `replacements` undo its guesses ("Cachy" → kešu in Slovak sentences, "CachyOS nuts"
+  → cashew nuts) and catch the spellings that come without it ("Cache iOS", "CacheOS", "Cachou"):
+  4/5 and 5/5 with that fix, kešu/cashew right (measured on their kept recordings, 2026-10-13). The
+  hint written as an English sentence instead of a list got 5/5 but translated a Slovak dictation
+  into English: keep it a list.
 - **Recordings to test on** (`keep_recordings = N` in config.toml, default 0): `Worker._final` keeps
   the last N dictations as 16 kHz WAV files in `APP_DIR/recordings` (mode 0700; the name says the
   mode, the language decided and the length), deleting older ones. Only with the user's consent;

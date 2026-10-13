@@ -4,8 +4,8 @@
 # Every setting is optional; deleting a line restores its default.
 
 # Words Whisper should spell exactly like this (names, jargon). Keep the list short: Whisper also
-# hears them in words that only sound alike (CachyOS for "cashew"). For a word like that, use a
-# spelling fix instead ([replacements] at the end of this file).
+# hears them in words that only sound alike (CachyOS for "cashew"). Spelling fixes ([replacements]
+# at the end of this file) can undo such guesses, and fix a word without a hint.
 vocabulary = ["Claude", "Claude Code", "GNOME", "Wayland", "Python", "Git", "GitHub", "Linux"]
 
 beam_size = 5                 # on a graphics card: 1 = fastest, 5 = most accurate
@@ -61,8 +61,11 @@ backend = "auto"
 # any capitals; a space also matches a hyphen or no space. A table under [replacements.sk] or
 # [replacements.en] applies only to text in that language. (A table, so it goes last in this file.)
 # [replacements]
-# "cachy OS" = "CachyOS"
+# "cache OS" = "CachyOS"
 # "cashew OS" = "CachyOS"
 #
+# [replacements.en]
+# "CachyOS nuts" = "cashew nuts"
+#
 # [replacements.sk]
-# "cashew" = "kešu"
+# "Cachy" = "kešu"
