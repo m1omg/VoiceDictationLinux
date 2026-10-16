@@ -1771,6 +1771,10 @@ class Worker(threading.Thread):
     # An English pass less sure than this (log-probability per token) may be Slovak taken for English: on the
     # user's voice English came out at -0.02 to -0.23 (clips of 1-3 s lower), Slovak in English at -0.34 to -0.78.
     ENGLISH_SURE = -0.3
+    # In a recording that switches language Slovak was heard already, so an English part is checked unless its
+    # pass is very sure: "OK, now how it is. OK. Toto je ovele, ovele lepšie" came out at -0.26 (FLEURS English
+    # parts: -0.05 to -0.13).
+    PART_ENGLISH_SURE = -0.15
 
     def __init__(self, cfg, transcriber: Transcriber, paster, cues: Cues, topbar):
         super().__init__(name="transcribe", daemon=True)
@@ -2111,7 +2115,7 @@ class Worker(threading.Thread):
         """A recording that switches language: each part transcribed in its own language, the texts
         joined. A part in another language than most of the recording is kept in it only if it is
         written better in it (_better_language). So is an English part of a mostly English one whose
-        pass is unsure of itself (below ENGLISH_SURE): the detection takes Slovak for English even where
+        pass isn't sure of itself (below PART_ENGLISH_SURE): the detection takes Slovak for English even where
         that is most of the recording (9.8 s of real Slovak after 7.7 s, transcribed in English
         unchecked: "Prepizhlas un tekst"), but hardly ever English for Slovak. A part written the same in
         both languages is in the one its words look like (Slovak letters or none: Whisper wrote what it
@@ -2129,7 +2133,7 @@ class Worker(threading.Thread):
             language, same = main, False
             if detected == main:
                 segments = self._run(piece, main, hotwords=speech_total(piece) >= 1.0)
-                if main == "en" and confidence(segments) < self.ENGLISH_SURE:
+                if main == "en" and confidence(segments) < self.PART_ENGLISH_SURE:
                     language, tried, same = self._better_language(piece, main, other)
                     segments = segments if language == main else tried
             else:

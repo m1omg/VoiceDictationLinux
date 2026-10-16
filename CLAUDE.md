@@ -355,9 +355,10 @@ input, `windows_paste.py`, and `e2e_desktop.py` / `e2e_x11.py`. It is started by
       FLEURS the right language was always the more confident on 1.5 s pieces (45/45); on whole
       sentences large-v3-turbo writes what it hears whatever the language token (both passes give
       the same words, so staying in the main language costs nothing).
-    - The main language is checked too when it is English and a part's pass is unsure of itself
-      (`ENGLISH_SURE`, -0.3 per token; on the user's voice English came out at -0.02 to -0.23,
-      Slovak in an English pass at -0.34 to -0.78). 2026-10-16: a Slovak dictation was split into
+    - The main language is checked too when it is English and a part's pass isn't sure of itself
+      (`PART_ENGLISH_SURE`, -0.15 per token: Slovak was heard in the recording already, and "OK,
+      now how it is. OK. Toto je ovele, ovele lepšie" came out at -0.26; FLEURS English parts
+      -0.05 to -0.13, so the benchmark's passes stayed the same, 76). 2026-10-16: a Slovak dictation was split into
       7.7 s of Slovak and 9.8 s "English", and the longer English part, never checked, came out
       "Prepizhlas un tekst. Mislim, skorvo volnam čase". Neighbouring parts that end up in the same
       language are then transcribed again as one pass ("prepis hlasu na text. Myslím skôr vo voľnom
@@ -368,10 +369,12 @@ input, `windows_paste.py`, and `e2e_desktop.py` / `e2e_x11.py`. It is started by
       taken for English was cut off ("pretimesi úplne. Dokončil robotu."). A mostly Slovak
       recording isn't checked that way: the detection hardly ever takes English for Slovak.
     - The same check runs on a whole dictation in auto mode that is all "English" when its pass is
-      below `ENGLISH_SURE` (`_final_text`): real Slovak came out translated, "I'm trying to give the
+      below `ENGLISH_SURE` (-0.3 per token; on the user's voice English came out at -0.02 to -0.23,
+      Slovak in an English pass at -0.34 to -0.78) (`_final_text`): real Slovak came out translated, "I'm trying to give the
       2 check." (-0.80) for "Skúšam dať ten dvojček" (-0.31). Switched, it gets a normal Slovak pass.
     - Checked 2026-10-17: `tests/bench_mixed.py --quick` 5.4 % / 7.8 % at the same speed; 45 FLEURS
-      sentences in auto mode and 75 of the user's 77 recordings unchanged, the 2 broken ones fixed.
+      sentences in auto mode unchanged; of the user's 80 recordings only the 4 broken ones changed,
+      all fixed.
     - Without live typing, `_final_text` transcribes each part on its own (`_final_parts`; log:
       `languages: sk 0.0-7.9 s, en 7.9-15.2 s`); one part: one pass, as before. Stretches the
       previews already checked are reused (`Session.checked`, within 0.15 s).

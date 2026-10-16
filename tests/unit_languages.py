@@ -150,9 +150,9 @@ class Transcriber(d.Transcriber):
             spoken, number, heard = word_of(float(audio[start]))
             out.append(types.SimpleNamespace(start=start / RATE, end=end / RATE,
                                              word=f" {spoken if spoken == language or heard == 'same' else 'TRANSLATED'}{number}"))
-        # A pass in the language spoken is sure of its words (-0.2 per token), one in the other
+        # A pass in the language spoken is sure of its words (-0.1 per token), one in the other
         # language guesses (-0.7).
-        logprobs = [-0.2 if "TRANSLATED" not in w.word else -0.7 for w in out]
+        logprobs = [-0.1 if "TRANSLATED" not in w.word else -0.7 for w in out]
         segment = types.SimpleNamespace(text="".join(w.word for w in out), words=out if words else None,
                                         tokens=list(range(len(out))), avg_logprob=float(np.mean(logprobs)) if out else 0.0)
         return [segment]
