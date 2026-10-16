@@ -183,8 +183,8 @@ def final(audio, live=False):
 
 text, passes, language = final(recording(("sk", 4.0), (None, 0.5), ("en", 3.0)))
 check("Slovak, then English: each part in its own language", text.split(), [f"sk{i}" for i in range(8)] + [f"en{i}" for i in range(8, 14)])
-check("... the Slovak part in one pass, the English one decoded both ways without the vocabulary, split in the middle of the pause",
-      passes, [(4.25, "sk", True), (3.25, "sk", False), (3.25, "en", False)])
+check("... the English part decoded both ways without the vocabulary, then the Slovak one in one pass, split in the middle of the pause",
+      passes, [(3.25, "sk", False), (3.25, "en", False), (4.25, "sk", True)])
 check("... and the dictation counts as Slovak (most of it)", language, "sk")
 text, passes, _ = final(recording(("en", 3.0), (None, 0.5), ("sk", 3.0), (None, 0.5), ("en", 2.5)))
 check("English, Slovak, English: nothing translated", ("TRANSLATED" in text, text.split()[6], text.split()[-1]), (False, "sk6", "en16"))
@@ -300,7 +300,7 @@ def alike_transcriber(scores):
     """A stand-in whose forced alignment gives `scores` (text -> log-probability)."""
     tr = Transcriber(alikes)
     tr.model = object()
-    tr._scorer = lambda piece, language: lambda text: scored.append(text) or scores[text.strip()]
+    tr._scorer = lambda piece: lambda text, language: scored.append((text.strip(), language)) or scores[text.strip()]
     return tr
 
 
@@ -314,22 +314,27 @@ tr = alike_transcriber({"I made it in Korea.": -1.0, "I made it in Krea.": -3.5,
                         "OPEN KOREA": -2.0, "OPEN KREA": -2.5,
                         "Korea and Korea.": -1.0, "Krea and Korea.": -8.0, "Korea and Krea.": -2.0})
 check("sound-alikes: the alike wins unless the written word is more probable by ALIKE_MARGIN",
-      [seg.text for seg in tr.prefer_alikes(voice, [segment(" I made it in Korea."), segment(" My friend went to South Korea.")], "en")],
+      [seg.text for seg in tr.prefer_alikes(voice, [segment(" I made it in Korea."), segment(" My friend went to South Korea.")])],
       [" I made it in Krea.", " My friend went to South Korea."])
-check("... capitals kept", tr.prefer_alikes(voice, [segment("OPEN KOREA")], "en")[0].text, "OPEN KREA")
-check("... each place on its own", tr.prefer_alikes(voice, [segment("Korea and Korea.")], "en")[0].text, "Korea and Krea.")
+check("... capitals kept", tr.prefer_alikes(voice, [segment("OPEN KOREA")])[0].text, "OPEN KREA")
+check("... each place on its own", tr.prefer_alikes(voice, [segment("Korea and Korea.")])[0].text, "Korea and Krea.")
+tr = alike_transcriber({"Severná Korea. Korea is great.": -1.0, "Severná Krea. Korea is great.": -9.0,
+                        "Severná Korea. Krea is great.": -1.5})
+scored.clear()
+check("... each sentence scored in the language it looks like", (tr.prefer_alikes(voice, [segment("Severná Korea. Korea is great.")])[0].text,
+      sorted({language for _, language in scored})), ("Severná Korea. Krea is great.", ["en", "sk"]))
 scored.clear()
 untouched = segment(" Korean food.")
-check("... only whole words, and nothing scored without one", (tr.prefer_alikes(voice, [untouched], "en")[0] is untouched, scored),
+check("... only whole words, and nothing scored without one", (tr.prefer_alikes(voice, [untouched])[0] is untouched, scored),
       (True, []))
 plain = Transcriber(cfg)
 plain.model = object()
-plain._scorer = lambda piece, language: scored.append("called")
-check("... none in the settings: nothing scored", (plain.prefer_alikes(voice, [segment(" Korea.")], "en")[0].text, scored),
+plain._scorer = lambda piece: scored.append("called")
+check("... none in the settings: nothing scored", (plain.prefer_alikes(voice, [segment(" Korea.")])[0].text, scored),
       (" Korea.", []))
 asked = []
 tr = Transcriber(cfg)
-tr.prefer_alikes = lambda audio, segments, language: asked.append((round(len(audio) / RATE, 2), language)) or segments
+tr.prefer_alikes = lambda audio, segments: asked.append((round(len(audio) / RATE, 2), segments[0].text.split()[0][:2])) or segments
 worker = d.Worker(cfg, tr, Collect(), d.Cues(lambda: False, 0.5), d.Quiet())
 for audio in (recording(("sk", 3.0)), recording(("sk", 4.0), (None, 0.5), ("en", 3.0))):
     s = d.Session(1, None, "auto", False, 0.0, text=d.LiveText(cfg))

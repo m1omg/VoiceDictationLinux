@@ -367,7 +367,9 @@ input, `windows_paste.py`, and `e2e_desktop.py` / `e2e_x11.py`. It is started by
       kept in the main language, an English part went into one Slovak pass with its neighbours,
       which translated it (FLEURS mixed 5 % -> 33 % wrong); kept apart, a Slovak sentence's end
       taken for English was cut off ("pretimesi úplne. Dokončil robotu."). A mostly Slovak
-      recording isn't checked that way: the detection hardly ever takes English for Slovak.
+      recording isn't checked that way: the detection hardly ever takes English for Slovak, and its
+      Slovak parts get their pass only once it is known which neighbours they are joined with (a
+      pass per part, then one over the joined parts, made a 19 s dictation take 2.4 s instead of 1.8).
     - The same check runs on a whole dictation in auto mode that is all "English" when its pass is
       below `ENGLISH_SURE` (-0.3 per token; on the user's voice English came out at -0.02 to -0.23,
       Slovak in an English pass at -0.34 to -0.78) (`_final_text`): real Slovak came out translated, "I'm trying to give the
@@ -447,9 +449,11 @@ input, `windows_paste.py`, and `e2e_desktop.py` / `e2e_x11.py`. It is started by
   common one that sounds close. "Krea" (in the vocabulary) still came out "Korea"; no hint, prompt
   or sentence changed that, and a spelling fix would take the country too. Where the final text has
   the written word, the segment's text is scored against its audio with each word (CTranslate2's
-  `align()` text-token probabilities, the vocabulary as the prompt; ~0.3 s, mostly the 30 s encoder
-  pass, only when the word is there), and the alike is typed unless the written word is more
-  probable by `ALIKE_MARGIN` (3.0 of the segment's log-probability). The user's voice: "Korea" said led by 3.6-10.5, "Krea" said and written Korea
+  `align()` text-token probabilities, the vocabulary as the prompt, the language token of what the
+  sentence looks like; ~0.3 s, mostly the 30 s encoder pass, only when the word is there), and the
+  alike is typed unless the written word is more probable by `ALIKE_MARGIN` (3.0 of the segment's
+  log-probability). A sentence describing Krea in the scoring prompt lowered both words' gaps
+  alike (it would have taken "Korea has really good food"), so it isn't used. The user's voice: "Korea" said led by 3.6-10.5, "Krea" said and written Korea
   by 2.3-2.6 (and 5-6 in two earlier takes, which stay wrong). Called by `_final_text` and
   `_final_parts`, not by live typing.
 - **Recordings to test on** (`keep_recordings = N` in config.toml, default 0): `Worker._final` keeps

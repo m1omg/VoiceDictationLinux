@@ -1238,12 +1238,14 @@ class Transcriber:
     # still wins: on the user's voice "Korea" said led by 3.6 to 10.5, "Krea" said (written Korea) by 2.3 to 2.6.
     ALIKE_MARGIN = 3.0
 
-    def prefer_alikes(self, audio: np.ndarray, segments: list, language: str) -> list:
+    def prefer_alikes(self, audio: np.ndarray, segments: list) -> list:
         """The settings' sound-alikes (`sound_alikes`, e.g. "Korea" = "Krea"): Whisper writes the common
         word for a rare one that sounds close, even with the rare one in the vocabulary. Where a
         segment has the written word, its text is scored against its audio with each word (forced
-        alignment, the vocabulary as the prompt), and the sound-alike is typed unless the written word
-        is more probable by ALIKE_MARGIN. Segments with a change come back as copies."""
+        alignment, the vocabulary as the prompt, in the language the sentence looks like: an English
+        sentence in a Slovak pass scored as Slovak kept a spoken Krea as Korea), and the sound-alike is
+        typed unless the written word is more probable by ALIKE_MARGIN. Segments with a change come
+        back as copies."""
         table = {k.lower(): v for k, v in (getattr(self.cfg, "sound_alikes", None) or {}).items()
                  if isinstance(v, str) and k.strip() and v.strip()}
         if not table or self.model is None:
@@ -1257,18 +1259,20 @@ class Transcriber:
                 out.append(seg)
                 continue
             try:
-                score = self._scorer(audio[start:end], language)
+                score = self._scorer(audio[start:end])
                 text, at = seg.text, 0
                 while match := pattern.search(text, at):
                     written = match.group()
                     alike = _styled_like(table[written.lower()], written)
                     other = text[:match.start()] + alike + text[match.end():]
-                    kept, tried = score(text), score(other)
-                    if tried >= kept - self.ALIKE_MARGIN:
-                        log.info("sound-alike: %s, not %s (%.1f against %.1f)", alike, written, tried, kept)
-                        text, at = other, match.start() + len(alike)
-                    else:
-                        at = match.end()
+                    begin = max(text.rfind(mark, 0, match.start()) for mark in ".!?…") + 1
+                    ends = [i for i in (text.find(mark, match.end()) for mark in ".!?…") if i >= 0]
+                    said = "sk" if looks_slovak(text[begin:min(ends, default=len(text))]) else "en"
+                    kept, tried = score(text, said), score(other, said)
+                    switch = tried >= kept - self.ALIKE_MARGIN
+                    log.info("sound-alike: %s, not %s (%.1f against %.1f)", *((alike, written, tried, kept) if switch
+                             else (written, alike, kept, tried)))
+                    text, at = (other, match.start() + len(alike)) if switch else (text, match.end())
             except Exception as e:
                 log.warning("the sound-alike check failed: %s", e)
                 out.append(seg)
@@ -1276,21 +1280,27 @@ class Transcriber:
             out.append(seg if text == seg.text else SimpleNamespace(**{**vars(seg), "text": text}))
         return out
 
-    def _scorer(self, piece: np.ndarray, language: str):
-        """A function giving a text's log-probability for this audio (≤ 30 s): the model's probability
-        of each of its tokens, read by forced alignment, after the vocabulary prompt as in a pass."""
+    def _scorer(self, piece: np.ndarray):
+        """A function giving a text's log-probability in a language for this audio (≤ 30 s): the
+        model's probability of each of its tokens, read by forced alignment, after the vocabulary
+        prompt as in a pass. (The audio is encoded once.)"""
         from faster_whisper.audio import pad_or_trim
         from faster_whisper.tokenizer import Tokenizer
         model = self.model
         features = model.feature_extractor(lifted(piece))
         frames = min(features.shape[-1], 3000)
         encoded = model.encode(pad_or_trim(features, 3000))
-        tokenizer = Tokenizer(model.hf_tokenizer, model.model.is_multilingual, task="transcribe", language=language)
-        start = list(tokenizer.sot_sequence)
-        if self.hotwords:
-            start = [tokenizer.sot_prev] + tokenizer.encode(" " + self.hotwords.strip()) + start
 
-        def score(text: str) -> float:
+        @functools.lru_cache(maxsize=None)
+        def prompt(language: str) -> tuple:
+            tokenizer = Tokenizer(model.hf_tokenizer, model.model.is_multilingual, task="transcribe", language=language)
+            start = list(tokenizer.sot_sequence)
+            if self.hotwords:
+                start = [tokenizer.sot_prev] + tokenizer.encode(" " + self.hotwords.strip()) + start
+            return tokenizer, start
+
+        def score(text: str, language: str) -> float:
+            tokenizer, start = prompt(language)
             ids = tokenizer.encode(" " + text.strip())
             probabilities = model.model.align(encoded, start, [ids], frames)[0].text_token_probs
             return sum(math.log(max(p, 1e-12)) for p in probabilities[:len(ids)])
@@ -2107,7 +2117,7 @@ class Worker(threading.Thread):
             # dvojček"), and the English pass is unsure of it: written better in Slovak, it is Slovak.
             if self._better_language(audio, "en", "sk")[0] == "sk":  # (then a pass as any Slovak dictation gets)
                 s.language, segments = "sk", self._run(audio, "sk", hotwords=speech >= 1.0)
-        segments = self.transcriber.prefer_alikes(audio, segments, s.language)
+        segments = self.transcriber.prefer_alikes(audio, segments)
         text = clean_text(" ".join(seg.text.strip() for seg in segments), self.cfg, s.language)
         return (text, None) if text else ("", "no speech")
 
@@ -2127,16 +2137,16 @@ class Worker(threading.Thread):
         main = max(AUTO_LANGUAGES, key=lambda lang: sum(end - start for start, end, language in parts
                                                         if language == lang))
         other = next(lang for lang in AUTO_LANGUAGES if lang != main)
-        decided = []  # [start, end, language, its pass's segments (None: several parts, not one pass yet)]
+        decided = []  # [start, end, language, its pass's segments (None: not transcribed as one yet)]
         for start, end, detected in parts:
             piece = audio[start:end]
-            language, same = main, False
-            if detected == main:
+            language, same, segments = main, False, None  # (a Slovak part of a mostly Slovak one: its pass below)
+            if detected == main == "en":
                 segments = self._run(piece, main, hotwords=speech_total(piece) >= 1.0)
-                if main == "en" and confidence(segments) < self.PART_ENGLISH_SURE:
+                if confidence(segments) < self.PART_ENGLISH_SURE:
                     language, tried, same = self._better_language(piece, main, other)
                     segments = segments if language == main else tried
-            else:
+            elif detected != main:
                 language, segments, same = self._better_language(piece, main, other)
             if same:
                 language = "sk" if looks_slovak(" ".join(seg.text for seg in segments)) else "en"
@@ -2149,7 +2159,7 @@ class Worker(threading.Thread):
             piece = audio[start:end]
             if segments is None:
                 segments = self._run(piece, language, hotwords=speech_total(piece) >= 1.0)  # (below 1 s whisper may echo them)
-            segments = self.transcriber.prefer_alikes(piece, segments, language)
+            segments = self.transcriber.prefer_alikes(piece, segments)
             text = " ".join(seg.text.strip() for seg in segments)
             texts.append(clean_text(text, self.cfg, language).strip())
             length[language] += end - start
