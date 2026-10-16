@@ -440,6 +440,15 @@ input, `windows_paste.py`, and `e2e_desktop.py` / `e2e_x11.py`. It is started by
   nothing, longest first, a capital at a sentence start; `[replacements.sk]` only in Slovak text)
   turns into CachyOS. It runs in `clean_text` and on each piece `LiveText.add` types (a phrase
   split over two typed pieces isn't fixed). Put look-alike words there, not in `vocabulary`.
+- **Sound-alikes** (`sound_alikes`, `Transcriber.prefer_alikes`): a word the user says next to a
+  common one that sounds close. "Krea" (in the vocabulary) still came out "Korea"; no hint, prompt
+  or sentence changed that, and a spelling fix would take the country too. Where the final text has
+  the written word, the segment's text is scored against its audio with each word (CTranslate2's
+  `align()` text-token probabilities, the vocabulary as the prompt; ~0.3 s, mostly the 30 s encoder
+  pass, only when the word is there), and the alike is typed unless the written word is more
+  probable by `ALIKE_MARGIN` (3.0 of the segment's log-probability). The user's voice: "Korea" said led by 3.6-10.5, "Krea" said and written Korea
+  by 2.3-2.6 (and 5-6 in two earlier takes, which stay wrong). Called by `_final_text` and
+  `_final_parts`, not by live typing.
 - **Recordings to test on** (`keep_recordings = N` in config.toml, default 0): `Worker._final` keeps
   the last N dictations as 16 kHz WAV files in `APP_DIR/recordings` (mode 0700; the name says the
   mode, the language decided and the length), deleting older ones. Only with the user's consent;

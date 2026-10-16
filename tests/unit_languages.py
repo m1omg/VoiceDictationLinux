@@ -291,6 +291,52 @@ live_text = d.LiveText(fixes)
 typed = [live_text.add([(0, 1, " Dám"), (1, 2, " si")], "en"), live_text.add([(2, 3, " Cashew.")], "en")]
 check("... live, judged with the unfinished sentence typed before", typed, ["Dám si", " kešu."])
 
+# --- sound-alikes: the recording decides between the written word and one that sounds close ------
+alikes = types.SimpleNamespace(**{**vars(cfg), "sound_alikes": {"Korea": "Krea"}})
+scored = []
+
+
+def alike_transcriber(scores):
+    """A stand-in whose forced alignment gives `scores` (text -> log-probability)."""
+    tr = Transcriber(alikes)
+    tr.model = object()
+    tr._scorer = lambda piece, language: lambda text: scored.append(text) or scores[text.strip()]
+    return tr
+
+
+def segment(text):
+    return types.SimpleNamespace(text=text, start=0.0, end=2.0, tokens=[1], avg_logprob=-0.1)
+
+
+voice = np.zeros(3 * RATE, np.float32)
+tr = alike_transcriber({"I made it in Korea.": -1.0, "I made it in Krea.": -3.5,
+                        "My friend went to South Korea.": -0.5, "My friend went to South Krea.": -9.0,
+                        "OPEN KOREA": -2.0, "OPEN KREA": -2.5,
+                        "Korea and Korea.": -1.0, "Krea and Korea.": -8.0, "Korea and Krea.": -2.0})
+check("sound-alikes: the alike wins unless the written word is more probable by ALIKE_MARGIN",
+      [seg.text for seg in tr.prefer_alikes(voice, [segment(" I made it in Korea."), segment(" My friend went to South Korea.")], "en")],
+      [" I made it in Krea.", " My friend went to South Korea."])
+check("... capitals kept", tr.prefer_alikes(voice, [segment("OPEN KOREA")], "en")[0].text, "OPEN KREA")
+check("... each place on its own", tr.prefer_alikes(voice, [segment("Korea and Korea.")], "en")[0].text, "Korea and Krea.")
+scored.clear()
+untouched = segment(" Korean food.")
+check("... only whole words, and nothing scored without one", (tr.prefer_alikes(voice, [untouched], "en")[0] is untouched, scored),
+      (True, []))
+plain = Transcriber(cfg)
+plain.model = object()
+plain._scorer = lambda piece, language: scored.append("called")
+check("... none in the settings: nothing scored", (plain.prefer_alikes(voice, [segment(" Korea.")], "en")[0].text, scored),
+      (" Korea.", []))
+asked = []
+tr = Transcriber(cfg)
+tr.prefer_alikes = lambda audio, segments, language: asked.append((round(len(audio) / RATE, 2), language)) or segments
+worker = d.Worker(cfg, tr, Collect(), d.Cues(lambda: False, 0.5), d.Quiet())
+for audio in (recording(("sk", 3.0)), recording(("sk", 4.0), (None, 0.5), ("en", 3.0))):
+    s = d.Session(1, None, "auto", False, 0.0, text=d.LiveText(cfg))
+    s.audio, s.t_release = audio, 1.0
+    worker._final(s)
+check("... the final pass checks the dictation, or each part in its language", asked, [(3.0, "sk"), (4.25, "sk"), (3.25, "en")])
+
 for name, good, got, want in checks:
     print(f"{'ok  ' if good else 'FAIL'} {name}" + ("" if good else f": got {got!r}, want {want!r}"))
 sys.exit(0 if all(c[1] for c in checks) else 1)

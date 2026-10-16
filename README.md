@@ -308,6 +308,7 @@ window, or by the installer's last question:
 |---|---|---|
 | `vocabulary` | a few tech words | words to spell exactly like this (keep it short: Whisper also hears them in words that only sound alike) |
 | `replacements` | none | spelling fixes, `"what Whisper writes" = "what to type"`; under `[replacements.sk]` / `.en` only in that language (see `config.example.toml`) |
+| `sound_alikes` | none | `"what Whisper writes" = "a word you also say that sounds close"` (e.g. `"Korea" = "Krea"`): the recording decides which one was said, so both stay possible; not while typing live |
 | `beam_size` | `5` | on a graphics card: 1 = fastest, 5 = most accurate |
 | `cpu_beam_size` | `2` | the same on the processor, where a narrower search saves time |
 | `remove_fillers` | `true` | drop um/uh/erm (ehm/eee in Slovak) |

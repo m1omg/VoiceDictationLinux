@@ -66,3 +66,9 @@ backend = "auto"
 #
 # [replacements.sk]
 # "cashew" = "kešu"
+#
+# Sound-alikes: when Whisper writes the left word for one you also say that sounds close (it prefers
+# the common word, even with the other in the vocabulary), the recording decides which one you said:
+# both stay possible. Put the rare word in the vocabulary too. Not checked while typing live.
+# [sound_alikes]
+# "Korea" = "Krea"
