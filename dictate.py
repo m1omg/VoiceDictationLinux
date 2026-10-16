@@ -2112,7 +2112,7 @@ class Worker(threading.Thread):
                                                         hotwords=len(window) >= 2 * RATE), start)
             return s.text.add(words, s.language, final=True), None
         segments = self._run(audio, s.language, hotwords=speech >= 1.0)  # below 1 s whisper may echo them
-        if s.mode == "auto" and s.language == "en" and confidence(segments) < self.ENGLISH_SURE:
+        if s.mode == "auto" and s.language == "en" and -math.inf < confidence(segments) < self.ENGLISH_SURE:
             # Slovak taken for English is translated ("I'm trying to give the 2 check." for "Skúšam dať ten
             # dvojček"), and the English pass is unsure of it: written better in Slovak, it is Slovak.
             if self._better_language(audio, "en", "sk")[0] == "sk":  # (then a pass as any Slovak dictation gets)
@@ -2143,7 +2143,7 @@ class Worker(threading.Thread):
             language, same, segments = main, False, None  # (a Slovak part of a mostly Slovak one: its pass below)
             if detected == main == "en":
                 segments = self._run(piece, main, hotwords=speech_total(piece) >= 1.0)
-                if confidence(segments) < self.PART_ENGLISH_SURE:
+                if -math.inf < confidence(segments) < self.PART_ENGLISH_SURE:  # (-inf: nothing heard)
                     language, tried, same = self._better_language(piece, main, other)
                     segments = segments if language == main else tried
             elif detected != main:

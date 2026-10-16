@@ -212,6 +212,8 @@ check("a whole dictation of Slovak the detection is sure is English: the English
       ("TRANSLATED" in text, language, passes[0]), (False, "sk", (4.0, "en", True)))
 text, passes, language = final(recording(("en", 4.0)))
 check("... English its pass is sure of: one pass", (passes, language), ([(4.0, "en", True)], "en"))
+text, passes, _ = final(np.full(3 * RATE, 0.005, np.float32))
+check("... and nothing heard is not checked again", (text, len(passes)), ("", 1))
 text, passes, _ = final(recording(("sk", 4.0), (None, 0.5), ("en?", 2.0)))
 check("a short English ending the detection isn't sure of (85 %) switches, as it is written better in English",
       text.split()[-4:], [f"en{i}" for i in range(8, 12)])
