@@ -2023,6 +2023,11 @@ class Worker(threading.Thread):
                                                         hotwords=len(window) >= 2 * RATE), start)
             return s.text.add(words, s.language, final=True), None
         segments = self._run(audio, s.language, hotwords=speech >= 1.0)  # below 1 s whisper may echo them
+        if s.mode == "auto" and s.language == "en" and confidence(segments) < self.ENGLISH_SURE:
+            # Slovak taken for English is translated ("I'm trying to give the 2 check." for "Skúšam dať ten
+            # dvojček"), and the English pass is unsure of it: written better in Slovak, it is Slovak.
+            if self._better_language(audio, "en", "sk")[0] == "sk":  # (then a pass as any Slovak dictation gets)
+                s.language, segments = "sk", self._run(audio, "sk", hotwords=speech >= 1.0)
         text = clean_text(" ".join(seg.text.strip() for seg in segments), self.cfg, s.language)
         return (text, None) if text else ("", "no speech")
 
@@ -2032,16 +2037,17 @@ class Worker(threading.Thread):
         written better in it (_better_language). So is an English part of a mostly English one whose
         pass is unsure of itself (below ENGLISH_SURE): the detection takes Slovak for English even where
         that is most of the recording (9.8 s of real Slovak after 7.7 s, transcribed in English
-        unchecked: "Prepizhlas un tekst"), but hardly ever English for Slovak. Neighbouring parts that
-        end up in the same language are transcribed again as one (a part alone lacks the rest of its
-        sentence: "Prepis, hlas un tekst" where the whole said "prepis hlasu na text"), unless one was
-        written the same in both languages (it may be in either: one pass with its neighbour would
-        translate it; FLEURS 5 % -> 33 % of the words wrong). The dictation counts as being in the
-        language most of it is in."""
+        unchecked: "Prepizhlas un tekst"), but hardly ever English for Slovak. A part written the same in
+        both languages is in the one its words look like (Slovak letters or none: Whisper wrote what it
+        heard; kept in the main language, an English part went into one Slovak pass with its neighbours,
+        which translated it: FLEURS 5 % -> 33 % of the words wrong). Neighbouring parts that end up in
+        the same language are transcribed again as one (a part alone lacks the rest of its sentence:
+        "Prepis, hlas un tekst" where the whole said "prepis hlasu na text"). The dictation counts as
+        being in the language most of it is in."""
         main = max(AUTO_LANGUAGES, key=lambda lang: sum(end - start for start, end, language in parts
                                                         if language == lang))
         other = next(lang for lang in AUTO_LANGUAGES if lang != main)
-        decided = []  # [start, end, language, its pass's segments (None: several parts, not one pass yet), same]
+        decided = []  # [start, end, language, its pass's segments (None: several parts, not one pass yet)]
         for start, end, detected in parts:
             piece = audio[start:end]
             language, same = main, False
@@ -2052,12 +2058,14 @@ class Worker(threading.Thread):
                     segments = segments if language == main else tried
             else:
                 language, segments, same = self._better_language(piece, main, other)
-            if decided and decided[-1][2] == language and not same and not decided[-1][4]:
+            if same:
+                language = "sk" if looks_slovak(" ".join(seg.text for seg in segments)) else "en"
+            if decided and decided[-1][2] == language:
                 decided[-1][1], decided[-1][3] = end, None
             else:
-                decided.append([start, end, language, segments, same])
+                decided.append([start, end, language, segments])
         texts, length = [], dict.fromkeys(AUTO_LANGUAGES, 0)
-        for start, end, language, segments, _same in decided:
+        for start, end, language, segments in decided:
             piece = audio[start:end]
             if segments is None:
                 segments = self._run(piece, language, hotwords=speech_total(piece) >= 1.0)  # (below 1 s whisper may echo them)

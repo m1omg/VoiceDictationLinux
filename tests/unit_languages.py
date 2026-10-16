@@ -8,6 +8,7 @@ language at a pause without typing a word in the wrong language.
     python3 tests/unit_languages.py        (any Python 3.11+ with numpy)
 """
 import os
+import re
 import sys
 import tempfile
 import types
@@ -104,6 +105,8 @@ d.speech_regions = fake_regions
 d.speech_total = lambda audio: sum(end - start for start, end in fake_regions(audio)) / RATE
 d.speech_seconds = lambda audio: (len(audio) - fake_regions(audio)[0][0]) / RATE if fake_regions(audio) else 0.0
 d.silence_seconds = lambda audio: (len(audio) - fake_regions(audio)[-1][1]) / RATE if fake_regions(audio) else len(audio) / RATE
+real_looks_slovak = d.looks_slovak
+d.looks_slovak = lambda text: real_looks_slovak(text) or bool(re.search(r"\bsk\d", text))  # the stand-in's Slovak words
 detections = []
 
 
@@ -202,8 +205,13 @@ text, passes, _ = final(recording(("en", 4.0), (None, 0.5), ("sk", 3.0)))
 check("English, then Slovak: the English part, its pass sure of itself, isn't checked", passes,
       [(4.25, "en", True), (3.25, "en", False), (3.25, "sk", False)])
 text, passes, _ = final(recording(("en~", 3.0), (None, 0.5), ("sk~", 2.0)))
-check("parts written the same in both languages stay apart (one pass over both would translate one)",
+check("a part written the same in both languages goes by how its words look: Slovak ones stay apart from English",
       (text.split(), max(seconds for seconds, _, _ in passes)), ([f"en{i}" for i in range(6)] + [f"sk{i}" for i in range(6, 10)], 3.25))
+text, passes, language = final(recording(("sk!", 4.0)))
+check("a whole dictation of Slovak the detection is sure is English: the English pass is unsure, so Slovak",
+      ("TRANSLATED" in text, language, passes[0]), (False, "sk", (4.0, "en", True)))
+text, passes, language = final(recording(("en", 4.0)))
+check("... English its pass is sure of: one pass", (passes, language), ([(4.0, "en", True)], "en"))
 text, passes, _ = final(recording(("sk", 4.0), (None, 0.5), ("en?", 2.0)))
 check("a short English ending the detection isn't sure of (85 %) switches, as it is written better in English",
       text.split()[-4:], [f"en{i}" for i in range(8, 12)])
