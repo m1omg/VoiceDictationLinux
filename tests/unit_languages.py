@@ -56,7 +56,8 @@ check("one part covers it all", d.language_runs([(100, 200)], ["en"], 1000), [(0
 
 def recording(*stretches):
     """("sk", 3.0) speaks Slovak for 3 s, (None, 0.6) is a pause. "sk?" and "en?" sound unsure to the
-    language detection; "sk!" is Slovak it takes for English, sure of it (as it did with real Slovak).
+    language detection; "sk!" is Slovak it takes for English, sure of it (as it did with real Slovak);
+    "en~" and "sk~" are heard right and written the same by a pass in either language.
     Every 0.5 s of speech is one word, numbered: the samples carry the language (the sign), how the
     detection hears it (0.3 and more: right, 0.2: wrong, 0.1: unsure) and the word's number (in
     thousandths)."""
@@ -66,7 +67,7 @@ def recording(*stretches):
             if language is None:
                 value = 0.0
             else:
-                value = {"": 0.3, "!": 0.2, "?": 0.1}[language[2:]] + 0.001 * word
+                value = {"": 0.3, "!": 0.2, "?": 0.1, "~": 0.4}[language[2:]] + 0.001 * word
                 value *= 1 if language.startswith("sk") else -1
                 word += 1
             pieces.append(np.full(RATE // 2, value, np.float32))
@@ -76,8 +77,9 @@ def recording(*stretches):
 def word_of(value: float) -> tuple[str, int, str]:
     """(language, number, how the detection hears it: "right", "wrong" or "unsure") of a sample."""
     size = abs(value)
-    base = 0.3 if size >= 0.3 else 0.2 if size >= 0.2 else 0.1
-    return ("sk" if value > 0 else "en"), round((size - base) / 0.001), {0.3: "right", 0.2: "wrong", 0.1: "unsure"}[base]
+    base = 0.4 if size >= 0.4 else 0.3 if size >= 0.3 else 0.2 if size >= 0.2 else 0.1
+    heard = {0.4: "same", 0.3: "right", 0.2: "wrong", 0.1: "unsure"}[base]
+    return ("sk" if value > 0 else "en"), round((size - base) / 0.001), heard
 
 
 def fake_regions(audio, pause=d.PART_PAUSE):
@@ -113,7 +115,7 @@ def fake_shares(piece, frames=d.Transcriber.PIECE_FRAMES, allowed=d.AUTO_LANGUAG
     if not talking.size:
         return {"en": 0.5, "sk": 0.5}
     language, _number, heard = word_of(float(np.median(talking)))
-    sk = {"right": 0.99, "wrong": 0.01, "unsure": 0.6 if language == "sk" else 0.15}[heard]
+    sk = {"right": 0.99, "same": 0.99, "wrong": 0.01, "unsure": 0.6 if language == "sk" else 0.15}[heard]
     if language == "en" and heard != "unsure":
         sk = 1 - sk
     return {"en": 1 - sk, "sk": sk}
@@ -142,9 +144,9 @@ class Transcriber(d.Transcriber):
         for start, end in zip(np.r_[0, changes], np.r_[changes, len(audio)]):
             if abs(float(audio[start])) < 0.01 or end - start < RATE // 10:  # a pause, or a scrap of a word
                 continue
-            spoken, number, _heard = word_of(float(audio[start]))
+            spoken, number, heard = word_of(float(audio[start]))
             out.append(types.SimpleNamespace(start=start / RATE, end=end / RATE,
-                                             word=f" {spoken if spoken == language else 'TRANSLATED'}{number}"))
+                                             word=f" {spoken if spoken == language or heard == 'same' else 'TRANSLATED'}{number}"))
         # A pass in the language spoken is sure of its words (-0.2 per token), one in the other
         # language guesses (-0.7).
         logprobs = [-0.2 if "TRANSLATED" not in w.word else -0.7 for w in out]
@@ -190,7 +192,18 @@ text, passes, _ = final(recording(("sk", 4.0), (None, 0.5), ("en", 1.5), (None, 
 check("1.5 s that seems English inside Slovak stays Slovak", passes, [(10.5, "sk", True)])
 text, passes, _ = final(recording(("sk", 4.0), (None, 0.5), ("sk!", 3.0), (None, 0.5), ("sk", 4.0)))
 check("Slovak the detection is sure is English stays Slovak: decoded in English it is less sure", "TRANSLATED" in text, False)
-check("... (it was tried both ways)", sorted(lang for _, lang, hotwords in passes if not hotwords), ["en", "sk"])
+check("... (it was tried both ways, then all of it transcribed as one)",
+      (sorted(lang for _, lang, hotwords in passes if not hotwords), passes[-1]), (["en", "sk"], (12.0, "sk", True)))
+text, passes, language = final(recording(("sk", 3.0), (None, 0.5), ("sk!", 4.0)))
+check("Slovak the detection is sure is English, the longer part: English parts are checked, so all of it is Slovak",
+      ("TRANSLATED" in text, len(text.split()), language), (False, 14, "sk"))
+check("... and both parts, in the same language, are transcribed again as one", passes[-1], (7.5, "sk", True))
+text, passes, _ = final(recording(("en", 4.0), (None, 0.5), ("sk", 3.0)))
+check("English, then Slovak: the English part, its pass sure of itself, isn't checked", passes,
+      [(4.25, "en", True), (3.25, "en", False), (3.25, "sk", False)])
+text, passes, _ = final(recording(("en~", 3.0), (None, 0.5), ("sk~", 2.0)))
+check("parts written the same in both languages stay apart (one pass over both would translate one)",
+      (text.split(), max(seconds for seconds, _, _ in passes)), ([f"en{i}" for i in range(6)] + [f"sk{i}" for i in range(6, 10)], 3.25))
 text, passes, _ = final(recording(("sk", 4.0), (None, 0.5), ("en?", 2.0)))
 check("a short English ending the detection isn't sure of (85 %) switches, as it is written better in English",
       text.split()[-4:], [f"en{i}" for i in range(8, 12)])

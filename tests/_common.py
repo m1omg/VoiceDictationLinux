@@ -28,6 +28,13 @@ def load_dictate():
     sys.modules["dictate"] = module
     spec.loader.exec_module(module)
     logging.getLogger("faster_whisper").setLevel(logging.WARNING)
+    load_config = module.load_config
+
+    def without_recordings():  # (keep_recordings: test dictations would push out the user's own)
+        cfg = load_config()
+        cfg.keep_recordings = 0
+        return cfg
+    module.load_config = without_recordings
     return module
 
 

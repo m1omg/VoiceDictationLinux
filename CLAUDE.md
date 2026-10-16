@@ -355,6 +355,17 @@ input, `windows_paste.py`, and `e2e_desktop.py` / `e2e_x11.py`. It is started by
       FLEURS the right language was always the more confident on 1.5 s pieces (45/45); on whole
       sentences large-v3-turbo writes what it hears whatever the language token (both passes give
       the same words, so staying in the main language costs nothing).
+    - The main language is checked too when it is English and a part's pass is unsure of itself
+      (`ENGLISH_SURE`, -0.3 per token; on the user's voice English came out at -0.02 to -0.23,
+      Slovak in an English pass at -0.34 to -0.78). 2026-10-16: a Slovak dictation was split into
+      7.7 s of Slovak and 9.8 s "English", and the longer English part, never checked, came out
+      "Prepizhlas un tekst. Mislim, skorvo volnam čase". Neighbouring parts that end up in the same
+      language are then transcribed again as one pass ("prepis hlasu na text. Myslím skôr vo voľnom
+      čase", as with the menu set to Slovak; the parts alone gave "Prepis, hlas un tekst"), but not
+      a part whose two passes gave the same words: it may be in either language, and one pass with
+      its neighbour translates it (FLEURS mixed 5 % -> 33 % wrong when they were merged too). A
+      mostly Slovak recording isn't checked that way: the detection hardly ever takes English for
+      Slovak. `tests/bench_mixed.py --quick` stayed at 5.4 % / 7.8 % and the same speed.
     - Without live typing, `_final_text` transcribes each part on its own (`_final_parts`; log:
       `languages: sk 0.0-7.9 s, en 7.9-15.2 s`); one part: one pass, as before. Stretches the
       previews already checked are reused (`Session.checked`, within 0.15 s).

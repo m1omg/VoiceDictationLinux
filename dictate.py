@@ -1693,6 +1693,9 @@ class Worker(threading.Thread):
     SHORT = 2.0  # less speech than this: too little to tell Slovak from English
     CHECK_AFTER = 1.5  # auto mode, live: seconds of a stretch of speech after a pause before its language is checked
     SWITCH_MARGIN = 0.1  # log-probability per token by which a part's own language must beat the dictation's
+    # An English pass less sure than this (log-probability per token) may be Slovak taken for English: on the
+    # user's voice English came out at -0.02 to -0.23 (clips of 1-3 s lower), Slovak in English at -0.34 to -0.78.
+    ENGLISH_SURE = -0.3
 
     def __init__(self, cfg, transcriber: Transcriber, paster, cues: Cues, topbar):
         super().__init__(name="transcribe", daemon=True)
@@ -2025,39 +2028,62 @@ class Worker(threading.Thread):
 
     def _final_parts(self, s: Session, audio: np.ndarray, parts: list[tuple[int, int, str]]) -> tuple[str, str | None]:
         """A recording that switches language: each part transcribed in its own language, the texts
-        joined; a part in another language than most of it only if it is written better in that
-        language (_better_language). The dictation counts as being in the language most of it was in."""
+        joined. A part in another language than most of the recording is kept in it only if it is
+        written better in it (_better_language). So is an English part of a mostly English one whose
+        pass is unsure of itself (below ENGLISH_SURE): the detection takes Slovak for English even where
+        that is most of the recording (9.8 s of real Slovak after 7.7 s, transcribed in English
+        unchecked: "Prepizhlas un tekst"), but hardly ever English for Slovak. Neighbouring parts that
+        end up in the same language are transcribed again as one (a part alone lacks the rest of its
+        sentence: "Prepis, hlas un tekst" where the whole said "prepis hlasu na text"), unless one was
+        written the same in both languages (it may be in either: one pass with its neighbour would
+        translate it; FLEURS 5 % -> 33 % of the words wrong). The dictation counts as being in the
+        language most of it is in."""
         main = max(AUTO_LANGUAGES, key=lambda lang: sum(end - start for start, end, language in parts
                                                         if language == lang))
-        texts = []
-        for start, end, language in parts:
+        other = next(lang for lang in AUTO_LANGUAGES if lang != main)
+        decided = []  # [start, end, language, its pass's segments (None: several parts, not one pass yet), same]
+        for start, end, detected in parts:
             piece = audio[start:end]
-            if language == main:
-                segments = self._run(piece, language, hotwords=speech_total(piece) >= 1.0)
+            language, same = main, False
+            if detected == main:
+                segments = self._run(piece, main, hotwords=speech_total(piece) >= 1.0)
+                if main == "en" and confidence(segments) < self.ENGLISH_SURE:
+                    language, tried, same = self._better_language(piece, main, other)
+                    segments = segments if language == main else tried
             else:
-                language, segments = self._better_language(piece, main, language)
+                language, segments, same = self._better_language(piece, main, other)
+            if decided and decided[-1][2] == language and not same and not decided[-1][4]:
+                decided[-1][1], decided[-1][3] = end, None
+            else:
+                decided.append([start, end, language, segments, same])
+        texts, length = [], dict.fromkeys(AUTO_LANGUAGES, 0)
+        for start, end, language, segments, _same in decided:
+            piece = audio[start:end]
+            if segments is None:
+                segments = self._run(piece, language, hotwords=speech_total(piece) >= 1.0)  # (below 1 s whisper may echo them)
             text = " ".join(seg.text.strip() for seg in segments)
             texts.append(clean_text(text, self.cfg, language).strip())
-        s.language = main
+            length[language] += end - start
+        s.language = max(AUTO_LANGUAGES, key=length.get)
         text = " ".join(t for t in texts if t)
         if not text:
             return "", "no speech"
         return text + (" " if self.cfg.trailing_space else ""), None
 
-    def _better_language(self, piece: np.ndarray, main: str, other: str) -> tuple[str, list]:
-        """Is this piece, which the language detection puts in `other`, written better in it than in
-        the dictation's `main` language? Decoded in both, without the vocabulary (a pass in the wrong
+    def _better_language(self, piece: np.ndarray, main: str, other: str) -> tuple[str, list, bool]:
+        """Is this piece written better in `other` than in the dictation's `main` language (whichever
+        the language detection put it in)? Decoded in both, without the vocabulary (a pass in the wrong
         language copies it into its guesses), `other` must be more confident by SWITCH_MARGIN and say
         something else; otherwise it stays in `main`. (The detection put real Slovak at 100 % English,
-        and an English pass then made up "Give me a CachyOS to get some now".) Returns the language
-        and its pass's segments."""
+        and an English pass then made up "Give me a CachyOS to get some now".) Returns the language,
+        its pass's segments, and whether both passes wrote the same words."""
         kept, tried = self._run(piece, main, hotwords=False), self._run(piece, other, hotwords=False)
         sure_kept, sure_tried = confidence(kept), confidence(tried)
         same = [_norm(w) for seg in kept for w in seg.text.split()] == [_norm(w) for seg in tried for w in seg.text.split()]
         switch = sure_tried >= sure_kept + self.SWITCH_MARGIN and not same
         log.info("language part of %.1f s: %s (%s %.2f, %s %.2f per token%s)", len(piece) / RATE, other if switch
                  else main, main, sure_kept, other, sure_tried, ", the same words" if same else "")
-        return (other, tried) if switch else (main, kept)
+        return (other, tried, same) if switch else (main, kept, same)
 
     @staticmethod
     def _live_language(s: Session, at: float) -> str | None:
