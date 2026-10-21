@@ -1217,14 +1217,27 @@ class Transcriber:
             return
         raise RuntimeError("no Whisper model could be loaded")
 
+    # Whisper leaves out whole sentences when one window holds a lot of speech: FLEURS sentences joined
+    # into dictations of 34-57 s, 3 of 20 lost one or two, and Slovak came out at 12.8 % of the words
+    # wrong (single sentences: 6.4 %; 2-3 joined, 13-43 s: 8.5-8.8 %). So a pass with more speech than
+    # this is cut at its longest pauses into pieces of at most this many seconds, decoded together in
+    # one batch: Slovak 6.7 / 6.1 % for 3 / 4 sentences, no sentence lost, English unchanged (4 sentences
+    # 4.2 -> 3.9 %), 0.1-0.25 s more (tests/bench_long.py; 15 s gained nothing). Not on a processor,
+    # where each piece costs an encoder pass of its own.
+    PIECE_LIMIT = 20.0
+
     def run(self, audio: np.ndarray, language: str, *, words=False, prompt=None, beam_size=None,
             hotwords=True) -> list:
         """One model pass; returns the segments (with word timings if words=True). Vocabulary
         hints are left out for very short audio, where whisper tends to just echo them."""
         audio = lifted(audio)
+        beam_size = beam_size or (self.cfg.cpu_beam_size if self.on_cpu else self.cfg.beam_size)
+        if not words and not self.on_cpu and len(audio) > self.PIECE_LIMIT * RATE:
+            segments = self._run_pieces(audio, language, prompt, beam_size, hotwords)
+            if segments is not None:
+                return segments
         batched = len(audio) > 30 * RATE and not words
         fn = self.batched.transcribe if batched else self.model.transcribe
-        beam_size = beam_size or (self.cfg.cpu_beam_size if self.on_cpu else self.cfg.beam_size)
         opts = dict(language=language, beam_size=beam_size, vad_filter=True,
                     condition_on_previous_text=False, without_timestamps=not words, word_timestamps=words,
                     hotwords=self.hotwords if hotwords else None, initial_prompt=prompt)
@@ -1233,6 +1246,39 @@ class Transcriber:
         accepted = inspect.signature(fn).parameters
         segments, _info = fn(audio, **{k: v for k, v in opts.items() if k in accepted})
         return list(segments)
+
+    def _run_pieces(self, audio: np.ndarray, language: str, prompt, beam_size: int, hotwords: bool) -> list | None:
+        """A pass over more than PIECE_LIMIT s of speech (None: there is less): the recording cut at
+        its longest pauses (split_speech), each piece's speech as a pass with vad_filter hears it
+        (silences of 2 s and more taken out), the pieces decoded as one batch, the segments' times put
+        back on the recording's. (Cut after taking the silences out, a cut can't tell a long pause from
+        a short one: Slovak 8.7 % instead of 6.1 % for 4 sentences.)"""
+        from faster_whisper.vad import SpeechTimestampsMap, VadOptions, get_speech_timestamps
+        stamps = get_speech_timestamps(audio, VadOptions())
+        if sum(stamp["end"] - stamp["start"] for stamp in stamps) <= self.PIECE_LIMIT * RATE:
+            return None
+        chunks, clips, maps, at = [], [], [], 0
+        for start, end in split_speech(audio, self.PIECE_LIMIT):
+            kept = [{"start": max(stamp["start"], start), "end": min(stamp["end"], end)} for stamp in stamps
+                    if stamp["end"] > start and stamp["start"] < end]
+            if not kept:
+                continue
+            chunks += [audio[k["start"]:k["end"]] for k in kept]
+            length = sum(k["end"] - k["start"] for k in kept)
+            clips.append({"start": at / RATE, "end": (at + length) / RATE})
+            maps.append(SpeechTimestampsMap(kept, RATE))
+            at += length
+        segments, _info = self.batched.transcribe(
+            np.concatenate(chunks), language=language, beam_size=beam_size, vad_filter=False, clip_timestamps=clips,
+            condition_on_previous_text=False, without_timestamps=True, initial_prompt=prompt,
+            hotwords=self.hotwords if hotwords else None, batch_size=8)
+        out = []
+        for seg in segments:
+            i = max(k for k, clip in enumerate(clips) if clip["start"] <= seg.start + 1e-3 or k == 0)
+            offset = clips[i]["start"]
+            out.append(SimpleNamespace(**{**vars(seg), "start": maps[i].get_original_time(seg.start - offset),
+                                          "end": maps[i].get_original_time(seg.end - offset, is_end=True)}))
+        return out
 
     # Log-probability (of a segment's whole text) by which the written word may beat its sound-alike, which
     # still wins: on the user's voice "Korea" said led by 3.6 to 10.5, "Krea" said (written Korea) by 2.3 to 2.6.
@@ -1562,6 +1608,26 @@ def speech_regions(audio: np.ndarray, pause: float = PART_PAUSE) -> list[tuple[i
     from faster_whisper.vad import VadOptions, get_speech_timestamps
     stamps = get_speech_timestamps(audio, VadOptions(min_silence_duration_ms=int(pause * 1000), speech_pad_ms=0))
     return [(stamp["start"], stamp["end"]) for stamp in stamps]
+
+
+def split_speech(audio: np.ndarray, limit: float) -> list[tuple[int, int]]:
+    """Where to cut a recording into pieces of at most `limit` seconds of it, for
+    Transcriber._run_pieces: at its longest pauses (speech_regions), each piece reaching into half of
+    the pause on either side, all of it covered: [(first sample, end)]. A stretch longer than a
+    window (30 s) without a pause is cut into equal parts."""
+    def cut(group):
+        if group[-1][1] - group[0][0] <= limit * RATE or len(group) == 1:
+            return [(group[0][0], group[-1][1])]
+        _pause, i = max((group[k + 1][0] - group[k][1], k) for k in range(len(group) - 1))
+        return cut(group[:i + 1]) + cut(group[i + 1:])
+    pieces = cut(speech_regions(audio) or [(0, len(audio))])
+    bounds = [0] + [(end + start) // 2 for (_, end), (start, _) in zip(pieces, pieces[1:])] + [len(audio)]
+    out = []
+    for start, end in zip(bounds, bounds[1:]):
+        parts = math.ceil((end - start) / (30 * RATE))
+        edges = [start + (end - start) * k // parts for k in range(parts + 1)]
+        out += list(zip(edges, edges[1:]))
+    return out
 
 
 def language_evidence(seconds: float, shares: dict[str, float] | None) -> float:

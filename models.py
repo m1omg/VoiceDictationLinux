@@ -21,7 +21,9 @@ MODELS = {
     "medium": ("Systran/faster-whisper-medium", 1528, "excellent English, fair Slovak; slow without a GPU"),
     "large-v3-turbo": ("dropbox-dash/faster-whisper-large-v3-turbo", 1620, "best, also for Slovak; slow without a GPU"),
     # Bigger and slower (32 decoder layers instead of 4); measured on an RTX 3060, FLEURS:
-    "large-v3": ("Systran/faster-whisper-large-v3", 3090, "as accurate as large-v3-turbo, 1.5x slower; graphics card only"),
+    # (Long Slovak dictations of 3-4 FLEURS sentences: 12-20 % of the words wrong, several sentences left
+    # out or made up, against 6 % for large-v3-turbo; tests/bench_long.py.)
+    "large-v3": ("Systran/faster-whisper-large-v3", 3090, "as good in single sentences, skips some in long Slovak dictations; 1.5x slower; graphics card only"),
     "large-v2": ("Systran/faster-whisper-large-v2", 3090, "slightly better English, worse Slovak, 1.5x slower; graphics card only"),
 }
 FILES = ["config.json", "preprocessor_config.json", "model.bin", "tokenizer.json", "vocabulary.*"]

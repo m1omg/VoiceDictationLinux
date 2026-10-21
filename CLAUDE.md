@@ -139,6 +139,7 @@ XVFB=… $D/venv/bin/python tests/x11_paste.py   # X11 desktops: key grab, combi
 XVFB=… $D/venv/bin/python tests/bigui_test.py  # large text: panel, focus, settings window by keyboard
 XVFB=… $D/venv/bin/python tests/bigui_window.py  # settings window: redraws, keys, clicks, scrolling, timings
 $D/venv/bin/python tests/bench_mixed.py --live   # auto mode on dictations that switch language
+$D/venv/bin/python tests/bench_long.py           # long dictations in one language: no sentence left out
 XVFB=… $D/venv/bin/python tests/e2e_x11.py     # a whole dictation with a stand-in recorder
 journalctl --user -u dictate -n 30              # or: tail $D/dictate.log  (autostart desktops)
 ```
@@ -428,8 +429,22 @@ input, `windows_paste.py`, and `e2e_desktop.py` / `e2e_x11.py`. It is started by
   - Short clips in auto mode (< `Worker.SHORT` = 2 s of speech, `speech_total`): an "en" verdict
     keeps the previous dictation's language if that wasn't English (whisper takes short Slovak for
     English, rarely the reverse). Vocabulary hints are left out below 1 s of speech.
+  - **Long dictations** (`Transcriber.PIECE_LIMIT`, `_run_pieces`, `split_speech`): in one window
+    Whisper leaves out whole sentences when it holds a lot of speech (`tests/bench_long.py`, 4 joined
+    Slovak FLEURS sentences: 12.8 % wrong, 3 of 20 lost a sentence). A pass (not live typing, not on
+    a processor) with more than 20 s of speech is cut at the recording's longest pauses into pieces
+    of at most 20 s; each piece's speech is what `vad_filter` would keep (silences of 2 s and more
+    out), and the pieces go to `BatchedInferencePipeline` with `clip_timestamps` (each clip decoded on
+    its own, not merged into 30 s windows) as one batch; the segments' times are mapped back with
+    faster-whisper's `SpeechTimestampsMap`. Cutting after the silences were taken out (where a long
+    pause looks short) gave 8.7 % instead of 6.1 %; a 15 s limit gained nothing; timestamps or no VAD
+    in one window didn't help either. 2026-10-21, after the user found Slovak worse "in all models":
+    FLEURS one-shot and auto mode were the same as the 10-12 version for turbo, large-v3 and medium,
+    the model files matched Hugging Face's checksums and the libraries hadn't changed since 10-02; the
+    user's dictations are long (median 14-17 s, many 30-60 s).
   - Bigger models: large-v3 and large-v2 are offered; on FLEURS neither beats large-v3-turbo for
-    both languages (v3: 3.9 % / 6.6 %, v2: 3.2 % / 10.2 %, both ~1.5x slower).
+    both languages (v3: 3.9 % / 6.6 %, v2: 3.2 % / 10.2 %, both ~1.5x slower). large-v3 leaves out
+    and makes up sentences in long Slovak dictations (18.5-20 %, in pieces 12-13 %; turbo 6 %).
   - Other speech models were tried and taken out again: KInIT's Slovak Whisper fine-tunes and
     Qwen3-ASR for English (bc74d12..826bacb, 2026-10-08). They did better on FLEURS, but in the
     user's own dictation plain large-v3-turbo was faster and made fewer mistakes, so 2026-10-12 the

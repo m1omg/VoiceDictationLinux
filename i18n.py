@@ -260,8 +260,8 @@ SK: dict[str, str] = {
     "very good English, poor Slovak": "veľmi dobrá angličtina, slabá slovenčina",
     "excellent English, fair Slovak; slow without a GPU": "výborná angličtina, slušná slovenčina; bez grafickej karty pomalý",
     "best, also for Slovak; slow without a GPU": "najlepší, aj pre slovenčinu; bez grafickej karty pomalý",
-    "as accurate as large-v3-turbo, 1.5x slower; graphics card only":
-        "rovnako presný ako large-v3-turbo, 1,5× pomalší; iba na grafickej karte",
+    "as good in single sentences, skips some in long Slovak dictations; 1.5x slower; graphics card only":
+        "v jednotlivých vetách rovnako dobrý, v dlhom slovenskom diktáte niektoré vynechá; 1,5× pomalší; iba na grafickej karte",
     "slightly better English, worse Slovak, 1.5x slower; graphics card only":
         "o niečo lepšia angličtina, horšia slovenčina, 1,5× pomalší; iba na grafickej karte",
     "no usable GPU": "žiadna použiteľná grafická karta",

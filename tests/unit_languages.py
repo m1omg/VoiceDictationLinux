@@ -207,6 +207,15 @@ check("English, then Slovak: the English part, its pass sure of itself, isn't ch
 text, passes, _ = final(recording(("en~", 3.0), (None, 0.5), ("sk~", 2.0)))
 check("a part written the same in both languages goes by how its words look: Slovak ones stay apart from English",
       (text.split(), max(seconds for seconds, _, _ in passes)), ([f"en{i}" for i in range(6)] + [f"sk{i}" for i in range(6, 10)], 3.25))
+def cut_at(audio):
+    return [(round(start / RATE, 1), round(end / RATE, 1)) for start, end in d.split_speech(audio, 20.0)]
+
+
+check("long speech is cut at its longest pause into pieces of at most 20 s, each reaching into half the pause",
+      cut_at(recording(("sk", 8.0), (None, 1.0), ("sk", 8.0), (None, 0.5), ("sk", 8.0))), [(0.0, 8.5), (8.5, 25.5)])
+check("... shorter speech stays one piece", cut_at(recording(("sk", 8.0), (None, 1.0), ("sk", 8.0))), [(0.0, 17.0)])
+check("... and 40 s without a pause is cut into equal parts of a window or less", cut_at(recording(("sk", 40.0))),
+      [(0.0, 20.0), (20.0, 40.0)])
 text, passes, language = final(recording(("sk!", 4.0)))
 check("a whole dictation of Slovak the detection is sure is English: the English pass is unsure, so Slovak",
       ("TRANSLATED" in text, language, passes[0]), (False, "sk", (4.0, "en", True)))

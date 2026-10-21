@@ -227,7 +227,7 @@ card even the biggest is fast.
 | small | 484 MB | very good | poor | computers without a graphics card, English |
 | medium | 1.5 GB | excellent | fair | rarely the best choice: large-v3-turbo is as fast and much better in Slovak |
 | large-v3-turbo | 1.6 GB | excellent | very good | a graphics card; Slovak on a 4-core or faster processor |
-| large-v3 | 3.1 GB | excellent | very good | measured as accurate as large-v3-turbo, 1.5x slower; a graphics card |
+| large-v3 | 3.1 GB | excellent | good in sentences | as accurate as large-v3-turbo in single sentences, but it leaves out or makes up sentences in long Slovak dictations; 1.5x slower; a graphics card |
 | large-v2 | 3.1 GB | excellent | good | slightly better English, worse Slovak, 1.5x slower; a graphics card |
 
 Measured word error rates and times are under [Accuracy and speed](#accuracy-and-speed).
@@ -428,6 +428,17 @@ typing (safe or instant) 6 %, and a dictation in one language is typed as fast a
 of it before you let go). Dictations in one language come out the same. One that switches takes
 longer after you let go, as each part gets its own pass: about 1.3 s instead of 0.8 s for 20 s of
 speech with large-v3-turbo (2.5 s instead of 1.7 s with large-v3).
+
+**Long dictations in one language** (`tests/bench_long.py`: 2-4 different FLEURS sentences joined
+with pauses of 0.4-1.2 s, 13-57 s, 20 dictations each, RTX 3060). In one window Whisper sometimes
+leaves out whole sentences when there is a lot of speech in it: with large-v3-turbo Slovak came out
+at 8.5-8.8 % of the words wrong for 2-3 sentences and 12.8 % for 4 (3 of 20 dictations lost a
+sentence), against 6.4 % for single sentences. So more than 20 s of speech is cut at the longest
+pauses into pieces of at most 20 s, decoded together in one batch (on a graphics card): Slovak
+6.7 % / 6.1 % for 3 / 4 sentences (2: 8.3 %), no sentence lost; English unchanged, 2.7-4.6 % (4
+sentences 4.2 → 3.9 %); 0.1-0.25 s more. medium: Slovak 16.6 → 15.0 % and 19.8 → 17.4 %. large-v3 leaves out and
+makes up sentences even in the pieces (Slovak 18.5-20 % → 12-13 %), so it is no choice for long
+Slovak dictation.
 
 **Bigger models on the RTX 3060** (one-shot, same sentences): large-v3 3.9 % English / 6.6 % Slovak
 at ~0.54 / 0.72 s per sentence; large-v2 3.2 % / 10.2 % at ~0.55 / 0.73 s. Neither beats
