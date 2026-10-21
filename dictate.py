@@ -47,13 +47,19 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from types import SimpleNamespace
 
-import numpy as np
+# numpy's OpenBLAS starts a thread per processor core for every matrix product (the speech model's
+# input features) and leaves them spinning: during dictation 3 cores were busy for nothing (a 19 s
+# dictation's previews took 60 s of processor time; with one thread 17 s, and no pass got slower).
+# It reads this when numpy is imported.
+os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
 
-import i18n
-import keys
-import models
-import update
-from i18n import t
+import numpy as np  # noqa: E402
+
+import i18n  # noqa: E402
+import keys  # noqa: E402
+import models  # noqa: E402
+import update  # noqa: E402
+from i18n import t  # noqa: E402
 
 WINDOWS, MACOS = sys.platform == "win32", sys.platform == "darwin"
 LINUX = not (WINDOWS or MACOS)

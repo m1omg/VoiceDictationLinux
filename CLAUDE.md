@@ -558,6 +558,11 @@ input, `windows_paste.py`, and `e2e_desktop.py` / `e2e_x11.py`. It is started by
     `--setup` and `--download` switch it off for themselves.
   - `av<19` is pinned.
   - `XDG_CACHE_HOME` is redirected because onnxruntime would write into `~/.cache`.
+  - `OPENBLAS_NUM_THREADS=1` is set before numpy is imported (top of dictate.py): numpy's OpenBLAS
+    started a thread per core for each matrix product (the model's input features) and left them
+    spinning, so dictating kept 3 of 12 cores busy for nothing (2026-10-21: the service had used
+    1 h 50 min of processor time in 7 h 50 min, 3 s per second of dictation; a 19 s dictation's
+    previews 60 s -> 17 s, its final pass 3.3 s -> 0.6 s, equally fast).
   - `pw-record` and `pw-play` run with `LC_ALL=C` because they parse numbers with the locale.
   - Windows and macOS record through PortAudio (sounddevice); a device that can't do 16 kHz is
     resampled block by block (`tests/unit_audio.py`), and the device list is re-read after each
