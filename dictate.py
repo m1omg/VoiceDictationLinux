@@ -130,6 +130,10 @@ DEFAULTS = {
     # detected once, and one model pass, without the later checks (parts in different languages,
     # Slovak taken for English, long dictations in pieces), which cost time on every dictation.
     "classic_transcription": False,
+    # The languages whose passes get the vocabulary as a hint. On the user's Slovak (and FLEURS: 13.8 ->
+    # 12.3 % of the words wrong) the English words pulled Slovak towards English spelling ("transkryptov",
+    # "ďalšimi", a word left out); English is better with them (4.3 -> 3.6 %).
+    "vocabulary_languages": ["en", "sk"],
     "status_popup": "auto",  # a small pop-up while dictating: "auto" (when the model runs on the processor), "on", "off"
     "big_panel": False,  # large-text mode (low vision): a big status panel while dictating (instead),
     "big_settings": False,  # clicking the tray icon opens the big settings window,
@@ -1243,8 +1247,10 @@ class Transcriber:
     def run(self, audio: np.ndarray, language: str, *, words=False, prompt=None, beam_size=None,
             hotwords=True) -> list:
         """One model pass; returns the segments (with word timings if words=True). Vocabulary
-        hints are left out for very short audio, where whisper tends to just echo them."""
+        hints are left out for very short audio, where whisper tends to just echo them, and in
+        languages not in the setting vocabulary_languages."""
         audio = lifted(audio)
+        hotwords = hotwords and (language is None or language in self.cfg.vocabulary_languages)
         beam_size = beam_size or (self.cfg.cpu_beam_size if self.on_cpu else self.cfg.beam_size)
         batched = len(audio) > 30 * RATE and not words
         fn = self.batched.transcribe if batched else self.model.transcribe

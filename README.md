@@ -498,6 +498,8 @@ python3 tests/fetch_fleurs.py                                  # ~27 MB of test 
   picks one language for the whole dictation and the model makes one pass. It skips the later checks
   (a dictation switching language, Slovak taken for English, long dictations in pieces), so it is as
   fast as before; a dictation that switches language is then partly translated.
+- `vocabulary_languages = ["en"]` gives the vocabulary only to English passes. English words in it can
+  pull Slovak towards English spelling (on FLEURS Slovak 13.8 → 12.3 % of the words wrong without them).
 
 ## Troubleshooting
 - **Self-checks.** `--check` lists what was found and what's missing. `--selftest` records 10 s

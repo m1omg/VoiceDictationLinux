@@ -22,6 +22,9 @@ keep_recordings = 0           # keep the last N dictations as audio files in rec
 # Transcribe as the version of 2026-10-04: one language per dictation (auto mode detects it once) and
 # one pass, without the later language checks and long-dictation pieces. Faster; mixed dictations translate.
 classic_transcription = false
+# The languages whose passes get the vocabulary as a hint. English words in it can pull Slovak towards
+# English spelling ("transkryptov"); ["en"] keeps them for English only.
+vocabulary_languages = ["en", "sk"]
 
 # Linux: "auto" picks "wayland" (GNOME, KDE: global-shortcut portal + /dev/uinput) or "x11"
 # (Cinnamon, XFCE, MATE: X11 key grab + XTEST) from the session type.

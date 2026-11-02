@@ -388,6 +388,27 @@ text, passes, language = final(recording(("sk", 3.0), (None, 0.5), ("sk!", 4.0))
 check("... no part checked in the other language either", len(passes), 1)
 cfg.classic_transcription = False
 
+
+def hint_given(language, languages):
+    """Whether Transcriber.run hands the model the vocabulary for a pass in `language`."""
+    seen = []
+
+    def transcribe(audio, language=None, beam_size=None, vad_filter=None, condition_on_previous_text=None,
+                   without_timestamps=None, word_timestamps=None, hotwords=None, initial_prompt=None):
+        seen.append(hotwords)
+        return iter(()), None
+    tr = d.Transcriber.__new__(d.Transcriber)
+    tr.cfg = types.SimpleNamespace(**{**vars(cfg), "vocabulary_languages": languages, "classic_transcription": True})
+    tr.on_cpu, tr.hotwords = False, "Claude, GitHub."
+    tr.model = types.SimpleNamespace(transcribe=transcribe)
+    tr.run(np.zeros(RATE, dtype=np.float32), language)
+    return seen[0] is not None
+
+
+check("vocabulary_languages: the vocabulary goes to passes in the languages listed",
+      [hint_given("en", ["en"]), hint_given("sk", ["en"]), hint_given("sk", ["en", "sk"]), hint_given(None, ["en"])],
+      [True, False, True, True])
+
 for name, good, got, want in checks:
     print(f"{'ok  ' if good else 'FAIL'} {name}" + ("" if good else f": got {got!r}, want {want!r}"))
 sys.exit(0 if all(c[1] for c in checks) else 1)

@@ -452,6 +452,10 @@ input, `windows_paste.py`, and `e2e_desktop.py` / `e2e_x11.py`. It is started by
     whole recording (live: once, never changed), one pass with the vocabulary, no parts, no English check,
     no pieces. The user found the later checks slower and Slovak no better on their voice; checked equal to
     56ec07d: FLEURS 151/151 identical texts, final pass 0.92 s against 0.90 s (noise), 4/4 own recordings.
+  - **`vocabulary_languages`** (default `["en", "sk"]`): passes in other languages get no vocabulary hint.
+    The user's English words pulled Slovak towards English spelling ("transkryptov", "ďalšimi", "tuná" left
+    out); with `["en"]` FLEURS Slovak 13.8 -> 12.3 % (14 clips better, 6 worse), English texts identical
+    (51/51), no change in speed (paired, best of 2: +10 ms Slovak, +37 ms for the unchanged English = noise).
   - Bigger models: large-v3 and large-v2 are offered; on FLEURS neither beats large-v3-turbo for
     both languages (v3: 3.9 % / 6.6 %, v2: 3.2 % / 10.2 %, both ~1.5x slower). large-v3 leaves out
     and makes up sentences in long Slovak dictations (18.5-20 %, in pieces 12-13 %; turbo 6 %).
