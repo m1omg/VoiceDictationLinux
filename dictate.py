@@ -1223,14 +1223,18 @@ class Transcriber:
             return
         raise RuntimeError("no Whisper model could be loaded")
 
-    # Whisper leaves out whole sentences when one window holds a lot of speech: FLEURS sentences joined
-    # into dictations of 34-57 s, 3 of 20 lost one or two, and Slovak came out at 12.8 % of the words
-    # wrong (single sentences: 6.4 %; 2-3 joined, 13-43 s: 8.5-8.8 %). So a pass with more speech than
-    # this is cut at its longest pauses into pieces of at most this many seconds, decoded together in
-    # one batch: Slovak 6.7 / 6.1 % for 3 / 4 sentences, no sentence lost, English unchanged (4 sentences
-    # 4.2 -> 3.9 %), 0.1-0.25 s more (tests/bench_long.py; 15 s gained nothing). Not on a processor,
-    # where each piece costs an encoder pass of its own.
+    # Whisper leaves out whole sentences when one window holds a lot of speech, in Slovak: FLEURS sentences
+    # joined into dictations of 34-57 s, 3 of 20 lost one or two (tests/bench_long.py), which pieces cut at
+    # the longest pauses and decoded in one batch bring back. But real pauses for thought are as long as
+    # those between sentences (0.5-2.3 s), so pieces also break sentences where nothing was lost: "Spraviš
+    # mi... Hru", "a single click. Should", in 8 of the user's 9 dictations over 20 s. So the whole pass
+    # stays, unless a Slovak one with more than PIECE_LIMIT s of speech wrote under LOST_RATE characters
+    # (without spaces) per second of it and pieces write at least PIECE_GAIN as many words. Pieces found
+    # 1.32-1.49x the words where sentences were lost, at most 1.07x elsewhere; the user's never above 1.00x.
+    # Not on a processor, where each piece costs an encoder pass of its own.
     PIECE_LIMIT = 20.0
+    LOST_RATE = 9.5
+    PIECE_GAIN = 1.15
 
     def run(self, audio: np.ndarray, language: str, *, words=False, prompt=None, beam_size=None,
             hotwords=True) -> list:
@@ -1238,10 +1242,6 @@ class Transcriber:
         hints are left out for very short audio, where whisper tends to just echo them."""
         audio = lifted(audio)
         beam_size = beam_size or (self.cfg.cpu_beam_size if self.on_cpu else self.cfg.beam_size)
-        if not words and not self.on_cpu and len(audio) > self.PIECE_LIMIT * RATE:
-            segments = self._run_pieces(audio, language, prompt, beam_size, hotwords)
-            if segments is not None:
-                return segments
         batched = len(audio) > 30 * RATE and not words
         fn = self.batched.transcribe if batched else self.model.transcribe
         opts = dict(language=language, beam_size=beam_size, vad_filter=True,
@@ -1251,7 +1251,27 @@ class Transcriber:
             opts["batch_size"] = 8
         accepted = inspect.signature(fn).parameters
         segments, _info = fn(audio, **{k: v for k, v in opts.items() if k in accepted})
-        return list(segments)
+        segments = list(segments)
+        if language != "en" and not words and not self.on_cpu and len(audio) > self.PIECE_LIMIT * RATE:
+            return self._recover_lost(audio, language, prompt, beam_size, hotwords, segments)
+        return segments
+
+    def _recover_lost(self, audio: np.ndarray, language: str, prompt, beam_size: int, hotwords: bool,
+                      segments: list) -> list:
+        """The whole pass's segments, or those of a pass in pieces if the whole one seems to have left
+        out sentences and the pieces do bring back words (see PIECE_LIMIT)."""
+        speech = speech_total(audio)
+        written = sum(len("".join(seg.text.split())) for seg in segments)
+        if speech <= self.PIECE_LIMIT or written >= self.LOST_RATE * speech:
+            return segments
+        pieces = self._run_pieces(audio, language, prompt, beam_size, hotwords)
+        if pieces is None:
+            return segments
+        words_in = lambda found: sum(len(seg.text.split()) for seg in found)  # noqa: E731
+        better = words_in(pieces) >= self.PIECE_GAIN * words_in(segments)
+        log.info("long pass of %.1f s of speech, %.1f characters per second: %d words in one pass, %d in pieces: %s",
+                 speech, written / speech, words_in(segments), words_in(pieces), "pieces" if better else "one pass")
+        return pieces if better else segments
 
     def _run_pieces(self, audio: np.ndarray, language: str, prompt, beam_size: int, hotwords: bool) -> list | None:
         """A pass over more than PIECE_LIMIT s of speech (None: there is less): the recording cut at
@@ -2187,8 +2207,8 @@ class Worker(threading.Thread):
         if s.mode == "auto" and s.language == "en" and -math.inf < confidence(segments) < self.ENGLISH_SURE:
             # Slovak taken for English is translated ("I'm trying to give the 2 check." for "Skúšam dať ten
             # dvojček"), and the English pass is unsure of it: written better in Slovak, it is Slovak.
-            if self._better_language(audio, "en", "sk")[0] == "sk":  # (then a pass as any Slovak dictation gets)
-                s.language, segments = "sk", self._run(audio, "sk", hotwords=speech >= 1.0)
+            # (Both passes with the vocabulary as any dictation gets it, so neither is decoded again.)
+            s.language, segments, _same = self._better_language(audio, "en", "sk", kept=segments, hotwords=speech >= 1.0)
         segments = self.transcriber.prefer_alikes(audio, segments)
         text = clean_text(" ".join(seg.text.strip() for seg in segments), self.cfg, s.language)
         return (text, None) if text else ("", "no speech")
@@ -2214,12 +2234,19 @@ class Worker(threading.Thread):
             piece = audio[start:end]
             language, same, segments = main, False, None  # (a Slovak part of a mostly Slovak one: its pass below)
             if detected == main == "en":
-                segments = self._run(piece, main, hotwords=speech_total(piece) >= 1.0)
+                hints = speech_total(piece) >= 1.0
+                segments = self._run(piece, main, hotwords=hints)
                 if -math.inf < confidence(segments) < self.PART_ENGLISH_SURE:  # (-inf: nothing heard)
-                    language, tried, same = self._better_language(piece, main, other)
-                    segments = segments if language == main else tried
+                    language, segments, same = self._better_language(piece, main, other, kept=segments, hotwords=hints)
             elif detected != main:
-                language, segments, same = self._better_language(piece, main, other)
+                english = self._run(piece, "en", hotwords=False) if other == "en" else None
+                if english is not None and -math.inf < confidence(english) < self.ENGLISH_SURE:
+                    # Slovak the detection took for English: this unsure, it stays in the Slovak pass below,
+                    # without decoding the piece in Slovak as well just to compare.
+                    log.info("language part of %.1f s: %s (%s %.2f per token: unsure)", len(piece) / RATE, main, other,
+                             confidence(english))
+                else:
+                    language, segments, same = self._better_language(piece, main, other, tried=english)
             if same:
                 language = "sk" if looks_slovak(" ".join(seg.text for seg in segments)) else "en"
             if decided and decided[-1][2] == language:
@@ -2241,14 +2268,18 @@ class Worker(threading.Thread):
             return "", "no speech"
         return text + (" " if self.cfg.trailing_space else ""), None
 
-    def _better_language(self, piece: np.ndarray, main: str, other: str) -> tuple[str, list, bool]:
+    def _better_language(self, piece: np.ndarray, main: str, other: str, kept: list | None = None,
+                         tried: list | None = None, hotwords: bool = False) -> tuple[str, list, bool]:
         """Is this piece written better in `other` than in the dictation's `main` language (whichever
-        the language detection put it in)? Decoded in both, without the vocabulary (a pass in the wrong
-        language copies it into its guesses), `other` must be more confident by SWITCH_MARGIN and say
-        something else; otherwise it stays in `main`. (The detection put real Slovak at 100 % English,
-        and an English pass then made up "Give me a CachyOS to get some now".) Returns the language,
-        its pass's segments, and whether both passes wrote the same words."""
-        kept, tried = self._run(piece, main, hotwords=False), self._run(piece, other, hotwords=False)
+        the language detection put it in)? Decoded in both, by default without the vocabulary (a pass in
+        the wrong language copies it into its guesses), `other` must be more confident by SWITCH_MARGIN
+        and say something else; otherwise it stays in `main`. (The detection put real Slovak at 100 %
+        English, and an English pass then made up "Give me a CachyOS to get some now".) kept, tried: a
+        pass already made in `main` or `other` (with `hotwords` as given for the one left to make), not
+        decoded again. Returns the language, its pass's segments, and whether both passes wrote the same
+        words."""
+        kept = self._run(piece, main, hotwords=hotwords) if kept is None else kept
+        tried = self._run(piece, other, hotwords=hotwords) if tried is None else tried
         sure_kept, sure_tried = confidence(kept), confidence(tried)
         same = [_norm(w) for seg in kept for w in seg.text.split()] == [_norm(w) for seg in tried for w in seg.text.split()]
         switch = sure_tried >= sure_kept + self.SWITCH_MARGIN and not same

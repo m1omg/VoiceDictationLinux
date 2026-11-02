@@ -433,8 +433,10 @@ speech with large-v3-turbo (2.5 s instead of 1.7 s with large-v3).
 with pauses of 0.4-1.2 s, 13-57 s, 20 dictations each, RTX 3060). In one window Whisper sometimes
 leaves out whole sentences when there is a lot of speech in it: with large-v3-turbo Slovak came out
 at 8.5-8.8 % of the words wrong for 2-3 sentences and 12.8 % for 4 (3 of 20 dictations lost a
-sentence), against 6.4 % for single sentences. So more than 20 s of speech is cut at the longest
-pauses into pieces of at most 20 s, decoded together in one batch (on a graphics card): Slovak
+sentence), against 6.4 % for single sentences. So a Slovak pass over more than 20 s of speech that wrote
+suspiciously little is also tried in pieces of at most 20 s, cut at the longest pauses and decoded in one
+batch (on a graphics card), and those are typed if they bring back at least 15 % more words (always cutting
+broke real sentences at pauses for thought; the figures here are for always cutting): Slovak
 6.7 % / 6.1 % for 3 / 4 sentences (2: 8.3 %), no sentence lost; English unchanged, 2.7-4.6 % (4
 sentences 4.2 → 3.9 %); 0.1-0.25 s more. medium: Slovak 16.6 → 15.0 % and 19.8 → 17.4 %. large-v3 leaves out and
 makes up sentences even in the pieces (Slovak 18.5-20 % → 12-13 %), so it is no choice for long

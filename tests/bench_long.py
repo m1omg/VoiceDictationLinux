@@ -8,7 +8,8 @@ dictations lost more than a quarter of their words (a sentence left out).
 Reference (CachyOS, RTX 3060, large-v3-turbo, 20 dictations each), one window -> pieces of at most
 Transcriber.PIECE_LIMIT s of speech: Slovak 1-4 sentences 6.4 / 8.8 -> 8.3 / 8.5 -> 6.7 / 12.8 -> 6.1 %
 (more than a quarter wrong: 0 / 1 -> 1 / 1 -> 0 / 3 -> 0 of 20), English 2.7 / 3.3 / 4.6 / 4.2 -> 3.9 %;
-4 Slovak sentences 0.85 -> 1.09 s.
+4 Slovak sentences 0.85 -> 1.09 s. (Those figures are for always cutting. Since then pieces only replace a
+Slovak pass that wrote little, when they bring back words: Transcriber._recover_lost.)
 """
 import random
 import sys

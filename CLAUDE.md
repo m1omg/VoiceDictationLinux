@@ -347,7 +347,8 @@ input, `windows_paste.py`, and `e2e_desktop.py` / `e2e_x11.py`. It is started by
       phrase inside Slovak stays Slovak. On the processor only the first, the last and the longest
       stretch are detected (`DETECTIONS`).
     - A part in another language than most of the recording is kept in it only if it is *written*
-      better in it (`Worker._better_language`): decoded both ways without the vocabulary, its own
+      better in it (`Worker._better_language`): decoded both ways (at most two passes for a whole
+      unsure dictation; an unsure English pass of a part in a Slovak recording rejects it at once), its own
       language must be more confident by `SWITCH_MARGIN` (0.1 log-probability per token,
       `confidence()`) and say other words; otherwise it stays in the main language (log:
       `language part of 3.7 s: sk (sk -0.25, en -0.61 per token)`). Why: in the user's real
@@ -442,6 +443,11 @@ input, `windows_paste.py`, and `e2e_desktop.py` / `e2e_x11.py`. It is started by
     FLEURS one-shot and auto mode were the same as the 10-12 version for turbo, large-v3 and medium,
     the model files matched Hugging Face's checksums and the libraries hadn't changed since 10-02; the
     user's dictations are long (median 14-17 s, many 30-60 s).
+    2026-11-02, on 50 of the user's own recordings: always cutting broke sentences at pauses for
+    thought, which are as long as those between sentences (0.5-2.3 s; "Spraviš mi... Hru", 9 of 10
+    dictations over 20 s changed). Now the whole pass stays unless a Slovak one (`Transcriber._recover_lost`)
+    wrote under `LOST_RATE` characters per second of speech and pieces write `PIECE_GAIN` as many words:
+    the user's 10 long ones read as with one pass, FLEURS long Slovak 10.7 % (always cut 10.2 %, never 17.5 %).
   - Bigger models: large-v3 and large-v2 are offered; on FLEURS neither beats large-v3-turbo for
     both languages (v3: 3.9 % / 6.6 %, v2: 3.2 % / 10.2 %, both ~1.5x slower). large-v3 leaves out
     and makes up sentences in long Slovak dictations (18.5-20 %, in pieces 12-13 %; turbo 6 %).

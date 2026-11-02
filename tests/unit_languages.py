@@ -183,8 +183,8 @@ def final(audio, live=False):
 
 text, passes, language = final(recording(("sk", 4.0), (None, 0.5), ("en", 3.0)))
 check("Slovak, then English: each part in its own language", text.split(), [f"sk{i}" for i in range(8)] + [f"en{i}" for i in range(8, 14)])
-check("... the English part decoded both ways without the vocabulary, then the Slovak one in one pass, split in the middle of the pause",
-      passes, [(3.25, "sk", False), (3.25, "en", False), (4.25, "sk", True)])
+check("... the English part decoded both ways without the vocabulary (English first), then the Slovak one in one pass, split in the middle of the pause",
+      passes, [(3.25, "en", False), (3.25, "sk", False), (4.25, "sk", True)])
 check("... and the dictation counts as Slovak (most of it)", language, "sk")
 text, passes, _ = final(recording(("en", 3.0), (None, 0.5), ("sk", 3.0), (None, 0.5), ("en", 2.5)))
 check("English, Slovak, English: nothing translated", ("TRANSLATED" in text, text.split()[6], text.split()[-1]), (False, "sk6", "en16"))
@@ -195,12 +195,37 @@ text, passes, _ = final(recording(("sk", 4.0), (None, 0.5), ("en", 1.5), (None, 
 check("1.5 s that seems English inside Slovak stays Slovak", passes, [(10.5, "sk", True)])
 text, passes, _ = final(recording(("sk", 4.0), (None, 0.5), ("sk!", 3.0), (None, 0.5), ("sk", 4.0)))
 check("Slovak the detection is sure is English stays Slovak: decoded in English it is less sure", "TRANSLATED" in text, False)
-check("... (it was tried both ways, then all of it transcribed as one)",
-      (sorted(lang for _, lang, hotwords in passes if not hotwords), passes[-1]), (["en", "sk"], (12.0, "sk", True)))
+check("... (tried in English, which is unsure, then all of it transcribed as one: two passes)",
+      passes, [(3.5, "en", False), (12.0, "sk", True)])
 text, passes, language = final(recording(("sk", 3.0), (None, 0.5), ("sk!", 4.0)))
 check("Slovak the detection is sure is English, the longer part: English parts are checked, so all of it is Slovak",
       ("TRANSLATED" in text, len(text.split()), language), (False, 14, "sk"))
 check("... and both parts, in the same language, are transcribed again as one", passes[-1], (7.5, "sk", True))
+
+
+def long_pass(written: str, pieces: str | None, language="sk", speech=30.0, on_cpu=False):
+    """What Transcriber._recover_lost returns for a whole pass that wrote `written` over `speech` s."""
+    tr = d.Transcriber.__new__(d.Transcriber)
+    tr.on_cpu, called = on_cpu, []
+    segment = lambda text: types.SimpleNamespace(text=text)
+
+    def run_pieces(*_):
+        called.append(True)
+        return None if pieces is None else [segment(pieces)]
+    tr._run_pieces = run_pieces
+    real, d.speech_total = d.speech_total, lambda _audio: speech
+    try:
+        return tr._recover_lost(np.zeros(1), language, None, 5, True, [segment(written)])[0].text, bool(called)
+    finally:
+        d.speech_total = real
+
+
+enough, words_ = "ab " * 200, "ab " * 40  # (400 and 80 characters over 30 s: 13 and 2.7 per second)
+check("a long pass that wrote enough stays as it is, not decoded in pieces", long_pass(enough, "x y"), (enough, False))
+check("... one that wrote little: pieces with 15 % more words replace it", long_pass(words_, "ab " * 46), ("ab " * 46, True))
+check("... pieces with less than that don't", long_pass(words_, "ab " * 45), (words_, True))
+check("... no pieces possible: it stays", long_pass(words_, None), (words_, True))
+check("... at most PIECE_LIMIT s of speech: not checked", long_pass(words_, "ab " * 46, speech=20.0), (words_, False))
 text, passes, _ = final(recording(("en", 4.0), (None, 0.5), ("sk", 3.0)))
 check("English, then Slovak: the English part, its pass sure of itself, isn't checked", passes,
       [(4.25, "en", True), (3.25, "en", False), (3.25, "sk", False)])
