@@ -506,6 +506,10 @@ python3 tests/fetch_fleurs.py                                  # ~27 MB of test 
   doesn't have, so it is tried in Slovak too and kept in the language it is written better in.
 - `vocabulary_languages = ["en"]` gives the vocabulary only to English passes. English words in it can
   pull Slovak towards English spelling (on FLEURS Slovak 13.8 → 12.3 % of the words wrong without them).
+- `classic-mode.sh` sets both on a computer (Linux or macOS), updating the program first if it is older,
+  and restarts dictation; `--undo` removes them again, `--dry-run` shows what it would change. On a
+  computer without a copy of this repository:
+  `curl -fsSL https://raw.githubusercontent.com/m1omg/VoiceDictationLinux/main/classic-mode.sh | sh`
 
 ## Troubleshooting
 - **Self-checks.** `--check` lists what was found and what's missing. `--selftest` records 10 s

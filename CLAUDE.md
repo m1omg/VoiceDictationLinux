@@ -467,6 +467,11 @@ input, `windows_paste.py`, and `e2e_desktop.py` / `e2e_x11.py`. It is started by
     (XWayland) stays text only. A 3 MB image: 14 ms to save, 14 ms to paste back
     (`tests/x11_clipboard.py`, on SECONDARY: the user's clipboard isn't touched). Note the X thread's
     `threading.Thread._name`: the atom-name helper is `_atom_name`.
+  - **`classic-mode.sh`** sets `classic_transcription = true` and `vocabulary_languages = ["en"]` on the
+    user's other computers (two Linux, an Intel Mac on Monterey: plain POSIX sh, tested with dash and bash):
+    edits config.toml with the app's Python (tomllib check that only those two change, a backup), updates
+    through `update.py` (or, before the updater existed, the newest installer from the GitHub ZIP), and
+    restarts with `update.restart_dictation` + `wait_ready`. `--undo`, `--dry-run`, `--no-update`.
   - **`vocabulary_languages`** (default `["en", "sk"]`): passes in other languages get no vocabulary hint.
     The user's English words pulled Slovak towards English spelling ("transkryptov", "ďalšimi", "tuná" left
     out); with `["en"]` FLEURS Slovak 13.8 -> 12.3 % (14 clips better, 6 worse), English texts identical
