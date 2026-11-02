@@ -494,6 +494,10 @@ python3 tests/fetch_fleurs.py                                  # ~27 MB of test 
   Jazyk ponúk*). Its texts are in `i18n.py`; `tests/unit_i18n.py` checks that none is missing.
 - Accuracy varies by language, so check it with `tests/bench_asr.py`. It downloads the FLEURS
   configs named in `tests/fetch_fleurs.py`.
+- `classic_transcription = true` in `config.toml` transcribes as the version of 2026-10-04: auto-detect
+  picks one language for the whole dictation and the model makes one pass. It skips the later checks
+  (a dictation switching language, Slovak taken for English, long dictations in pieces), so it is as
+  fast as before; a dictation that switches language is then partly translated.
 
 ## Troubleshooting
 - **Self-checks.** `--check` lists what was found and what's missing. `--selftest` records 10 s

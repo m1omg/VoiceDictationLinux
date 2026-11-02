@@ -126,6 +126,10 @@ DEFAULTS = {
     "tail_ms": 200,
     "max_seconds": 300,
     "keep_recordings": 0,  # keep the last N dictations as audio files (recordings/), to test changes on your voice
+    # Transcribe as the version of 2026-10-04 did: in auto mode one language for the whole dictation,
+    # detected once, and one model pass, without the later checks (parts in different languages,
+    # Slovak taken for English, long dictations in pieces), which cost time on every dictation.
+    "classic_transcription": False,
     "status_popup": "auto",  # a small pop-up while dictating: "auto" (when the model runs on the processor), "on", "off"
     "big_panel": False,  # large-text mode (low vision): a big status panel while dictating (instead),
     "big_settings": False,  # clicking the tray icon opens the big settings window,
@@ -1252,7 +1256,8 @@ class Transcriber:
         accepted = inspect.signature(fn).parameters
         segments, _info = fn(audio, **{k: v for k, v in opts.items() if k in accepted})
         segments = list(segments)
-        if language != "en" and not words and not self.on_cpu and len(audio) > self.PIECE_LIMIT * RATE:
+        if (language != "en" and not words and not self.on_cpu and not self.cfg.classic_transcription
+                and len(audio) > self.PIECE_LIMIT * RATE):
             return self._recover_lost(audio, language, prompt, beam_size, hotwords, segments)
         return segments
 
@@ -1992,6 +1997,17 @@ class Worker(threading.Thread):
         # words back, and the preview without live typing keep checking for the first AUTO_SETTLED
         # seconds of speech). After that each new stretch of speech gets a check of its own.
         speech = None
+        classic = self.cfg.classic_transcription
+        if classic and s.mode == "auto" and s.language is None:  # (as on 2026-10-04: decided once, never changed)
+            heard = speech_seconds(audio)
+            if heard < 1.5:
+                return
+            language, share = self.transcriber.detect(audio)
+            if share < 0.9 and heard < 2.5:
+                return
+            s.language, s.parts, s.settled = language, [(0.0, language)], True
+            log.info("detected language: %s (%.0f%% sure after %.1f s of speech)", language, share * 100, heard)
+            self.topbar.update(detected=language)
         if s.mode == "auto" and not s.settled:
             speech = speech_seconds(audio)
             if s.language and (s.typed or not s.live) and speech >= self.AUTO_SETTLED:
@@ -2017,7 +2033,7 @@ class Worker(threading.Thread):
             # Real Slovak can look like English for ~2 s. The safe mode can't take typed words back,
             # so it waits; instant mode corrects itself.
             hold = not s.instant and speech < self.AUTO_TYPE_AFTER
-        elif s.mode == "auto" and s.language and not self.transcriber.on_cpu:
+        elif s.mode == "auto" and s.language and not self.transcriber.on_cpu and not classic:
             self._follow_language(s, audio)
         st = s.streamer
         start = st.window_start
@@ -2149,7 +2165,7 @@ class Worker(threading.Thread):
         the languages of the whole recording's parts may overrule those the live passes used; then all
         of it is retyped."""
         audio = s.audio
-        if s.mode == "auto" and speech_total(audio) >= self.SHORT:
+        if s.mode == "auto" and not self.cfg.classic_transcription and speech_total(audio) >= self.SHORT:
             parts = self.transcriber.language_parts(audio, known=s.checked)
             if any(language != self._live_language(s, (start + end) / 2 / RATE) for start, end, language in parts):
                 log.info("languages: %s after all (the whole recording); retyping", describe_parts(parts))
@@ -2170,8 +2186,14 @@ class Worker(threading.Thread):
         audio = s.audio
         if not typed_live and (not audio.size or float(np.abs(audio).max()) < 1e-4):
             return "", "muted"
-        speech = speech_total(audio)
-        if s.mode == "auto" and not typed_live:  # nothing typed yet: the whole recording decides
+        classic = self.cfg.classic_transcription
+        speech = None if classic else speech_total(audio)
+        if s.mode == "auto" and not typed_live and classic:  # one language for all of it, as on 2026-10-04
+            first = s.language
+            s.language, share = self.transcriber.detect(audio)
+            if first and first != s.language:
+                log.info("language: %s after all (%.0f%% sure on the whole recording)", s.language, share * 100)
+        elif s.mode == "auto" and not typed_live:  # nothing typed yet: the whole recording decides
             first = s.language  # guessed from the first ~2 s of speech, if the live passes got that far
             parts = self.transcriber.language_parts(audio, known=s.checked)
             if len({language for _start, _end, language in parts}) > 1:  # it switches language
@@ -2189,7 +2211,7 @@ class Worker(threading.Thread):
         elif s.language is None:
             s.language = s.mode
         if typed_live:  # only the part after the last typed word is left
-            if s.mode == "auto" and not self.transcriber.on_cpu:
+            if s.mode == "auto" and not self.transcriber.on_cpu and not classic:
                 self._follow_language(s, audio, final=True)
             st = s.streamer
             held = s.held  # words that waited for a language check: transcribed again with the rest
@@ -2203,8 +2225,9 @@ class Worker(threading.Thread):
                 words = st.words_after_commit(self._run(window, s.language, words=True, prompt=st.prompt(),
                                                         hotwords=len(window) >= 2 * RATE), start)
             return s.text.add(words, s.language, final=True), None
-        segments = self._run(audio, s.language, hotwords=speech >= 1.0)  # below 1 s whisper may echo them
-        if s.mode == "auto" and s.language == "en" and -math.inf < confidence(segments) < self.ENGLISH_SURE:
+        segments = self._run(audio, s.language, hotwords=classic or speech >= 1.0)  # below 1 s whisper may echo them
+        if (not classic and s.mode == "auto" and s.language == "en"
+                and -math.inf < confidence(segments) < self.ENGLISH_SURE):
             # Slovak taken for English is translated ("I'm trying to give the 2 check." for "Skúšam dať ten
             # dvojček"), and the English pass is unsure of it: written better in Slovak, it is Slovak.
             # (Both passes with the vocabulary as any dictation gets it, so neither is decoded again.)

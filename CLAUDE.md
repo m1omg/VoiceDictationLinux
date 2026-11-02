@@ -448,6 +448,10 @@ input, `windows_paste.py`, and `e2e_desktop.py` / `e2e_x11.py`. It is started by
     dictations over 20 s changed). Now the whole pass stays unless a Slovak one (`Transcriber._recover_lost`)
     wrote under `LOST_RATE` characters per second of speech and pieces write `PIECE_GAIN` as many words:
     the user's 10 long ones read as with one pass, FLEURS long Slovak 10.7 % (always cut 10.2 %, never 17.5 %).
+  - **`classic_transcription = true`** (off by default): auto mode as on 2026-10-04 — one detection of the
+    whole recording (live: once, never changed), one pass with the vocabulary, no parts, no English check,
+    no pieces. The user found the later checks slower and Slovak no better on their voice; checked equal to
+    56ec07d: FLEURS 151/151 identical texts, final pass 0.92 s against 0.90 s (noise), 4/4 own recordings.
   - Bigger models: large-v3 and large-v2 are offered; on FLEURS neither beats large-v3-turbo for
     both languages (v3: 3.9 % / 6.6 %, v2: 3.2 % / 10.2 %, both ~1.5x slower). large-v3 leaves out
     and makes up sentences in long Slovak dictations (18.5-20 %, in pieces 12-13 %; turbo 6 %).

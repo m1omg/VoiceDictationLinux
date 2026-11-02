@@ -378,6 +378,16 @@ for audio in (recording(("sk", 3.0)), recording(("sk", 4.0), (None, 0.5), ("en",
     worker._final(s)
 check("... the final pass checks the dictation, or each part in its language", asked, [(3.0, "sk"), (4.25, "sk"), (3.25, "en")])
 
+cfg.classic_transcription = True  # (as on 2026-10-04)
+detections.clear()
+text, passes, language = final(recording(("sk", 4.0), (None, 0.5), ("en", 3.0)))
+check("classic_transcription: Slovak, then English: one detection of the whole recording, one pass, in its language",
+      (passes, language), ([(7.5, "sk", True)], "sk"))
+check("... no stretch detected on its own: one detection in all", len(detections), 1)
+text, passes, language = final(recording(("sk", 3.0), (None, 0.5), ("sk!", 4.0)))
+check("... no part checked in the other language either", len(passes), 1)
+cfg.classic_transcription = False
+
 for name, good, got, want in checks:
     print(f"{'ok  ' if good else 'FAIL'} {name}" + ("" if good else f": got {got!r}, want {want!r}"))
 sys.exit(0 if all(c[1] for c in checks) else 1)
