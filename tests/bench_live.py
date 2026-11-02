@@ -20,6 +20,7 @@ from _common import audio, errors, load_dictate, load_model, sentences, words
 
 d = load_dictate()
 cfg = d.load_config()
+cfg.classic_transcription = False  # the newer way: what this measures: live language checks (classic is the default)
 tr = load_model(d, cfg)
 
 

@@ -167,6 +167,7 @@ class Collect:
 
 
 cfg = d.load_config()
+cfg.classic_transcription = False  # the newer way: what this checks (classic, the default, has its own checks below)
 cfg.trailing_space = False
 
 

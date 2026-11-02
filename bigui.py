@@ -771,6 +771,11 @@ class SettingsModel:
         for code in self.d.LANGUAGES:
             rows.append(("button", f"lang:{code}", self.d.language_name(code), f"radio:{on(ui.language == code)}", True,
                          lambda c=code: self.set(language=c)))
+        rows.append(("heading", t("Transcription")))
+        rows.append(("button", "mode:classic", t("Classic: one language per dictation, faster"), f"radio:{on(ui.classic)}",
+                     True, lambda: self.set(classic=True)))
+        rows.append(("button", "mode:newer", t("Newer: a dictation may switch between English and Slovak, slower"),
+                     f"radio:{on(not ui.classic)}", True, lambda: self.set(classic=False)))
         rows.append(("heading", "Menu language · Jazyk ponúk"))  # (in both: whoever can't read one finds it)
         for code, name in i18n.LANGUAGES.items():
             rows.append(("button", f"uilang:{code}", name, f"radio:{on(ui.ui_language == code)}", True,

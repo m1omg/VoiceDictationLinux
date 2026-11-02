@@ -62,7 +62,19 @@ top = d.TopBar(ui)
 labels = [item.label for item in top.tray.menu]
 check("the menu exists once the icon does", bool(labels), True)
 check("it starts with the key", labels[0].startswith("Hold "), True)
-check("speech model and run-on submenus", [x.split(":")[0] for x in labels if ":" in x], ["Speech model", "Run on"])
+check("speech model, run-on and transcription submenus", [x.split(":")[0] for x in labels if ":" in x],
+      ["Speech model", "Run on", "Transcription"])
+check("... transcription: classic by default", [x for x in labels if x.startswith("Transcription")], ["Transcription: classic"])
+cfg = d.load_config()
+d.transcription_follows_menu(cfg, ui)
+check("... and so is what the transcriber reads", cfg.classic_transcription, True)
+top.clicked(451)
+check("choosing Newer saves it and the transcriber follows",
+      (ui.classic, cfg.classic_transcription, [x.label for x in top.menu() if x.label.startswith("Transcription")]),
+      (False, False, ["Transcription: newer"]))
+check("... kept across restarts (state.json)", d.UiState(d.load_config()).classic, False)
+top.clicked(450)
+check("choosing Classic again", (ui.classic, cfg.classic_transcription), (True, True))
 models_menu = next(item for item in top.tray.menu if item.label.startswith("Speech model"))
 check("every model listed, the missing ones with their size",
       [item.label.split(" ")[0] for item in models_menu.children], list(d.models.MODELS))

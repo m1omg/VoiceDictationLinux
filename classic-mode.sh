@@ -8,6 +8,8 @@
 # It updates the program first when it is older than the newest version on GitHub (the program's own
 # updater: every setting, choice and model stays), then restarts dictation. Run it again any time: it
 # changes only what isn't set yet. The settings file is saved next to itself before a change.
+# (Since 2026-11-03 classic is the default and the menu's Transcription switches it; a choice made there
+# stays, as config.toml only gives its starting value.)
 #
 #   sh classic-mode.sh              set both, update the program if needed
 #   sh classic-mode.sh --undo       remove both again (the defaults)

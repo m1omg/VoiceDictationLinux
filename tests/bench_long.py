@@ -20,6 +20,7 @@ from _common import audio, errors, load_dictate, load_model, sentences
 
 d = load_dictate()
 cfg = d.load_config()
+cfg.classic_transcription = False  # the newer way: what this measures: long passes in pieces (classic is the default)
 tr = load_model(d, cfg)
 print("model:", tr.desc, "| dictate.py:", d.__file__, flush=True)
 RATE = d.RATE

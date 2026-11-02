@@ -26,6 +26,7 @@ from _common import audio, errors, load_dictate, load_model, sentences
 
 d = load_dictate()
 cfg = d.load_config()
+cfg.classic_transcription = False  # the newer way: what this measures: per-part detection (classic is the default)
 tr = load_model(d, cfg)
 from faster_whisper.vad import VadOptions, get_speech_timestamps  # noqa: E402 (AMD: only after load() preloads ROCm)
 

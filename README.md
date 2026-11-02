@@ -497,8 +497,10 @@ python3 tests/fetch_fleurs.py                                  # ~27 MB of test 
   Jazyk ponúk*). Its texts are in `i18n.py`; `tests/unit_i18n.py` checks that none is missing.
 - Accuracy varies by language, so check it with `tests/bench_asr.py`. It downloads the FLEURS
   configs named in `tests/fetch_fleurs.py`.
-- `classic_transcription = true` in `config.toml` transcribes as the version of 2026-10-04: auto-detect
-  picks one language for the whole dictation and the model makes one pass. It skips the later checks
+- **Transcription** (menu, both settings windows): *Classic*, the default, transcribes as the version of
+  2026-10-04; *Newer* lets a dictation switch between English and Slovak. The choice applies from the
+  next dictation on and is kept; `classic_transcription` in `config.toml` is only its starting value.
+  Classic: auto-detect picks one language for the whole dictation and the model makes one pass. It skips the later checks
   (a dictation switching language, long dictations in pieces), so it is as fast as before; a dictation
   that switches language is then partly translated. One check stays, as it costs a pass only when it
   is needed: Slovak taken for English comes out as English, or as it sounds in another language
@@ -507,8 +509,8 @@ python3 tests/fetch_fleurs.py                                  # ~27 MB of test 
 - `vocabulary_languages = ["en"]` gives the vocabulary only to English passes. English words in it can
   pull Slovak towards English spelling (on FLEURS Slovak 13.8 → 12.3 % of the words wrong without them).
 - `classic-mode.sh` sets both on a computer (Linux or macOS), updating the program first if it is older,
-  and restarts dictation; `--undo` removes them again, `--dry-run` shows what it would change. On a
-  computer without a copy of this repository:
+  and restarts dictation; `--undo` removes them again, `--dry-run` shows what it would change. (A
+  Transcription chosen in the menu stays as chosen.) On a computer without a copy of this repository:
   `curl -fsSL https://raw.githubusercontent.com/m1omg/VoiceDictationLinux/main/classic-mode.sh | sh`
 
 ## Troubleshooting

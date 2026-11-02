@@ -467,6 +467,12 @@ input, `windows_paste.py`, and `e2e_desktop.py` / `e2e_x11.py`. It is started by
     (XWayland) stays text only. A 3 MB image: 14 ms to save, 14 ms to paste back
     (`tests/x11_clipboard.py`, on SECONDARY: the user's clipboard isn't touched). Note the X thread's
     `threading.Thread._name`: the atom-name helper is `_atom_name`.
+  - **Transcription in the menu** (2026-11-03, the user's wish): classic is the default
+    (`DEFAULTS["classic_transcription"] = True`) and a menu choice like the others: `UiState` key
+    `classic` (starting value: the setting), tray submenu 45 (450 Classic, 451 Newer), settings-window rows
+    `mode:classic` / `mode:newer` (web settings radio group `mode`). `transcription_follows_menu()` keeps
+    `cfg.classic_transcription` (what Transcriber and Worker read) equal to the choice, also when the
+    settings window saves it. Tests of the newer way set `cfg.classic_transcription = False` themselves.
   - **`classic-mode.sh`** sets `classic_transcription = true` and `vocabulary_languages = ["en"]` on the
     user's other computers (two Linux, an Intel Mac on Monterey: plain POSIX sh, tested with dash and bash):
     edits config.toml with the app's Python (tomllib check that only those two change, a backup), updates

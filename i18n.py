@@ -171,6 +171,12 @@ SK: dict[str, str] = {
     ", downloading {progress}": ", sťahuje sa {progress}",
     ", download {size}": ", stiahnuť {size}",
     "Run on": "Kde beží",
+    "Transcription": "Prepis",
+    "Transcription: classic": "Prepis: klasický",
+    "Transcription: newer": "Prepis: novší",
+    "Classic: one language per dictation, faster": "Klasický: jeden jazyk na diktát, rýchlejší",
+    "Newer: a dictation may switch between English and Slovak, slower":
+        "Novší: diktát môže prepínať medzi angličtinou a slovenčinou, pomalší",
     "Graphics card (GPU): none can be used": "Grafická karta (GPU): žiadnu nemožno použiť",
     "Dictation key": "Kláves na diktovanie",
     "Hold: {key}. Change it…": "Držať: {key}. Zmeniť…",

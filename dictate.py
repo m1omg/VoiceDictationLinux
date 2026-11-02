@@ -129,8 +129,9 @@ DEFAULTS = {
     # Transcribe as the version of 2026-10-04 did: in auto mode one language for the whole dictation,
     # detected once, and one model pass, without the later checks (parts in different languages, long
     # dictations in pieces), which cost time on every dictation. One check stays: a dictation taken for
-    # English whose pass is unsure is tried in Slovak too (one more pass, only then).
-    "classic_transcription": False,
+    # English whose pass is unsure is tried in Slovak too (one more pass, only then). The default; the
+    # menu's Transcription switches to the newer way (this is the menu choice's starting value).
+    "classic_transcription": True,
     # The languages whose passes get the vocabulary as a hint. On the user's Slovak (and FLEURS: 13.8 ->
     # 12.3 % of the words wrong) the English words pulled Slovak towards English spelling ("transkryptov",
     # "ďalšimi", a word left out); English is better with them (4.3 -> 3.6 %).
@@ -212,6 +213,7 @@ class UiState:
     def __init__(self, cfg):
         self._defaults = {"language": cfg.language if cfg.language in LANGUAGES else "en",
                           "live": cfg.live_typing, "instant": cfg.instant_typing, "tap": cfg.tap_to_toggle,
+                          "classic": cfg.classic_transcription,
                           "sounds": cfg.sounds, "autostart": True,  # (what the system does is the truth)
                           "ui_language": "en",  # menus and messages (the installers ask first)
                           "device": cfg.device if cfg.device in DEVICES else "auto",
@@ -302,6 +304,17 @@ class UiState:
         log.info("menu: %s", ", ".join(f"{k}={v}" for k, v in changes.items()))
         for listener in self.listeners:
             listener()
+
+
+def transcription_follows_menu(cfg, ui: UiState) -> None:
+    """The menu's Transcription, classic or newer, is what Transcriber and Worker read in
+    cfg.classic_transcription, from the next pass on (also when the settings window changes it)."""
+    def follow():
+        if cfg.classic_transcription != ui.classic:
+            log.info("transcription: %s", "classic" if ui.classic else "newer")
+        cfg.classic_transcription = ui.classic
+    follow()
+    ui.listeners.append(follow)
 
 
 NOTIFY_HOOK = None  # Windows: the tray icon shows notifications (set by the tray once it runs)
@@ -3196,6 +3209,10 @@ class TopBar:
                 M(4, kind="separator"),
                 M(40, t("Speech model: {model}", model=current), children=model_items),
                 M(41, t("Run on: graphics card") if on_gpu else t("Run on: processor"), children=run_on),
+                M(45, t("Transcription: classic") if ui.classic else t("Transcription: newer"), children=[
+                    M(450, t("Classic: one language per dictation, faster"), "radio", ui.classic),
+                    M(451, t("Newer: a dictation may switch between English and Slovak, slower"), "radio",
+                      not ui.classic)]),
                 M(43, t("Status pop-up while dictating"), children=[
                     M(430, t("Automatic: small, when the model runs on the processor"), "radio",
                       not ui.big_panel and ui.popup == "auto"),
@@ -3304,6 +3321,8 @@ class TopBar:
             self.ui.set(**{self.model_key(): name})
         elif item_id in (410, 411):
             self.ui.set(device="gpu" if item_id == 410 else "cpu")
+        elif item_id in (450, 451):
+            self.ui.set(classic=item_id == 450)
         elif item_id in (430, 431, 433):
             self.ui.set(big_panel=False, popup={430: "auto", 431: "on", 433: "off"}[item_id])
         elif item_id == 432:
@@ -3633,6 +3652,7 @@ def run_daemon(cfg) -> int:
         return 0
     RUNTIME_DIR.mkdir(parents=True, exist_ok=True)  # the status, the sounds, the settings window's commands
     ui = UiState(cfg)
+    transcription_follows_menu(cfg, ui)
     topbar = TopBar(ui)
     topbar.start()
     cues = Cues(lambda: ui.sounds, cfg.sound_volume)
