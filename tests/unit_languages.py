@@ -385,8 +385,16 @@ check("classic_transcription: Slovak, then English: one detection of the whole r
       (passes, language), ([(7.5, "sk", True)], "sk"))
 check("... no stretch detected on its own: one detection in all", len(detections), 1)
 text, passes, language = final(recording(("sk", 3.0), (None, 0.5), ("sk!", 4.0)))
-check("... no part checked in the other language either", len(passes), 1)
+check("... Slovak taken for English: the English pass is unsure, so it is tried in Slovak too and kept",
+      (passes, language, "TRANSLATED" in text), ([(7.5, "en", True), (7.5, "sk", True)], "sk", False))
+text, passes, language = final(recording(("en", 4.0)))
+check("... English, its pass sure of itself: one pass", (passes, language), ([(4.0, "en", True)], "en"))
 cfg.classic_transcription = False
+segment = lambda text, logprob: types.SimpleNamespace(text=text, avg_logprob=logprob, tokens=[1, 2, 3])  # noqa: E731
+check("unsure_english: an unsure pass, letters English doesn't have, a sure English one, nothing heard",
+      [d.unsure_english([segment(" Thank you.", -0.52)], -0.3), d.unsure_english([segment(" Czemu się inaczej", -0.1)], -0.3),
+       d.unsure_english([segment(" Please continue.", -0.08)], -0.3), d.unsure_english([], -0.3)],
+      [True, True, False, False])
 
 
 def hint_given(language, languages):

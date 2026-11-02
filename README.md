@@ -499,8 +499,11 @@ python3 tests/fetch_fleurs.py                                  # ~27 MB of test 
   configs named in `tests/fetch_fleurs.py`.
 - `classic_transcription = true` in `config.toml` transcribes as the version of 2026-10-04: auto-detect
   picks one language for the whole dictation and the model makes one pass. It skips the later checks
-  (a dictation switching language, Slovak taken for English, long dictations in pieces), so it is as
-  fast as before; a dictation that switches language is then partly translated.
+  (a dictation switching language, long dictations in pieces), so it is as fast as before; a dictation
+  that switches language is then partly translated. One check stays, as it costs a pass only when it
+  is needed: Slovak taken for English comes out as English, or as it sounds in another language
+  ("Czemu się inaczej winujesz?"), and its English pass is unsure of itself or writes letters English
+  doesn't have, so it is tried in Slovak too and kept in the language it is written better in.
 - `vocabulary_languages = ["en"]` gives the vocabulary only to English passes. English words in it can
   pull Slovak towards English spelling (on FLEURS Slovak 13.8 → 12.3 % of the words wrong without them).
 

@@ -21,6 +21,7 @@ max_seconds = 300             # safety limit for a single dictation
 keep_recordings = 0           # keep the last N dictations as audio files in recordings/ (to test on your voice)
 # Transcribe as the version of 2026-10-04: one language per dictation (auto mode detects it once) and
 # one pass, without the later language checks and long-dictation pieces. Faster; mixed dictations translate.
+# (A dictation taken for English whose pass is unsure is still tried in Slovak too: one more pass, only then.)
 classic_transcription = false
 # The languages whose passes get the vocabulary as a hint. English words in it can pull Slovak towards
 # English spelling ("transkryptov"); ["en"] keeps them for English only.

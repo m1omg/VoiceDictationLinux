@@ -127,8 +127,9 @@ DEFAULTS = {
     "max_seconds": 300,
     "keep_recordings": 0,  # keep the last N dictations as audio files (recordings/), to test changes on your voice
     # Transcribe as the version of 2026-10-04 did: in auto mode one language for the whole dictation,
-    # detected once, and one model pass, without the later checks (parts in different languages,
-    # Slovak taken for English, long dictations in pieces), which cost time on every dictation.
+    # detected once, and one model pass, without the later checks (parts in different languages, long
+    # dictations in pieces), which cost time on every dictation. One check stays: a dictation taken for
+    # English whose pass is unsure is tried in Slovak too (one more pass, only then).
     "classic_transcription": False,
     # The languages whose passes get the vocabulary as a hint. On the user's Slovak (and FLEURS: 13.8 ->
     # 12.3 % of the words wrong) the English words pulled Slovak towards English spelling ("transkryptov",
@@ -1836,6 +1837,15 @@ def language_runs(regions: list[tuple[int, int]], labels: list[str], length: int
     return [tuple(run) for run in runs]
 
 
+def unsure_english(segments, below: float) -> bool:
+    """Is this English pass unsure of itself (log-probability per token under `below`), or did it write
+    letters English doesn't have (Slovak heard as English comes out Polish: "Czemu się inaczej")?"""
+    if not any(seg.text.strip() for seg in segments):
+        return False
+    text = " ".join(seg.text for seg in segments)
+    return confidence(segments) < below or any(ch.isalpha() and not ch.isascii() for ch in text)
+
+
 def confidence(segments) -> float:
     """How sure a pass was of its text: the average log-probability per token (-inf: no text)."""
     tokens = sum(len(seg.tokens or ()) for seg in segments)
@@ -1999,7 +2009,8 @@ class Worker(threading.Thread):
     CHECK_AFTER = 1.5  # auto mode, live: seconds of a stretch of speech after a pause before its language is checked
     SWITCH_MARGIN = 0.1  # log-probability per token by which a part's own language must beat the dictation's
     # An English pass less sure than this (log-probability per token) may be Slovak taken for English: on the
-    # user's voice English came out at -0.02 to -0.23 (clips of 1-3 s lower), Slovak in English at -0.34 to -0.78.
+    # user's voice English came out at -0.02 to -0.23 (clips of 1-3 s lower), Slovak in English at -0.34 to -0.78;
+    # 2026-11-02, 60 recordings: English -0.07 to -0.28, the three taken for English -0.42 to -0.78.
     ENGLISH_SURE = -0.3
     # In a recording that switches language Slovak was heard already, so an English part is checked unless its
     # pass is very sure: "OK, now how it is. OK. Toto je ovele, ovele lepšie" came out at -0.26 (FLEURS English
@@ -2349,12 +2360,13 @@ class Worker(threading.Thread):
                                                         hotwords=len(window) >= 2 * RATE), start)
             return s.text.add(words, s.language, final=True), None
         segments = self._run(audio, s.language, hotwords=classic or speech >= 1.0)  # below 1 s whisper may echo them
-        if (not classic and s.mode == "auto" and s.language == "en"
-                and -math.inf < confidence(segments) < self.ENGLISH_SURE):
+        if s.mode == "auto" and s.language == "en" and unsure_english(segments, self.ENGLISH_SURE):
             # Slovak taken for English is translated ("I'm trying to give the 2 check." for "Skúšam dať ten
-            # dvojček"), and the English pass is unsure of it: written better in Slovak, it is Slovak.
-            # (Both passes with the vocabulary as any dictation gets it, so neither is decoded again.)
-            s.language, segments, _same = self._better_language(audio, "en", "sk", kept=segments, hotwords=speech >= 1.0)
+            # dvojček") or written as it sounds in another language ("Czemu się inaczej winujesz?"), and the
+            # English pass is unsure of it: written better in Slovak, it is Slovak. Classic mode too: it
+            # costs one pass, only then. (Both passes with the vocabulary as any dictation gets it.)
+            s.language, segments, _same = self._better_language(audio, "en", "sk", kept=segments,
+                                                                 hotwords=classic or speech >= 1.0)
         segments = self.transcriber.prefer_alikes(audio, segments)
         text = clean_text(" ".join(seg.text.strip() for seg in segments), self.cfg, s.language)
         return (text, None) if text else ("", "no speech")

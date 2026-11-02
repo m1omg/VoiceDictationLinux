@@ -452,6 +452,11 @@ input, `windows_paste.py`, and `e2e_desktop.py` / `e2e_x11.py`. It is started by
     whole recording (live: once, never changed), one pass with the vocabulary, no parts, no English check,
     no pieces. The user found the later checks slower and Slovak no better on their voice; checked equal to
     56ec07d: FLEURS 151/151 identical texts, final pass 0.92 s against 0.90 s (noise), 4/4 own recordings.
+    2026-11-02, one exception: Slovak taken for English came out Polish ("Czemu się inaczej winujesz?",
+    FLEURS "To kto z powodu mało wszystko"), so classic mode keeps the English check of `_final_text`:
+    `unsure_english()` (under `ENGLISH_SURE`, or letters English doesn't have) -> `_better_language` with
+    the English pass reused: one more pass, only then. The user's 60 recordings: real English -0.07 to
+    -0.28 per token, the three taken for English -0.42 to -0.78.
   - **Clipboard kept in all formats (X11)**: the user lost what they had copied whenever it wasn't plain
     text (only UTF8_STRING was saved; 37 of 562 dictations restored nothing, formatted text and copied
     files came back as text) and the middle-click selection never came back. Now `Paster.prepare()`
