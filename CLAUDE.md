@@ -452,6 +452,16 @@ input, `windows_paste.py`, and `e2e_desktop.py` / `e2e_x11.py`. It is started by
     whole recording (live: once, never changed), one pass with the vocabulary, no parts, no English check,
     no pieces. The user found the later checks slower and Slovak no better on their voice; checked equal to
     56ec07d: FLEURS 151/151 identical texts, final pass 0.92 s against 0.90 s (noise), 4/4 own recordings.
+  - **Clipboard kept in all formats (X11)**: the user lost what they had copied whenever it wasn't plain
+    text (only UTF8_STRING was saved; 37 of 562 dictations restored nothing, formatted text and copied
+    files came back as text) and the middle-click selection never came back. Now `Paster.prepare()`
+    starts `SelectionOwner.snapshot()` as the dictation ends (`Controller._finish`), while it is
+    transcribed: every target of CLIPBOARD and PRIMARY but `META` and, of images, only one (PNG), most
+    used first (`FIRST`), within 1.5 s and 64 MB; `restore()` owns each selection still holding our text
+    again with those formats, sending big ones in parts (ICCCM INCR, `_send` / `_send_next`). Bridged
+    (XWayland) stays text only. A 3 MB image: 14 ms to save, 14 ms to paste back
+    (`tests/x11_clipboard.py`, on SECONDARY: the user's clipboard isn't touched). Note the X thread's
+    `threading.Thread._name`: the atom-name helper is `_atom_name`.
   - **`vocabulary_languages`** (default `["en", "sk"]`): passes in other languages get no vocabulary hint.
     The user's English words pulled Slovak towards English spelling ("transkryptov", "ďalšimi", "tuná" left
     out); with `["en"]` FLEURS Slovak 13.8 -> 12.3 % (14 clips better, 6 worse), English texts identical

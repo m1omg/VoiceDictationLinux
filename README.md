@@ -313,7 +313,7 @@ window, or by the installer's last question:
 | `cpu_beam_size` | `2` | the same on the processor, where a narrower search saves time |
 | `remove_fillers` | `true` | drop um/uh/erm (ehm/eee in Slovak) |
 | `trailing_space` | `true` | end each dictation with a space |
-| `restore_clipboard` | `true` | put back what you had copied |
+| `restore_clipboard` | `true` | put back what you had copied (on X11 also images, files and the middle-click selection) |
 | `paste_chunk_chars` | `750` | paste long text in parts (Claude Code collapses pastes over 800 chars); 0 = off |
 | `sound_volume` | `0.5` | beep volume, 0–1 |
 | `tail_ms` | `200` | keep recording this long after release, so the last word isn't cut |
@@ -365,8 +365,11 @@ key ──► recorder ──► Whisper ──► text ──► clipboard ─�
   - On Windows the clipboard learns when the app fetches the text, and the text is kept out of
     clipboard history (Win+V) and the cloud clipboard. On macOS it's marked as transient, so
     clipboard managers skip it.
-  - Afterwards the previous clipboard text is restored, unless you copied something in the
-    meantime. Images can't be restored.
+  - Afterwards the previous clipboard is restored, unless you copied something in the meantime.
+    On X11 (Cinnamon, XFCE, MATE, KDE on X11) that is everything on it, in all its formats (an
+    image as PNG, copied files, formatted text), and the PRIMARY selection (middle-click paste) as
+    well; it is saved as the dictation ends, while it is transcribed (`tests/x11_clipboard.py`).
+    Elsewhere only text comes back, and images can't be restored.
 - **Live typing (LocalAgreement).**
   - While you talk, the audio since the last finished sentence is transcribed again every 0.4 s.
   - A word is typed only once two consecutive passes agree on it *and* on the word that follows,

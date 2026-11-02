@@ -538,8 +538,10 @@ class SelectionOwner(threading.Thread):
 
     mutter bridges X11 selections to Wayland apps without any focus requirement; it's the
     only focus-free way to set the clipboard on GNOME. Every Xlib call runs on this thread;
-    other threads submit work through call(). Only UTF8_STRING is offered, because offering
-    STRING as well makes mutter mangle accented characters (mutter #5057).
+    other threads submit work through call(). Dictated text is offered as UTF8_STRING only,
+    because offering STRING as well makes mutter mangle accented characters (mutter #5057).
+    On plain X11 what was on CLIPBOARD and PRIMARY before is put back afterwards in all the
+    formats it was offered in (snapshot / restore): an image, copied files, formatted text.
     """
 
     def __init__(self, bridged: bool = True):
@@ -586,6 +588,16 @@ class SelectionOwner(threading.Thread):
     def restore_clipboard(self, data: bytes) -> bool:
         return bool(self.call(self._restore_clipboard, data))
 
+    def snapshot(self) -> dict:
+        """What CLIPBOARD and PRIMARY hold now, in every format worth keeping: {selection: {target:
+        (type, format, data)}} (empty for a selection that holds nothing)."""
+        return self.call(self._snapshot, timeout=self.SNAPSHOT_SECONDS + 3.0) or {}
+
+    def restore(self, snap: dict) -> list:
+        """Put a snapshot back on each selection that still holds our text (one the user took
+        meanwhile keeps theirs). Returns [(selection name, formats, bytes)] for those put back."""
+        return self.call(self._restore, snap) or []
+
     # --- X thread ----------------------------------------------------------------------
     def run(self):
         delay = 1.0
@@ -620,8 +632,11 @@ class SelectionOwner(threading.Thread):
         self.PROP, self.CLOCK = atom("DICTATE_SELECTION"), atom("DICTATE_CLOCK")  # transfer / timestamp
         self.win = self.d.screen().root.create_window(-10, -10, 1, 1, 0, X.CopyFromParent,
                                                       event_mask=X.PropertyChangeMask)  # never mapped
-        self.data = {self.CLIPBOARD: b"", self.PRIMARY: b""}
+        self.offer = {self.CLIPBOARD: {}, self.PRIMARY: {}}  # selection -> {target: (type, format, data)}
         self.data_requests = {self.CLIPBOARD: 0, self.PRIMARY: 0}
+        self.sending: dict[tuple, list] = {}  # (requestor window, property) -> a transfer in parts (INCR)
+        self.chunk = self.d.display.info.max_request_length * 4 - 1024  # bytes in one property write
+        self.names: dict[int, str] = {}
         self.owned: dict[int, int] = {}  # selection -> timestamp we took it with
         self.targets_pending: set[int] = set()
         self.prop_time = None
@@ -648,7 +663,10 @@ class SelectionOwner(threading.Thread):
 
     def _dispatch(self, e):
         X = self.X
-        if e.type == X.SelectionRequest:
+        if (e.type == X.PropertyNotify and e.state == X.PropertyDelete
+                and (e.window.id, e.atom) in self.sending):  # the requestor took a part: the next one
+            self._send_next((e.window.id, e.atom))
+        elif e.type == X.SelectionRequest:
             self._answer(e)
         elif e.type == X.SelectionClear and e.window.id == self.win.id:
             self.owned.pop(e.atom, None)
@@ -665,16 +683,18 @@ class SelectionOwner(threading.Thread):
         from Xlib.protocol import event
         prop, ok = e.property or e.target, False  # obsolete requestors pass no property
         if e.selection in self.owned:
+            offer = self.offer[e.selection]
             if e.target == self.TARGETS:
-                e.requestor.change_property(prop, self.Xatom.ATOM, 32, [self.TARGETS, self.UTF8, self.TIMESTAMP])
+                atoms = [self.TARGETS] + [a for a in offer if a not in (self.TARGETS, self.TIMESTAMP)] + [self.TIMESTAMP]
+                e.requestor.change_property(prop, self.Xatom.ATOM, 32, atoms)
                 self.targets_pending.discard(e.selection)
-                ok = True
-            elif e.target == self.UTF8:
-                e.requestor.change_property(prop, self.UTF8, 8, self.data[e.selection])
-                self.data_requests[e.selection] += 1
                 ok = True
             elif e.target == self.TIMESTAMP:
                 e.requestor.change_property(prop, self.Xatom.INTEGER, 32, [self.owned[e.selection]])
+                ok = True
+            elif e.target in offer:
+                self._send(e.requestor, prop, *offer[e.target])
+                self.data_requests[e.selection] += 1
                 ok = True
         e.requestor.send_event(event.SelectionNotify(time=e.time, requestor=e.requestor, selection=e.selection,
                                                      target=e.target, property=prop if ok else self.X.NONE))
@@ -688,8 +708,32 @@ class SelectionOwner(threading.Thread):
         self._pump(lambda: self.prop_time is not None, time.monotonic() + 0.3)
         return self.prop_time or self.X.CurrentTime
 
-    def _own(self, selection: int, data: bytes, when: int):
-        self.data[selection] = data
+    def _send(self, requestor, prop, kind: int, fmt: int, data) -> None:
+        """Answer with data; more than one request can carry goes in parts (ICCCM INCR: the requestor
+        deletes each part, _dispatch then writes the next, and an empty one ends it)."""
+        now = time.monotonic()
+        for key in [k for k, v in self.sending.items() if v[4] < now]:  # abandoned transfers
+            del self.sending[key]
+        if fmt != 8 or len(data) <= self.chunk:
+            requestor.change_property(prop, kind, fmt, data)
+            return
+        requestor.change_attributes(event_mask=self.X.PropertyChangeMask)
+        requestor.change_property(prop, self.INCR, 32, [len(data)])
+        self.sending[(requestor.id, prop)] = [requestor, kind, data, 0, now + 15.0]
+
+    def _send_next(self, key) -> None:
+        requestor, kind, data, at, _ = self.sending[key]
+        piece = data[at:at + self.chunk]
+        requestor.change_property(key[1], kind, 8, piece)
+        if piece:
+            self.sending[key][3] = at + len(piece)
+        else:
+            del self.sending[key]
+        self.d.flush()
+
+    def _own(self, selection: int, data, when: int):
+        """Take a selection, offering data: dictated text (bytes, as UTF8_STRING) or a snapshot's formats."""
+        self.offer[selection] = data if isinstance(data, dict) else {self.UTF8: (self.UTF8, 8, data)}
         self.data_requests[selection] = 0
         self.win.set_selection_owner(selection, when)
         self.owned[selection] = when
@@ -721,36 +765,109 @@ class SelectionOwner(threading.Thread):
     def _read_clipboard(self, timeout=0.3):
         """The current CLIPBOARD text as bytes, or None (empty, not text, or owner not answering)."""
         if self.CLIPBOARD in self.owned:
-            return self.data[self.CLIPBOARD]
+            item = self.offer[self.CLIPBOARD].get(self.UTF8)
+            return bytes(item[2]) if item else None
+        item = self._fetch(self.CLIPBOARD, self.UTF8, time.monotonic() + timeout)
+        return bytes(item[2]) if item and item[1] == 8 else None
+
+    def _fetch(self, selection: int, target: int, deadline: float):
+        """One format of a selection from its owner: (type, format, data), data bytes for 8-bit formats
+        and a list of numbers otherwise, or None (refused, or no answer by the deadline)."""
         when = self._server_time()
         self.win.delete_property(self.PROP)
         self.notify_event = None
-        self.win.convert_selection(self.CLIPBOARD, self.UTF8, self.PROP, when)
+        self.win.convert_selection(selection, target, self.PROP, when)
         self.d.flush()
-        answered = lambda: self.notify_event is not None and self.notify_event.selection == self.CLIPBOARD
-        if not self._pump(answered, time.monotonic() + timeout) or self.notify_event.property == self.X.NONE:
+        answered = lambda: (self.notify_event is not None and self.notify_event.selection == selection  # noqa: E731
+                            and self.notify_event.target == target)
+        if not self._pump(answered, deadline) or self.notify_event.property == self.X.NONE:
             return None
         prop = self.win.get_full_property(self.PROP, self.X.AnyPropertyType)
         if prop is None:
             return None
+        value = lambda p: bytes(p.value) if p.format == 8 else list(p.value)  # noqa: E731
         if prop.property_type != self.INCR:
             self.win.delete_property(self.PROP)
             self.d.flush()
-            return bytes(prop.value)
+            return prop.property_type, prop.format, value(prop)
         # Large contents arrive incrementally (ICCCM INCR): delete, wait for a chunk, repeat.
-        data, deadline = bytearray(), time.monotonic() + 3.0
+        data, kind, fmt, until = None, None, 8, max(deadline, time.monotonic() + 3.0)
         while True:
             self.prop_new = False
             self.win.delete_property(self.PROP)
             self.d.flush()
-            if not self._pump(lambda: self.prop_new, deadline):
+            if not self._pump(lambda: self.prop_new, until):
                 return None
             chunk = self.win.get_full_property(self.PROP, self.X.AnyPropertyType)
             if chunk is None or not len(chunk.value):
                 self.win.delete_property(self.PROP)
                 self.d.flush()
-                return bytes(data)
-            data += bytes(chunk.value)
+                return (kind, fmt, data) if data is not None else None
+            kind, fmt = chunk.property_type, chunk.format
+            data = value(chunk) if data is None else data + value(chunk)
+
+    # Formats not kept: about the selection itself, or requests that do something rather than data.
+    META = {"TARGETS", "TIMESTAMP", "MULTIPLE", "SAVE_TARGETS", "DELETE", "INSERT_PROPERTY", "INSERT_SELECTION",
+            "LENGTH", "CLIENT_WINDOW", "HOST_NAME", "USER", "OWNER_OS", "FILE_NAME", "PROCESS", "TASK"}
+    # Fetched first, so a slow owner still leaves the ones pasting mostly uses.
+    FIRST = ("UTF8_STRING", "text/plain;charset=utf-8", "text/html", "x-special/gnome-copied-files",
+             "text/uri-list", "image/png", "STRING", "TEXT", "text/plain")
+    SNAPSHOT_SECONDS, SNAPSHOT_BYTES = 1.5, 64 << 20  # per snapshot: while the dictation is transcribed
+
+    def _atom_name(self, atom: int) -> str:
+        if atom not in self.names:
+            try:
+                self.names[atom] = self.d.get_atom_name(atom)
+            except Exception:
+                self.names[atom] = ""
+        return self.names[atom]
+
+    def _snapshot(self) -> dict:
+        deadline = time.monotonic() + self.SNAPSHOT_SECONDS
+        return {selection: self._formats(selection, deadline) for selection in (self.CLIPBOARD, self.PRIMARY)}
+
+    def _formats(self, selection: int, deadline: float) -> dict:
+        """What a selection offers now: every format but META and, of images, one (PNG if offered: the
+        others are conversions of the same picture). Bridged (XWayland), text only, as dictation offers."""
+        if selection in self.owned:
+            return dict(self.offer[selection])
+        if self.bridged:
+            item = self._fetch(selection, self.UTF8, min(deadline, time.monotonic() + 0.3))
+            return {self.UTF8: item} if item and item[1] == 8 and item[2] else {}
+        listed = self._fetch(selection, self.TARGETS, min(deadline, time.monotonic() + 0.3))
+        if not listed or listed[1] != 32:
+            return {}
+        targets = [a for a in dict.fromkeys(listed[2]) if a and self._atom_name(a) and self._atom_name(a) not in self.META]
+        images = [a for a in targets if self._atom_name(a).startswith("image/")]
+        image = next((a for a in images if self._atom_name(a) == "image/png"), images[0] if images else None)
+        targets = [a for a in targets if a not in images or a == image]
+        rank = {name: i for i, name in enumerate(self.FIRST)}
+        targets.sort(key=lambda a: rank.get(self._atom_name(a), len(rank)))
+        out, size = {}, 0
+        for target in targets:
+            if time.monotonic() >= deadline:
+                log.info("clipboard: %s kept in %d of %d formats (the owner was slow)", self._atom_name(selection),
+                         len(out), len(targets))
+                break
+            item = self._fetch(selection, target, deadline)
+            if item is None or not len(item[2]):
+                continue
+            size += len(item[2]) * (item[1] // 8)
+            if size > self.SNAPSHOT_BYTES:
+                break
+            out[target] = item
+        return out
+
+    def _restore(self, snap: dict) -> list:
+        done, when = [], None
+        for selection, formats in snap.items():
+            if not formats or selection not in self.owned:  # (nothing to put back, or the user copied meanwhile)
+                continue
+            when = when or self._server_time()
+            self._own(selection, formats, when)
+            done.append((self._atom_name(selection), len(formats), sum(len(d) * (f // 8) for _k, f, d in formats.values())))
+        self.d.flush()
+        return done
 
     def _restore_clipboard(self, data: bytes) -> bool:
         if self.CLIPBOARD not in self.owned:  # the user copied something meanwhile; keep it
@@ -2512,7 +2629,8 @@ class Paster(threading.Thread):
         self.jobs: queue.Queue = queue.Queue()
         self.on_inject = lambda: None  # set by the controller (our keystrokes stop the key's auto-repeat)
         self.on_done = lambda kind, text: None  # "typed" (the whole text) or "copied" (why), for the panel
-        self.saved: dict[int, bytes | None] = {}  # session id -> clipboard text from before it
+        self.saved: dict = {}  # session id -> the clipboard from before it (snapshot, or text without one)
+        self.pending: dict[int, tuple] = {}  # session id -> (done, box): a snapshot being taken
         # A combination (Ctrl+Alt+D) or a lone modifier as the key, with a keyboard that can't see
         # whether Ctrl/Alt are down (uinput, on Wayland): words wait until the key is up, or our
         # Shift+Insert would arrive as Ctrl+Alt+Shift+Insert, which no app pastes on.
@@ -2525,6 +2643,30 @@ class Paster(threading.Thread):
 
     def put(self, item: PasteItem) -> None:
         self.jobs.put(item)
+
+    def prepare(self, s: Session) -> None:
+        """Save the clipboard as the dictation ends, while it is transcribed (all its formats can take a
+        moment, e.g. an image). Live typing saves it before its first words instead."""
+        if not self.cfg.restore_clipboard or not hasattr(self.sel, "snapshot") or s.id in self.saved or s.id in self.pending:
+            return
+        done, box = threading.Event(), {}
+
+        def save():
+            try:
+                box["snap"] = self.sel.snapshot()
+            finally:
+                done.set()
+        self.pending[s.id] = (done, box)
+        threading.Thread(target=save, name="clipboard", daemon=True).start()
+
+    def _save(self, s: Session):
+        if not self.cfg.restore_clipboard:
+            return None
+        if s.id in self.pending:
+            done, box = self.pending.pop(s.id)
+            if done.wait(self.sel.SNAPSHOT_SECONDS + 3.0) and "snap" in box:
+                return box["snap"]
+        return self.sel.snapshot() if hasattr(self.sel, "snapshot") else self.sel.read_clipboard()
 
     def run(self):
         while True:
@@ -2560,7 +2702,7 @@ class Paster(threading.Thread):
                 self._give_up(s, *self.diverted.pop(s.id))
             return
         if s.id not in self.saved:
-            self.saved[s.id] = self.sel.read_clipboard() if self.cfg.restore_clipboard else None
+            self.saved[s.id] = self._save(s)
         chunks = split_chunks(item.text, self.cfg.paste_chunk_chars) if item.text else []
         if (chunks or item.delete) and not self._modifiers_up(item):
             self.diverted[s.id] = ("a modifier key stayed pressed", item.full if item.full is not None else "".join(chunks))
@@ -2616,7 +2758,12 @@ class Paster(threading.Thread):
         if not s.dropped:
             self.on_done("typed", s.shown or (s.text.typed if s.text and s.text.typed else item.text))
         old = self.saved.pop(s.id, None)
-        if old:  # nothing to restore if the clipboard was empty or held non-text (e.g. an image)
+        if isinstance(old, dict):  # X11: every format of CLIPBOARD and PRIMARY
+            if any(old.values()):
+                time.sleep(0.3)
+                for name, formats, size in self.sel.restore(old):
+                    log.info("restored the previous %s (%d bytes in %d formats)", name.lower(), size, formats)
+        elif old:  # text only (Windows, macOS): nothing to restore if it was empty or held an image
             time.sleep(0.3)
             if self.sel.restore_clipboard(old):
                 log.info("restored the previous clipboard (%d bytes)", len(old))
@@ -2646,6 +2793,7 @@ class Paster(threading.Thread):
 
     def _give_up(self, s: Session, why: str, text: str) -> None:
         self.saved.pop(s.id, None)
+        self.pending.pop(s.id, None)
         if not text.strip():
             return
         log.info("left %d chars on the clipboard: %s", len(text), why)
@@ -3424,6 +3572,9 @@ class Controller:
             self.worker.drop(s)
             return
         t_release = self.t_release if self.t_release >= self.t_press else time.monotonic()
+        prepare = getattr(getattr(self.worker, "paster", None), "prepare", None)
+        if prepare:
+            prepare(s)  # (the clipboard is saved while the dictation is transcribed)
         self.worker.end(s, audio, t_release)
 
     def _discard(self) -> None:

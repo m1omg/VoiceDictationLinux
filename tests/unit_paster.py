@@ -106,6 +106,41 @@ cfg.trigger = "KP_Delete"
 plain = d.Paster(cfg, clipboard, keyboard)
 check("a single key doesn't wait (live typing on GNOME as before)", plain.wait_for_key, False)
 
+
+class X11Clipboard(Clipboard):
+    """Like SelectionOwner on X11: a snapshot of every format, restored only where our text still is."""
+    SNAPSHOT_SECONDS = 1.5
+
+    def __init__(self):
+        super().__init__()
+        self.formats, self.snapshots, self.restored = {"image/png": b"PNG"}, 0, []
+
+    def snapshot(self):
+        self.snapshots += 1
+        return {"CLIPBOARD": dict(self.formats), "PRIMARY": {}}
+
+    def publish(self, text, immediate=False):
+        self.formats = {"UTF8_STRING": text.encode()}
+        return super().publish(text, immediate)
+
+    def restore(self, snap):
+        self.restored.append(snap)
+        self.formats = snap["CLIPBOARD"]
+        return [("CLIPBOARD", len(self.formats), 3)]
+
+
+x11 = X11Clipboard()
+xpaster = d.Paster(cfg, x11, Uinput(x11))
+xpaster.start()
+s = session(3)
+xpaster.prepare(s)  # (the controller does this as the dictation ends)
+check("X11: the clipboard is saved as the dictation ends", wait(lambda: x11.snapshots == 1), True)
+s.t_release = time.monotonic()
+xpaster.put(d.PasteItem("Ahoj.", s, final=True))
+check("... the dictation is typed through it", wait(lambda: xpaster.saved == {} and x11.restored != []), True)
+check("... saved once, not again before typing", x11.snapshots, 1)
+check("... and an image on it comes back", x11.formats, {"image/png": b"PNG"})
+
 for name, good, got, want in checks:
     print(f"{'ok  ' if good else 'FAIL'} {name}" + ("" if good else f": got {got!r}, want {want!r}"))
 sys.exit(0 if all(c[1] for c in checks) else 1)
